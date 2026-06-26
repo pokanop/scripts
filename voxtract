@@ -54,7 +54,6 @@ import fcntl
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -103,115 +102,29 @@ LOUDNESS_RANGE = float(os.environ.get("VOXTRACT_LRA", "11"))         # Loudness 
 LOUDNESS_PEAK = float(os.environ.get("VOXTRACT_PEAK", "-1.5"))       # True peak cap (dBTP)
 
 # ---------------------------------------------------------------------------
-# UI / Styling
+# UI / Styling  (backed by the shared scriptkit library)
 # ---------------------------------------------------------------------------
 
-_NO_COLOR = bool(os.environ.get("NO_COLOR"))
-_HAS_TTY = hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
+import scriptkit as sk
+from scriptkit.style import (
+    RESET as _RESET, BOLD as _BOLD, DIM as _DIM, RED as _RED, GREEN as _GREEN,
+    YELLOW as _YELLOW, BLUE as _BLUE, MAGENTA as _MAGENTA, CYAN as _CYAN,
+    WHITE as _WHITE, BG_RED as _BG_RED,
+)
 
-# ANSI codes
-_RESET  = "\033[0m"
-_BOLD   = "\033[1m"
-_DIM    = "\033[2m"
-_RED    = "\033[31m"
-_GREEN  = "\033[32m"
-_YELLOW = "\033[33m"
-_BLUE   = "\033[34m"
-_MAGENTA = "\033[35m"
-_CYAN   = "\033[36m"
-_WHITE  = "\033[37m"
-_BG_RED = "\033[41m"
+_use_color = sk.use_color
+styled = sk.styled
+icon = sk.icon
+progress_bar = sk.bar
+human_size = sk.human_size
 
-def _use_color():
-    return _HAS_TTY and not _NO_COLOR
-
-def styled(text: str, *codes: str) -> str:
-    if not _use_color():
-        return text
-    return "".join(codes) + text + _RESET
-
-def icon(name: str) -> str:
-    icons = {
-        "download":  "⬇️ ",
-        "success":   "✅",
-        "clip":      "✂️ ",
-        "music":     "🎵",
-        "mic":       "🎤",
-        "brain":     "🧠",
-        "speaker":   "🔊",
-        "folder":    "📁",
-        "clock":     "⏱️ ",
-        "wave":      "🌊",
-        "lock":      "🔒",
-        "gear":      "⚙️ ",
-        "sparkle":   "✨",
-        "rocket":    "🚀",
-        "warn":      "⚠️ ",
-        "cross":     "❌",
-        "check":     "✔",
-        "info":      "ℹ️ ",
-        "cache":     "💾",
-        "source":    "📡",
-        "extract":   "🎯",
-        "normalize": "📊",
-        "search":    "🔍",
-        "server":    "🖥️ ",
-        "link":      "🔗",
-        "package":   "📦",
-    }
-    return icons.get(name, "")
-
-def progress_bar(pct: float, width: int = 30) -> str:
-    filled = int(width * pct / 100)
-    empty = width - filled
-    bar = "█" * filled + "░" * empty
-    if _use_color():
-        color = _GREEN if pct >= 100 else _CYAN
-        return styled(f"[{bar}] {pct:.0f}%", color, _BOLD)
-    return f"[{bar}] {pct:.0f}%"
-
-def human_size(size_bytes: int) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if abs(size_bytes) < 1024:
-            return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024
-    return f"{size_bytes:.1f} TB"
-
-def print_header(text: str):
-    icon_char = ""
-    for ic in ("✂️", "⬇️", "🧠", "💾", "📡", "⚙️", "ℹ️", "🔍"):
-        if ic in text:
-            icon_char = ic
-            break
-    pad = max(0, 40 - len(text))
-    line = styled(f"  ━━━ {text} {'━' * pad}  ", _BOLD, _CYAN)
-    print(f"\n{line}")
-
-def print_step(step: int, total: int, text: str):
-    label = styled(f"[{step}/{total}]", _BOLD, _CYAN)
-    print(f"  {label} {text}")
-
-def print_success(text: str):
-    print(styled(f"  {icon('success')} {text}", _BOLD, _GREEN))
-
-def print_error(text: str):
-    print(styled(f"  {icon('cross')} {text}", _BOLD, _RED), file=sys.stderr)
-
-def print_info(text: str):
-    print(styled(f"  {icon('info')} {text}", _DIM, _CYAN))
-
-def print_warning(text: str):
-    print(styled(f"  {icon('warn')} {text}", _YELLOW))
-
-def print_elapsed(label: str, seconds: float):
-    if seconds < 1:
-        t = f"{seconds*1000:.0f}ms"
-    elif seconds < 60:
-        t = f"{seconds:.1f}s"
-    else:
-        m, s = divmod(seconds, 60)
-        t = f"{int(m)}m {s:.0f}s"
-    print(styled(f"    {icon('clock')} {label}: {t}", _DIM))
+print_header = sk.header
+print_step = sk.step
+print_success = sk.success
+print_error = sk.error
+print_info = sk.info
+print_warning = sk.warning
+print_elapsed = sk.elapsed
 
 # ---------------------------------------------------------------------------
 # File Locking for Parallel Safety

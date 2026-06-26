@@ -117,6 +117,8 @@ If a host still doesn't appear, it may be offline, on another VLAN/subnet, or bl
 
 ## Related tools
 
+Built on **[scriptkit](scriptkit.md)** — the shared CLI library (color, messages, progress, tables, config, subprocess). Building or editing a tool? See **[AGENTS.md](../AGENTS.md)**.
+
 Part of the [scripts](../README.md) toolkit — [keyferry](keyferry.md) · [medcat](medcat.md) · [voxtract](voxtract.md) · [pluck](pluck.md) · [aikit](aikit.md)
 
 ---

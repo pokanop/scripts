@@ -134,6 +134,8 @@ Model downloads automatically on first `--isolate` use (~300MB), then cached.
 
 ## Related tools
 
+Built on **[scriptkit](scriptkit.md)** — the shared CLI library (color, messages, progress, tables, config, subprocess). Building or editing a tool? See **[AGENTS.md](../AGENTS.md)**.
+
 Part of the [scripts](../README.md) toolkit — [keyferry](keyferry.md) · [medcat](medcat.md) · [netsy](netsy.md) · [pluck](pluck.md) · [aikit](aikit.md)
 
 ---

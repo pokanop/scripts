@@ -24,7 +24,17 @@ voxtract = ["yt-dlp", "demucs", "spotipy", "spotdl"]
 all = [
     "pokanop-scripts[medcat,keyferry,aikit,pluck,netsy,voxtract]",
 ]
+dev = ["pytest>=7"]
+
+[tool.setuptools]
+py-modules = []
+packages = ["scriptkit"]
 
 [project.urls]
 Homepage = "https://github.com/pokanop/scripts"
 Repository = "https://github.com/pokanop/scripts"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]

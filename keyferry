@@ -54,7 +54,6 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
-from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, MofNCompleteColumn, TimeElapsedColumn
 from rich.table import Table
@@ -62,7 +61,14 @@ from rich.text import Text
 
 __version__ = "1.0.0"
 
-console = Console()
+import scriptkit as sk
+from scriptkit.style import (
+    RESET as _RESET, BOLD as _BOLD, DIM as _DIM, GREEN as _GREEN,
+    CYAN as _CYAN, WHITE as _WHITE, BG_BLUE as _BG_BLUE,
+)
+
+# Share the toolkit's console for consistent styling across tools.
+console = sk.rich_console
 
 # =============================================================================
 # Configuration — three-tier loading: defaults → ~/.keyferry/config.json → env
@@ -132,48 +138,27 @@ BW_FIELD_MAX = 10000   # Bitwarden refuses any encrypted field value beyond this
 EMOJI = "🛳️"
 
 
-def _use_color():
-    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+_use_color = sk.use_color
 
 
 def print_panel(title, content, style="bold cyan"):
     console.print(Panel(content, title=title, border_style=style))
 
 
-def print_success(text):
-    console.print(f"  ✅ {text}", style="bold green")
-
-
-def print_error(text):
-    console.print(f"  ❌ {text}", style="bold red")
-
-
-def print_warning(text):
-    console.print(f"  ⚠️  {text}", style="bold yellow")
-
-
-def print_info(text):
-    console.print(f"  ℹ️  {text}", style="dim")
-
-
-def print_step(step, total, text):
-    console.print(f"  [{step}/{total}] {text}", style="bold cyan")
+print_success = sk.success
+print_error = sk.error
+print_warning = sk.warning
+print_info = sk.info
+print_step = sk.step
 
 
 def banner():
     return f"{EMOJI} [bold cyan]keyferry[/bold cyan] [dim]v{__version__}[/dim] — 1Password ⇄ Bitwarden ferry"
 
 
-# ANSI codes for the raw-mode interactive picker (Rich interferes with raw input)
-_RESET, _BOLD, _DIM = "\033[0m", "\033[1m", "\033[2m"
-_GREEN, _CYAN, _WHITE = "\033[32m", "\033[36m", "\033[37m"
-_BG_BLUE = "\033[44m"
-
-
-def _ansi(text, *codes):
-    if not _use_color():
-        return re.sub(r"\033\[[0-9;]*m", "", text)
-    return "".join(codes) + text + _RESET
+# ANSI styling for the raw-mode interactive picker (Rich interferes with raw
+# input). Constants come from scriptkit.style; _ansi mirrors sk.styled.
+_ansi = sk.styled
 
 
 def _read_key():
@@ -217,14 +202,7 @@ def _prompt_yes_no(text_str, default=True):
 # Config — load / save / nested get-set (three-tier)
 # =============================================================================
 
-def _deep_merge(base, over):
-    out = dict(base)
-    for k, v in over.items():
-        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
-            out[k] = _deep_merge(out[k], v)
-        else:
-            out[k] = v
-    return out
+_deep_merge = sk.deep_merge
 
 
 def load_config():

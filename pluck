@@ -40,7 +40,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import tomli_w
-from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
@@ -53,8 +52,12 @@ except ImportError:
 __version__ = "1.0.0"
 
 EMOJI = "🪶"
-console = Console()
-err_console = Console(stderr=True)
+
+import scriptkit as sk
+
+# Share the toolkit's consoles so styling stays consistent across tools.
+console = sk.rich_console
+err_console = sk.err_console
 
 FORMAT_EXTENSIONS: dict[str, str] = {
     ".yaml": "yaml",
@@ -83,20 +86,10 @@ def banner() -> str:
     )
 
 
-def print_success(text: str) -> None:
-    console.print(f"  ✅ {text}", style="bold green")
-
-
-def print_error(text: str) -> None:
-    err_console.print(f"  ❌ {text}", style="bold red")
-
-
-def print_info(text: str) -> None:
-    console.print(f"  ℹ️  {text}", style="dim")
-
-
-def print_warning(text: str) -> None:
-    console.print(f"  ⚠️  {text}", style="bold yellow")
+print_success = sk.success
+print_error = sk.error
+print_info = sk.info
+print_warning = sk.warning
 
 
 def detect_format(path: Path, override: Optional[str] = None) -> ConfigFormat:

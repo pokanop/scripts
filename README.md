@@ -159,23 +159,48 @@ Install, update, authenticate, and manage 16 AI coding agent CLIs from one tool 
 
 ---
 
+## Shared library: [scriptkit](docs/scriptkit.md)
+
+Every tool is built on **[`scriptkit`](docs/scriptkit.md)** — one tested home for
+color, icons, semantic messages, prompts, progress bars, tables, three-tier config,
+subprocess handling, and CLI dispatch. Change the house style once; every tool
+updates. It degrades gracefully without `rich`, so it's safe even in the installer.
+
+```python
+import scriptkit as sk
+sk.success("done"); sk.error("nope")          # ✅ stdout / ❌ stderr
+for x in sk.track(items, "Working"): ...       # spinner + bar + M/N + elapsed
+cfg = sk.Config(path, defaults={...}, env_prefix="MYTOOL").load()
+sys.exit(sk.run_cli(main))                      # CliError → 1, Ctrl-C → 130
+```
+
+---
+
 ## Conventions
 
 | Principle | What it means |
 |-----------|---------------|
 | **Self-contained** | One script, one job — no framework sprawl |
+| **Shared scaffolding** | UX/structure comes from [`scriptkit`](docs/scriptkit.md), not copy-paste |
 | **No hidden deps** | Everything beyond the runtime is listed above |
 | **Clean repo** | Config and cache live in `~/.<tool>/`, never in the repo |
+| **Tested** | `venv/bin/python -m pytest` — unit + characterization + template smoke |
 
 ---
 
 ## Adding a new tool
 
-1. Keep it to one file unless it genuinely needs a package.
-2. Add `--help` and a short docstring.
-3. If it has non-standard deps, list them in the toolkit section.
+1. `cp templates/tool_template.py mytool` — a working CLI on `scriptkit`.
+2. Rename `toolname`/`TOOLNAME`, add your subcommands, keep `--help`.
+3. Register it in the `scripts` installer (`TOOLS` + `TOOL_NAMES`) and add
+   `requirements/mytool.txt`.
 4. Add a card above and link to `docs/<tool>.md`.
-5. If it's substantial, make it a subdirectory with its own `SKILL.md`.
+5. Reuse `scriptkit` for all output/config/subprocess — don't re-roll helpers.
+
+> **Contributing or using an AI agent?** Read **[AGENTS.md](AGENTS.md)** — the full
+> guide to the runtime model, `scriptkit`, conventions, testing, and step-by-step
+> recipes for building a new tool or editing an existing one. (`CLAUDE.md` is a
+> symlink to it.)
 
 ---
 

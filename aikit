@@ -25,7 +25,6 @@ import argparse
 import json
 import os
 import platform
-import re
 import shlex
 import shutil
 import signal
@@ -45,7 +44,6 @@ except ImportError:
 
 import requests
 from rich import print as rprint
-from rich.console import Console
 from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -55,7 +53,17 @@ from rich.text import Text
 
 __version__ = "1.3.1"
 
-console = Console()
+import scriptkit as sk
+from scriptkit.style import (
+    RESET as _RESET, BOLD as _BOLD, DIM as _DIM, RED as _RED, GREEN as _GREEN,
+    YELLOW as _YELLOW, BLUE as _BLUE, CYAN as _CYAN, WHITE as _WHITE,
+    BG_BLUE as _BG_BLUE,
+)
+
+_BG_DEFAULT = "\033[49m"
+
+# Share the toolkit's console for consistent styling across tools.
+console = sk.rich_console
 
 # =============================================================================
 # Configuration — zero hardcoded secrets, three-tier loading
@@ -410,59 +418,17 @@ AGENTS = {
 # Config helpers
 # =============================================================================
 
-def _deep_merge(base, override):
-    result = dict(base)
-    for k, v in override.items():
-        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
-            result[k] = _deep_merge(result[k], v)
-        else:
-            result[k] = v
-    return result
+_deep_merge = sk.deep_merge
+_config_get_nested = sk.get_nested
 
 
 def _config_set_nested(config, key_path, value):
-    parts = key_path.split(".")
-    node = config
-    for part in parts[:-1]:
-        if part not in node or not isinstance(node[part], dict):
-            node[part] = {}
-        node = node[part]
-    if isinstance(value, str):
-        if value.lower() in ("true", "yes"):
-            value = True
-        elif value.lower() in ("false", "no"):
-            value = False
-        elif value.lower() in ("null", "none"):
-            value = None
-        else:
-            try:
-                value = int(value)
-            except ValueError:
-                try:
-                    value = float(value)
-                except ValueError:
-                    pass
-    node[parts[-1]] = value
-
-
-def _config_get_nested(config, key_path):
-    node = config
-    for part in key_path.split("."):
-        if not isinstance(node, dict):
-            return None
-        node = node.get(part)
-    return node
+    # Coerce scalar strings (true/false/null/int/float) to their natural types.
+    sk.set_nested(config, key_path, value, coerce=True)
 
 
 def _config_from_env():
-    overrides = {}
-    prefix = "AIKIT_"
-    for key, val in os.environ.items():
-        if not key.startswith(prefix):
-            continue
-        path = key[len(prefix):].lower().replace("__", ".")
-        _config_set_nested(overrides, path, val)
-    return overrides
+    return sk.config_from_env("AIKIT", coerce=True)
 
 
 def load_config():
@@ -550,34 +516,18 @@ def check_prerequisites(agent_key):
 # Rich UI helpers
 # =============================================================================
 
-_NO_COLOR = bool(os.environ.get("NO_COLOR"))
-
-def _use_color():
-    return sys.stdout.isatty() and not _NO_COLOR
+_use_color = sk.use_color
 
 
 def print_panel(title, content, style="bold cyan"):
     console.print(Panel(content, title=title, border_style=style))
 
 
-def print_success(text):
-    console.print(f"  ✅ {text}", style="bold green")
-
-
-def print_error(text):
-    console.print(f"  ❌ {text}", style="bold red")
-
-
-def print_warning(text):
-    console.print(f"  ⚠️  {text}", style="bold yellow")
-
-
-def print_info(text):
-    console.print(f"  ℹ️  {text}", style="dim")
-
-
-def print_step(step, total, text):
-    console.print(f"  [{step}/{total}] {text}", style="bold cyan")
+print_success = sk.success
+print_error = sk.error
+print_warning = sk.warning
+print_info = sk.info
+print_step = sk.step
 
 
 def print_agent_icon(agent_key):
@@ -665,24 +615,9 @@ def _read_key():
 # ANSI rendering helpers (bypass Rich for raw terminal mode compatibility)
 # =============================================================================
 
-_RESET = "\033[0m"
-_BOLD = "\033[1m"
-_DIM = "\033[2m"
-_RED = "\033[31m"
-_GREEN = "\033[32m"
-_YELLOW = "\033[33m"
-_BLUE = "\033[34m"
-_CYAN = "\033[36m"
-_WHITE = "\033[37m"
-_BG_BLUE = "\033[44m"
-_BG_DEFAULT = "\033[49m"
-
-def _ansi(text, *codes):
-    """Wrap text in ANSI codes, stripping them if NO_COLOR or not a TTY."""
-    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
-        # Strip any existing ANSI codes too
-        return re.sub(r'\033\[[0-9;]*m', '', text)
-    return "".join(codes) + text + _RESET
+# ANSI color constants are imported from scriptkit.style near the top of the
+# file; _ansi mirrors sk.styled (wrap, or strip when color is off).
+_ansi = sk.styled
 
 
 # =============================================================================

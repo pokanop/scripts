@@ -37,14 +37,16 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+import scriptkit as sk
+
 __version__ = "1.2.0"
 
-console = Console()
-err_console = Console(stderr=True)
+# Share the toolkit's consoles for consistent styling across tools.
+console = sk.rich_console
+err_console = sk.err_console
 
 _IP_PROBE_TARGETS = ("8.8.8.8", "1.1.1.1", "208.67.222.222")
 

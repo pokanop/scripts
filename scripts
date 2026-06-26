@@ -31,6 +31,15 @@ from typing import Optional
 
 __version__ = "1.0.0"
 
+# scriptkit is the shared toolkit library (lives alongside this file). It is
+# import-safe without third-party deps, but this installer must survive even a
+# broken/absent library — so the import is guarded and everything degrades to
+# plain stdlib behavior when it is unavailable.
+try:
+    import scriptkit as _sk
+except Exception:  # pragma: no cover - bootstrap safety net
+    _sk = None
+
 REPO_URL = "https://github.com/pokanop/scripts.git"
 MARKER_NAME = ".scripts-install.json"
 PATH_BEGIN = "# >>> scripts >>>"
@@ -618,6 +627,8 @@ def cmd_path(args: argparse.Namespace) -> None:
 
 
 def confirm(prompt: str) -> bool:
+    if _sk is not None:
+        return _sk.confirm(prompt, default=False)
     try:
         answer = input(f"{prompt} [y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -760,4 +771,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    if _sk is not None:
+        sys.exit(_sk.run_cli(main))
     main()

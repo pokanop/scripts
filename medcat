@@ -96,7 +96,6 @@ from urllib.parse import urlencode, urlparse, urlunparse
 
 import requests
 from rich import print as rprint
-from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
@@ -105,7 +104,10 @@ from rich.tree import Tree
 
 __version__ = "2.1.0"
 
-console = Console()
+import scriptkit as sk
+
+# Share the toolkit's console for consistent styling across tools.
+console = sk.rich_console
 
 # ---------------------------------------------------------------------------
 # Configuration — generic, zero secrets, zero hardcoded hosts
@@ -199,52 +201,13 @@ DEFAULT_CONFIG = {
 }
 
 
-def _deep_merge(base, override):
-    """Recursively merge override into base dict."""
-    result = dict(base)
-    for k, v in override.items():
-        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
-            result[k] = _deep_merge(result[k], v)
-        else:
-            result[k] = v
-    return result
-
-
-def _config_get_nested(config: dict, key_path: str):
-    """Get nested config value by dot-separated path. Returns None if missing."""
-    node = config
-    for part in key_path.split("."):
-        if not isinstance(node, dict):
-            return None
-        node = node.get(part)
-    return node
+_deep_merge = sk.deep_merge
+_config_get_nested = sk.get_nested
 
 
 def _config_set_nested(config: dict, key_path: str, value):
-    """Set a nested config value by dot-separated path. Creates intermediates."""
-    parts = key_path.split(".")
-    node = config
-    for part in parts[:-1]:
-        if part not in node or not isinstance(node[part], dict):
-            node[part] = {}
-        node = node[part]
-    # Attempt type coercion for common types
-    if isinstance(value, str):
-        if value.lower() in ("true", "yes"):
-            value = True
-        elif value.lower() in ("false", "no"):
-            value = False
-        elif value == "null" or value == "none":
-            value = None
-        else:
-            try:
-                value = int(value)
-            except ValueError:
-                try:
-                    value = float(value)
-                except ValueError:
-                    pass
-    node[parts[-1]] = value
+    """Set a nested config value by dot-path, coercing scalar strings."""
+    sk.set_nested(config, key_path, value, coerce=True)
 
 
 def _config_unset_nested(config: dict, key_path: str):
@@ -262,15 +225,8 @@ def _config_unset_nested(config: dict, key_path: str):
 
 
 def _config_from_env():
-    """Load overrides from MEDCAT_ env vars. E.g. MEDCAT_SERVICES_KAVITA_API_KEY."""
-    overrides = {}
-    prefix = "MEDCAT_"
-    for key, val in os.environ.items():
-        if not key.startswith(prefix):
-            continue
-        path = key[len(prefix):].lower().replace("__", ".")
-        _config_set_nested(overrides, path, val)
-    return overrides
+    """Load overrides from MEDCAT_ env vars (e.g. MEDCAT_SERVICES__KAVITA__URL)."""
+    return sk.config_from_env("MEDCAT", coerce=True)
 
 
 def _needs_setup():
