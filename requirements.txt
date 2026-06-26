@@ -1,0 +1,11 @@
+# Full install (all tools):
+#   pip install -r requirements.txt
+#
+# Per-tool install:
+#   pip install -r requirements/medcat.txt
+#   pip install -r requirements/pluck.txt
+#
+# Or use the installer:
+#   curl -fsSL https://raw.githubusercontent.com/pokanop/scripts/main/install.sh | bash
+#
+-r requirements/all.txt

@@ -1,0 +1,6 @@
+-r medcat.txt
+-r keyferry.txt
+-r aikit.txt
+-r pluck.txt
+-r netsy.txt
+-r voxtract.txt

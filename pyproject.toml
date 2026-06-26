@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pokanop-scripts"
+version = "1.0.0"
+description = "Daily-use CLI utilities — medcat, keyferry, voxtract, netsy, pluck, aikit"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+dependencies = [
+    "rich",
+    "requests",
+]
+
+[project.optional-dependencies]
+medcat = ["ebooklib", "musicbrainzngs", "pymupdf", "yt-dlp"]
+keyferry = ["readchar"]
+aikit = ["flask", "readchar"]
+pluck = ["ruamel.yaml", "tomli-w"]
+netsy = []
+voxtract = ["yt-dlp", "demucs", "spotipy", "spotdl"]
+all = [
+    "pokanop-scripts[medcat,keyferry,aikit,pluck,netsy,voxtract]",
+]
+
+[project.urls]
+Homepage = "https://github.com/pokanop/scripts"
+Repository = "https://github.com/pokanop/scripts"

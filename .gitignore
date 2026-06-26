@@ -6,6 +6,3 @@ dist/
 build/
 venv/
 .scripts-install.json
-
-# Voxtract cache (local data, not code)
-_unsorted
