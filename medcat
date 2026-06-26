@@ -1,0 +1,4031 @@
+#!/usr/bin/env python3
+"""
+medcat — Media Stack Ingest Tool  v2.1.0
+Ingest media files into your media stack with metadata enrichment.
+
+Supported types: books (EPUB/PDF), comics (CBZ/CBR), audiobooks (M4B/MP3),
+movies (MKV/MP4), shows (MKV/MP4), music (FLAC/MP3), documentaries (MKV/MP4).
+
+Architecture:
+    Handler adapters (BookHandler, ComicHandler, MovieHandler, etc.)
+    → extract internal metadata (EPUB OPF, PDF XMP, ComicInfo.xml, ffprobe)
+    → enrich via free APIs (Google Books, Open Library, MusicBrainz, filename heuristics)
+    → organize into destination directory structure
+    → optionally trigger service scan (Kavita, Readarr, Radarr, Sonarr, Lidarr)
+
+Direct URL grab:
+    Auto-routes any URL to the correct handler:
+    → YouTube/YouTube Music → yt-dlp (video or audio extraction)
+    → Magnet links → torrent client (Deluge/qBittorrent)
+    → Archive.org → Internet Archive download
+    → Torrent files (.torrent) → torrent client
+    → HTTP/HTTPS direct files → content-type detection + download
+
+Configuration:
+    Zero hardcoded secrets or hosts. All config lives in ~/.medcat/config.json.
+    Environment variables (MEDCAT_*) override file config.
+    Run 'medcat setup' for interactive first-launch configuration.
+
+Dependencies:
+    pip install rich ebooklib pymupdf musicbrainzngs requests
+
+Usage:
+    # First-time interactive setup
+    medcat setup
+    medcat setup --section services
+
+    # Identify (just show what would happen, don't move)
+    medcat identify book.epub
+    medcat identify ~/Downloads/*.epub
+
+    # Ingest to default destination based on file type
+    medcat ingest book.epub
+    medcat ingest --dest books ~/Downloads/
+
+    # Dry run — show what would happen without doing it
+    medcat ingest --dest comics ./comics/ --dry-run
+
+    # Auto-scan after ingest
+    medcat ingest book.epub --scan
+
+    # Grab any URL — auto-detects source, downloads, optionally ingests
+    medcat grab https://youtube.com/watch?v=dQw4w9WgXcQ
+    medcat grab https://youtube.com/watch?v=dQw4w9WgXcQ --audio
+    medcat grab magnet:?xt=urn:btih:... --type movies
+    medcat grab https://archive.org/details/example --type books
+    medcat grab https://example.com/file.epub
+    medcat grab URL --dest music --scan
+
+    # Search for media
+    medcat search "Dune"
+    medcat search "Foundation" --type books
+    medcat search https://youtube.com/watch?v=...   # auto-grabs URLs
+
+    # Manage config
+    medcat config get services.kavita.url
+    medcat config set services.radarr.api_key YOUR_KEY
+    medcat config list destinations
+    medcat config --check
+    medcat config test
+
+    # Trigger a service scan
+    medcat scan --service kavita --library-id 1
+    medcat scan --service readarr
+"""
+
+import argparse
+import fnmatch
+import hashlib
+import json
+import mimetypes
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+import xml.etree.ElementTree as ET
+from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Optional, Callable
+from urllib.parse import urlencode, urlparse, urlunparse
+
+import requests
+from rich import print as rprint
+from rich.console import Console
+from rich.markup import escape
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from rich.table import Table
+from rich.tree import Tree
+
+__version__ = "2.1.0"
+
+console = Console()
+
+# ---------------------------------------------------------------------------
+# Configuration — generic, zero secrets, zero hardcoded hosts
+# ---------------------------------------------------------------------------
+
+CONFIG_DIR = Path(os.environ.get("MEDCAT_CONFIG", Path.home() / ".medcat"))
+CONFIG_FILE = CONFIG_DIR / "config.json"
+SETUP_MARKER = CONFIG_DIR / ".setup-done"
+
+# Known service types (used by setup wizard and connection tests)
+KNOWN_SERVICES = {
+    "kavita":   {"label": "Kavita",   "api_version": None,    "needs_library_id": True},
+    "readarr":  {"label": "Readarr",  "api_version": "v1",    "needs_library_id": False},
+    "radarr":   {"label": "Radarr",   "api_version": "v3",    "needs_library_id": False},
+    "sonarr":   {"label": "Sonarr",   "api_version": "v3",    "needs_library_id": False},
+    "lidarr":   {"label": "Lidarr",   "api_version": "v1",    "needs_library_id": False},
+    "abs":      {"label": "Audiobookshelf", "api_version": None, "needs_library_id": False},
+    "prowlarr": {"label": "Prowlarr", "api_version": "v1",    "needs_library_id": False},
+    "deluge":   {"label": "Deluge",   "api_version": None,    "needs_library_id": False},
+    "qbittorrent": {"label": "qBittorrent", "api_version": None, "needs_library_id": False},
+}
+
+# Prowlarr category IDs (Newznab standard) for filtering search results
+PROWLARR_CATEGORIES = {
+    "books":        [7000, 7020],     # Books → eBooks
+    "audiobooks":   [3030],           # Audio → Audiobooks
+    "comics":       [7030],           # Books → Comics
+    "manga":        [7030],           # Books → Comics
+    "movies":       [2000, 2040, 2050, 2060, 2070, 2080],  # Movies
+    "shows":        [5000, 5030, 5040, 5060, 5070, 5080],  # TV
+    "music":        [3000, 3010, 3040, 3050],  # Audio
+    "documentaries":[ 5000],          # TV (broad)
+}
+
+DEFAULT_CONFIG = {
+    "version": 2,
+    "transport": {
+        "method": "auto",       # auto | local | scp
+        "host": "",             # remote host for SCP
+        "user": "root",         # remote user for SCP
+        "ssh_key": "",          # path to SSH private key (empty = auto-detect)
+        "ssh_timeout": 5,       # SSH connection timeout in seconds
+    },
+    "destinations": {
+        "books": {
+            "path": "",         # e.g. /media/books/books — user sets via setup
+            "structure": "{Author}/{Title}",
+            "rename": "{Title} - {Author}.{ext}",
+            "scan": "",
+            "scan_library_id": None,
+        },
+        "audiobooks": {
+            "path": "",
+            "structure": "{Author}/{Title}",
+            "rename": "{Title} - {Author}.{ext}",
+            "scan": "",
+        },
+        "comics": {
+            "path": "",
+            "structure": "{Series}",
+            "rename": "{Series} #{Issue:03d} - {Title}.{ext}",
+            "scan": "",
+            "scan_library_id": None,
+        },
+        "movies": {
+            "path": "",
+            "structure": "{Title} ({Year})",
+            "rename": "{Title} ({Year}).{ext}",
+            "scan": "",
+        },
+        "shows": {
+            "path": "",
+            "structure": "{Show}/Season {Season:02d}",
+            "rename": "{Show} - S{Season:02d}E{Episode:02d} - {Title}.{ext}",
+            "scan": "",
+        },
+        "music": {
+            "path": "",
+            "structure": "{Artist}/{Album}",
+            "rename": "{Track:02d} - {Title}.{ext}",
+            "scan": "",
+        },
+        "documentaries": {
+            "path": "",
+            "structure": "{Title} ({Year})",
+            "rename": "{Title} ({Year}).{ext}",
+            "scan": "",
+        },
+    },
+    "services": {},  # Populated by user — e.g. {"kavita": {"url": "...", "api_key": "..."}}
+}
+
+
+def _deep_merge(base, override):
+    """Recursively merge override into base dict."""
+    result = dict(base)
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
+def _config_get_nested(config: dict, key_path: str):
+    """Get nested config value by dot-separated path. Returns None if missing."""
+    node = config
+    for part in key_path.split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
+
+
+def _config_set_nested(config: dict, key_path: str, value):
+    """Set a nested config value by dot-separated path. Creates intermediates."""
+    parts = key_path.split(".")
+    node = config
+    for part in parts[:-1]:
+        if part not in node or not isinstance(node[part], dict):
+            node[part] = {}
+        node = node[part]
+    # Attempt type coercion for common types
+    if isinstance(value, str):
+        if value.lower() in ("true", "yes"):
+            value = True
+        elif value.lower() in ("false", "no"):
+            value = False
+        elif value == "null" or value == "none":
+            value = None
+        else:
+            try:
+                value = int(value)
+            except ValueError:
+                try:
+                    value = float(value)
+                except ValueError:
+                    pass
+    node[parts[-1]] = value
+
+
+def _config_unset_nested(config: dict, key_path: str):
+    """Delete a nested config key. Returns True if key existed."""
+    parts = key_path.split(".")
+    node = config
+    for part in parts[:-1]:
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    if isinstance(node, dict) and parts[-1] in node:
+        del node[parts[-1]]
+        return True
+    return False
+
+
+def _config_from_env():
+    """Load overrides from MEDCAT_ env vars. E.g. MEDCAT_SERVICES_KAVITA_API_KEY."""
+    overrides = {}
+    prefix = "MEDCAT_"
+    for key, val in os.environ.items():
+        if not key.startswith(prefix):
+            continue
+        path = key[len(prefix):].lower().replace("__", ".")
+        _config_set_nested(overrides, path, val)
+    return overrides
+
+
+def _needs_setup():
+    """Return True if the tool hasn't been through initial setup."""
+    return not SETUP_MARKER.exists()
+
+
+def load_config():
+    """Load config with defaults, file, and env overrides."""
+    config = dict(DEFAULT_CONFIG)
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE) as f:
+                saved = json.load(f)
+            config = _deep_merge(config, saved)
+        except (json.JSONDecodeError, OSError):
+            pass
+    # Apply environment variable overrides last (highest priority)
+    env_overrides = _config_from_env()
+    if env_overrides:
+        config = _deep_merge(config, env_overrides)
+    return config
+
+
+def save_config(config):
+    """Persist config to disk (strips version for clean diff)."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+
+
+def get_transport_config(config: dict) -> dict:
+    """Get transport config with resolved SSH key path."""
+    tc = config.get("transport", {})
+    ssh_key = tc.get("ssh_key", "")
+    if not ssh_key:
+        # Auto-detect: check common SSH key locations
+        for candidate in (
+            os.path.expanduser("~/.ssh/id_ed25519"),
+            os.path.expanduser("~/.ssh/id_rsa"),
+            os.path.expanduser("~/.ssh/id_ecdsa"),
+        ):
+            if os.path.exists(candidate):
+                ssh_key = candidate
+                break
+    return {
+        "method": tc.get("method", "auto"),
+        "host": tc.get("host", ""),
+        "user": tc.get("user", "root"),
+        "ssh_key": ssh_key,
+        "ssh_timeout": tc.get("ssh_timeout", 5),
+    }
+
+
+def validate_config(config: dict) -> list:
+    """Validate config completeness. Returns list of issue dicts."""
+    issues = []
+    tc = get_transport_config(config)
+    dests = config.get("destinations", {})
+
+    # Check destinations
+    configured_dests = 0
+    for name, dest in dests.items():
+        path = dest.get("path", "")
+        if not path:
+            issues.append({
+                "severity": "info",
+                "section": f"destinations.{name}",
+                "message": f"No path configured for '{name}'. Run: medcat setup",
+            })
+        else:
+            configured_dests += 1
+            scan_svc = dest.get("scan", "")
+            if scan_svc and scan_svc not in config.get("services", {}):
+                issues.append({
+                    "severity": "warn",
+                    "section": f"destinations.{name}.scan",
+                    "message": f"Scan service '{scan_svc}' is not configured in services.",
+                })
+
+    if configured_dests == 0:
+        issues.append({
+            "severity": "critical",
+            "section": "destinations",
+            "message": "No destinations configured. Run: medcat setup",
+        })
+
+    # Check services
+    for svc_name, svc in config.get("services", {}).items():
+        if not svc.get("url"):
+            issues.append({
+                "severity": "warn",
+                "section": f"services.{svc_name}.url",
+                "message": f"Service '{svc_name}' has no URL configured.",
+            })
+        if not svc.get("api_key"):
+            issues.append({
+                "severity": "warn",
+                "section": f"services.{svc_name}.api_key",
+                "message": f"Service '{svc_name}' has no API key set.",
+            })
+
+    # Check transport
+    if tc["method"] == "scp" and not tc["host"]:
+        issues.append({
+            "severity": "critical",
+            "section": "transport.host",
+            "message": "SCP transport selected but no host configured.",
+        })
+
+    return issues
+
+
+def test_service_connection(svc_name: str, config: dict) -> dict:
+    """Test connectivity to a configured service. Returns result dict."""
+    svc = config.get("services", {}).get(svc_name, {})
+    url = svc.get("url", "").rstrip("/")
+    api_key = svc.get("api_key", "")
+
+    if not url:
+        return {"ok": False, "error": "No URL configured"}
+
+    try:
+        headers = {}
+        if api_key:
+            if svc_name == "abs":
+                # Audiobookshelf uses Bearer token, not X-Api-Key
+                headers["Authorization"] = f"Bearer {api_key}"
+            else:
+                headers["X-Api-Key"] = api_key
+                headers["X-API-Key"] = api_key  # Kavita uses this form
+
+        # Try a lightweight status/ping endpoint
+        test_paths = {
+            "kavita": "/api/server/version",
+            "radarr": "/api/v3/system/status",
+            "sonarr": "/api/v3/system/status",
+            "readarr": "/api/v1/system/status",
+            "lidarr": "/api/v1/system/status",
+            "abs": "/ping",  # Audiobookshelf unauthenticated health check
+            "prowlarr": "/api/v1/system/status",
+            "deluge": "/json",  # Deluge Web UI JSON-RPC endpoint
+            "qbittorrent": "/api/v2/auth/login",  # qBittorrent API
+        }
+        test_path = test_paths.get(svc_name, "/api/status")
+        resp = requests.get(f"{url}{test_path}", headers=headers, timeout=10)
+
+        if resp.status_code == 401:
+            return {"ok": False, "error": f"Authentication failed (HTTP {resp.status_code}). Check API key."}
+        if resp.status_code == 404:
+            # Service might be running but different endpoint — still counts as reachable
+            return {"ok": True, "warning": f"Reached {url} but status endpoint returned 404"}
+        if resp.status_code >= 500:
+            return {"ok": False, "error": f"Server error (HTTP {resp.status_code})"}
+
+        # For ABS, /ping is unauthenticated — do a second check to validate the API key
+        if svc_name == "abs" and api_key:
+            auth_resp = requests.get(f"{url}/api/libraries", headers=headers, timeout=10)
+            if auth_resp.status_code == 401:
+                return {"ok": False, "error": "Server reachable but API key rejected (HTTP 401)"}
+            if auth_resp.status_code >= 400:
+                return {"ok": True, "warning": f"Server up, but API check returned HTTP {auth_resp.status_code}"}
+
+        return {"ok": True, "status": resp.status_code}
+    except requests.ConnectionError:
+        return {"ok": False, "error": f"Cannot connect to {url}"}
+    except requests.Timeout:
+        return {"ok": False, "error": f"Connection to {url} timed out"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Interactive setup wizard
+# ---------------------------------------------------------------------------
+
+
+def _prompt(prompt_text: str, default: str = "", style: str = "bold cyan") -> str:
+    """Prompt user for input with optional default.
+
+    Uses rich.text.Text to avoid Rich markup parsing crashes when
+    default values contain square brackets (e.g. /media/books/books).
+    """
+    from rich.text import Text
+    prompt = Text()
+    prompt.append(f"  {prompt_text}", style=style)
+    if default:
+        prompt.append(f" [{default}]", style="dim")
+    prompt.append(": ", style=style)
+    prompt.append(" ")
+    try:
+        val = console.input(prompt).strip()
+    except EOFError:
+        return default
+    # KeyboardInterrupt is deliberately NOT caught — it propagates to the
+    # wizard so Ctrl-C exits the entire setup, not just one prompt.
+    return val or default
+
+
+def _prompt_choice(prompt_text: str, choices: list, default: str = "") -> str:
+    """Prompt user to pick from a list of choices."""
+    from rich.text import Text
+    choice_str = "/".join(choices)
+    prompt = Text()
+    prompt.append(f"  {prompt_text} ", style="bold cyan")
+    prompt.append(f"({choice_str})", style="dim")
+    if default:
+        prompt.append(f" [{default}]", style="dim")
+    prompt.append(": ", style="bold cyan")
+    prompt.append(" ")
+    while True:
+        try:
+            val = console.input(prompt).strip().lower()
+        except EOFError:
+            return default
+        # KeyboardInterrupt propagates — see _prompt
+        if not val and default:
+            return default
+        if val in [c.lower() for c in choices]:
+            return val
+        console.print(f"    [yellow]Please choose one of: {choice_str}[/]")
+
+
+def _prompt_yes_no(prompt_text: str, default: bool = True) -> bool:
+    """Prompt for yes/no."""
+    from rich.text import Text
+    suffix = "Y/n" if default else "y/N"
+    prompt = Text()
+    prompt.append(f"  {prompt_text} ", style="bold cyan")
+    prompt.append(f"({suffix})", style="dim")
+    prompt.append(": ", style="bold cyan")
+    prompt.append(" ")
+    try:
+        val = console.input(prompt).strip().lower()
+    except EOFError:
+        return default
+    # KeyboardInterrupt propagates — see _prompt
+    if not val:
+        return default
+    return val in ("y", "yes")
+
+
+def run_setup_wizard(section: str = None):
+    """Run the interactive setup wizard. If section given, only configure that part."""
+    config = load_config()
+
+    console.print()
+    console.print(Panel.fit(
+        "[bold]🐱 medcat setup wizard[/]\n[dim]Configure your media stack. Press Enter to accept defaults.\n"
+        "Skip any field with empty input to configure later.\n"
+        "Press Ctrl-C at any time to cancel.[/]",
+        border_style="cyan",
+    ))
+    console.print()
+
+    try:
+        _run_wizard_sections(config, section)
+    except KeyboardInterrupt:
+        console.print()
+        console.print("[yellow]⏹ Setup cancelled.[/]")
+        if config != load_config():
+            # One-attempt save prompt — if Ctrl-C again, just exit
+            try:
+                if _prompt_yes_no("Save partial configuration?", True):
+                    save_config(config)
+                    SETUP_MARKER.touch()
+                    console.print("[green]✓ Partial config saved.[/]")
+            except (KeyboardInterrupt, EOFError):
+                pass
+        sys.exit(130)
+
+    # --- Save ---
+    save_config(config)
+    SETUP_MARKER.touch()
+    console.print("[green]✓ Configuration saved.[/]")
+    console.print(f"[dim]  Config file: {CONFIG_FILE}[/]")
+    console.print()
+    console.print("[dim]Run [bold]medcat config --check[/] to verify, or [bold]medcat setup[/] to reconfigure.][/]")
+
+
+def _run_wizard_sections(config: dict, section: str = None):
+    """Inner wizard logic — runs inside a KeyboardInterrupt catch block."""
+
+    # --- Transport ---
+    if section in (None, "transport"):
+        console.print("[bold]📡 Transport[/]")
+        console.print("[dim]  How should medcat reach your media storage?[/]")
+        tc = get_transport_config(config)
+
+        method = _prompt_choice(
+            "Transport method",
+            ["auto", "local", "scp"],
+            default=tc.get("method", "auto") or "auto",
+        )
+        config.setdefault("transport", {})["method"] = method
+
+        if method == "scp":
+            host = _prompt("Remote host (IP or hostname)", tc.get("host", ""))
+            user = _prompt("SSH user", tc.get("user", "root"))
+            ssh_key = _prompt("SSH key path (blank = auto-detect)", tc.get("ssh_key", ""))
+            config["transport"]["host"] = host
+            config["transport"]["user"] = user
+            if ssh_key:
+                config["transport"]["ssh_key"] = ssh_key
+        console.print()
+
+    # --- Destinations ---
+    if section in (None, "destinations", "destination"):
+        console.print("[bold]📂 Destinations[/]")
+        console.print("[dim]  Where should each media type be stored? Leave blank to skip.[/]")
+        console.print()
+
+        for dest_name, dest_defaults in DEFAULT_CONFIG["destinations"].items():
+            existing = config.get("destinations", {}).get(dest_name, {})
+            current_path = existing.get("path", "")
+            current_scan = existing.get("scan", "")
+
+            console.print(f"  [bold magenta]{dest_name}[/]")
+            path = _prompt(f"  Storage path", current_path)
+            if path:
+                config.setdefault("destinations", {}).setdefault(dest_name, {})
+                config["destinations"][dest_name]["path"] = path
+
+                if _prompt_yes_no(f"  Auto-scan after ingest?", bool(current_scan)):
+                    scan_svc = _prompt(f"  Scan service (e.g. kavita, radarr)", current_scan)
+                    config["destinations"][dest_name]["scan"] = scan_svc
+                    if scan_svc and scan_svc != "abs":
+                        lib_id = _prompt(f"  Library ID (for Kavita, blank if N/A)",
+                                         str(existing.get("scan_library_id") or ""))
+                        config["destinations"][dest_name]["scan_library_id"] = int(lib_id) if lib_id else None
+                else:
+                    config["destinations"][dest_name]["scan"] = ""
+            console.print()
+
+    # --- Services ---
+    if section in (None, "services", "service"):
+        console.print("[bold]🔌 Services[/]")
+        console.print("[dim]  Configure your *arr / Kavita / Audiobookshelf services.[/]")
+        console.print()
+
+        # Ask which services to configure
+        available = list(KNOWN_SERVICES.keys())
+        existing_services = list(config.get("services", {}).keys())
+        all_svc = list(dict.fromkeys(existing_services + available))
+
+        for svc_name in all_svc:
+            svc_info = KNOWN_SERVICES.get(svc_name, {"label": svc_name})
+            label = svc_info.get("label", svc_name)
+            existing_svc = config.get("services", {}).get(svc_name, {})
+
+            if section and svc_name != section:
+                continue
+
+            console.print(f"  [bold blue]{label}[/] ({svc_name})")
+            configure = _prompt_yes_no(
+                f"  Configure {label}?",
+                bool(existing_svc.get("url")),
+            )
+            if not configure:
+                # Remove if it existed
+                if svc_name in config.get("services", {}):
+                    if _prompt_yes_no(f"  Remove {label} config?", False):
+                        config["services"].pop(svc_name, None)
+                console.print()
+                continue
+
+            url = _prompt(f"  URL (e.g. http://192.168.1.100:5080)",
+                          existing_svc.get("url", ""))
+
+            # Some services use username/password instead of API key
+            if svc_name in ("deluge", "qbittorrent"):
+                username = _prompt(f"  Username",
+                                   existing_svc.get("username", "admin" if svc_name == "qbittorrent" else ""))
+                password = _prompt(f"  Password",
+                                   existing_svc.get("password", ""))
+                if url:
+                    config.setdefault("services", {}).setdefault(svc_name, {})
+                    config["services"][svc_name]["url"] = url.rstrip("/")
+                    if username:
+                        config["services"][svc_name]["username"] = username
+                    if password:
+                        config["services"][svc_name]["password"] = password
+            else:
+                api_key = _prompt(f"  API key",
+                                  existing_svc.get("api_key", ""))
+                if url:
+                    config.setdefault("services", {}).setdefault(svc_name, {})
+                    config["services"][svc_name]["url"] = url.rstrip("/")
+                    if api_key:
+                        config["services"][svc_name]["api_key"] = api_key
+
+                # Test connection
+                if _prompt_yes_no("  Test connection?", False):
+                    test_config = config.copy()
+                    result = test_service_connection(svc_name, test_config)
+                    if result["ok"]:
+                        console.print("    [green]✓ Connection successful![/]")
+                    else:
+                        console.print(f"    [red]✗ {result.get('error', 'Failed')}[/]")
+            console.print()
+
+
+# ---------------------------------------------------------------------------
+# Transport — determine how to access destination paths
+# ---------------------------------------------------------------------------
+
+
+def destination_root_is_local(dest_config: dict) -> bool:
+    """Return True when the configured destination root is mounted locally."""
+    root = dest_config.get("path", "")
+    return bool(root) and os.path.isdir(root)
+
+
+def _get_transport_host(dest_config: dict, config: dict) -> str:
+    """Get transport host from dest config (legacy) or global transport config."""
+    # Per-destination host override (backward compat)
+    host = dest_config.get("nfs_host", "")
+    if host:
+        return host
+    # Global transport config
+    tc = get_transport_config(config)
+    return tc.get("host", "")
+
+
+def _transport_ssh_scp_bases(config: dict) -> tuple[list[str], list[str]]:
+    """Build SSH/SCP base command lists from transport config."""
+    tc = get_transport_config(config)
+    timeout = str(tc.get("ssh_timeout", 5))
+    ssh_base = ["ssh", "-o", f"ConnectTimeout={timeout}", "-F", "/dev/null", "-o", "BatchMode=yes"]
+    scp_base = ["scp", "-o", f"ConnectTimeout={timeout}", "-F", "/dev/null", "-o", "BatchMode=yes"]
+    ssh_key = tc.get("ssh_key", "")
+    if ssh_key and os.path.exists(ssh_key):
+        ssh_base += ["-i", ssh_key]
+        scp_base += ["-i", ssh_key]
+    return ssh_base, scp_base
+
+
+def _run_transport(cmd: list[str], action: str) -> None:
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        if detail:
+            detail = f": {detail.splitlines()[-1]}"
+        raise RuntimeError(f"{action} failed (exit {result.returncode}){detail}")
+
+
+def _verify_local_copy(dest_file: Path, expected_size: int) -> None:
+    if not dest_file.is_file():
+        raise RuntimeError(f"Destination file missing after copy: {dest_file}")
+    actual_size = dest_file.stat().st_size
+    if actual_size != expected_size:
+        raise RuntimeError(
+            f"Destination file size mismatch for {dest_file} "
+            f"(expected {expected_size}, got {actual_size})"
+        )
+
+
+def _verify_remote_copy(host: str, remote_path: str, expected_size: int, ssh_base: list[str]) -> None:
+    quoted = shlex.quote(remote_path)
+    result = subprocess.run(
+        ssh_base + [f"root@{host}", f"test -f {quoted} && stat -c %s {quoted}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Destination file missing on {host}: {remote_path}")
+    try:
+        remote_size = int(result.stdout.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"Could not verify remote file: {remote_path}") from exc
+    if remote_size != expected_size:
+        raise RuntimeError(
+            f"Remote file size mismatch for {remote_path} "
+            f"(expected {expected_size}, got {remote_size})"
+        )
+
+
+def ensure_destination_dir(remote_path: str, dest_config: dict, config: dict):
+    """Create destination directory, handling SSH if path is remote."""
+    if destination_root_is_local(dest_config):
+        os.makedirs(remote_path, exist_ok=True)
+        return
+
+    host = _get_transport_host(dest_config, config)
+    if not host:
+        raise RuntimeError(
+            f"Destination path '{remote_path}' is not local and no transport host configured. "
+            "Run: medcat setup"
+        )
+    ssh_base, _ = _transport_ssh_scp_bases(config)
+    _run_transport(
+        ssh_base + [f"root@{host}", f"mkdir -p {shlex.quote(remote_path)}"],
+        f"Creating remote directory on {host}",
+    )
+
+
+def copy_to_destination(local_file: Path, dest_file: Path, dest_config: dict, config: dict):
+    """Copy file to destination, using SCP if the destination root is not mounted locally."""
+    local_file = Path(local_file)
+    if not local_file.is_file():
+        raise RuntimeError(f"Source file not found: {local_file}")
+
+    expected_size = local_file.stat().st_size
+    dest_dir = dest_file.parent
+
+    if destination_root_is_local(dest_config):
+        os.makedirs(dest_dir, exist_ok=True)
+        shutil.copy2(local_file, dest_file)
+        _verify_local_copy(dest_file, expected_size)
+        return
+
+    host = _get_transport_host(dest_config, config)
+    if not host:
+        raise RuntimeError(
+            f"Destination path '{dest_file}' is not local and no transport host configured. "
+            "Run: medcat setup"
+        )
+    ssh_base, scp_base = _transport_ssh_scp_bases(config)
+    remote_dir = str(dest_dir)
+    remote_file = str(dest_file)
+    remote_target = f"root@{host}:{shlex.quote(remote_file)}"
+
+    _run_transport(
+        ssh_base + [f"root@{host}", f"mkdir -p {shlex.quote(remote_dir)}"],
+        f"Creating remote directory on {host}",
+    )
+    _run_transport(
+        scp_base + [str(local_file), remote_target],
+        f"Copying to {host}",
+    )
+    _verify_remote_copy(host, remote_file, expected_size, ssh_base)
+
+
+# ---------------------------------------------------------------------------
+# Metadata utilities
+# ---------------------------------------------------------------------------
+
+
+def safe_filename(s: str) -> str:
+    """Sanitize a string for use in filenames."""
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    s = s.rstrip(".")
+    return s
+
+
+def format_structure(template: str, metadata: dict) -> str:
+    """Format a directory structure template with metadata variables."""
+    # First ensure all values are strings, using defaults for missing keys
+    defaults = {
+        "Author": "Unknown Author",
+        "Title": "Unknown Title",
+        "Series": "Unknown Series",
+        "Volume": 1,
+        "Issue": 0,
+        "Chapter": 0,
+        "Year": "0000",
+        "Show": "Unknown Show",
+        "Season": 1,
+        "Episode": 1,
+        "Artist": "Unknown Artist",
+        "Album": "Unknown Album",
+        "Track": 1,
+        "ext": "unknown",
+    }
+    fmt_vars = dict(defaults)
+    fmt_vars.update(metadata)
+
+    # Handle format specifiers like {Issue:03d}
+    result = template
+    for key, val in fmt_vars.items():
+        if isinstance(val, (int, float)):
+            result = re.sub(
+                rf"\{{{key}:?([^}}]*)\}}",
+                lambda m, k=key, v=val: format(v, m.group(1)) if m.group(1) else str(v),
+                result,
+            )
+        else:
+            result = re.sub(
+                rf"\{{{key}[^}}]*\}}", str(safe_filename(str(val))), result
+            )
+
+    # Clean up any remaining format spec curly braces
+    result = re.sub(r"\{[^}]+\}", "unknown", result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Metadata extraction from files
+# ---------------------------------------------------------------------------
+
+
+def extract_epub_metadata(filepath: str) -> dict:
+    """Extract metadata from EPUB file by parsing OPF directly from the ZIP."""
+    metadata = {
+        "Title": Path(filepath).stem,
+        "Author": "Unknown Author",
+        "ext": Path(filepath).suffix.lower().lstrip("."),
+        "Source": "filename",
+    }
+    try:
+        import zipfile
+        import xml.etree.ElementTree as ET
+
+        with zipfile.ZipFile(filepath, 'r') as zf:
+            # Find the container.xml to locate the OPF
+            container = None
+            try:
+                container = ET.fromstring(zf.read("META-INF/container.xml"))
+            except:
+                pass
+
+            opf_path = None
+            if container is not None:
+                for rootfile in container.iter():
+                    tag = rootfile.tag.split('}')[-1] if '}' in rootfile.tag else rootfile.tag
+                    if tag == 'rootfile':
+                        opf_path = rootfile.attrib.get('full-path', '')
+                        break
+
+            if not opf_path:
+                # Fallback: search for any .opf file
+                for name in zf.namelist():
+                    if name.lower().endswith('.opf'):
+                        opf_path = name
+                        break
+
+            if not opf_path:
+                return metadata
+
+            opf_xml = zf.read(opf_path)
+            root = ET.fromstring(opf_xml)
+
+        # Namespace map
+        dc_ns = 'http://purl.org/dc/elements/1.1/'
+        opf_ns = 'http://www.idpf.org/2007/opf'
+
+        def find_text(tag_local):
+            """Find text content for a tag, handling namespaces."""
+            for child in root.iter():
+                t = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                if t == tag_local and child.text:
+                    return child.text.strip()
+            return None
+
+        # Dublin Core elements
+        for child in root.iter():
+            tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            if tag == 'title' and child.text:
+                metadata["Title"] = child.text.strip()
+            elif tag == 'creator' and child.text:
+                metadata["Author"] = child.text.strip()
+            elif tag == 'publisher' and child.text:
+                metadata["Publisher"] = child.text.strip()
+            elif tag == 'language' and child.text:
+                metadata["Language"] = child.text.strip()
+            elif tag == 'date' and child.text:
+                metadata["Year"] = child.text.strip()[:4]
+            elif tag == 'identifier' and child.text:
+                val = child.text.strip()
+                clean = val.replace('-', '').replace(' ', '')
+                # Check for ISBN in scheme attribute or numeric pattern
+                scheme = child.attrib.get(f'{{{opf_ns}}}scheme', '').lower()
+                if 'isbn' in scheme or (len(clean) in (10, 13) and clean.isdigit()):
+                    metadata["ISBN"] = clean
+
+        metadata["Source"] = "EPUB metadata"
+
+    except Exception as e:
+        metadata["_error"] = str(e)
+
+    return metadata
+
+
+def extract_pdf_metadata(filepath: str) -> dict:
+    """Extract metadata from PDF file."""
+    metadata = {}
+    try:
+        import fitz  # pymupdf
+
+        doc = fitz.open(filepath)
+        pdf_meta = doc.metadata
+
+        title = pdf_meta.get("title", "") or Path(filepath).stem
+        author = pdf_meta.get("author", "") or "Unknown Author"
+        metadata["Title"] = title
+        metadata["Author"] = author
+        if pdf_meta.get("subject"):
+            metadata["Subject"] = pdf_meta["subject"]
+
+        # Check for ISBN in XMP metadata
+        xmp = doc.xref_get_key(-1, "Info")
+        if xmp and "ISBN" in str(xmp):
+            import re as _re
+            m = _re.search(r"ISBN[:\s]+([\d-]+)", str(xmp))
+            if m:
+                metadata["ISBN"] = m.group(1).replace("-", "")
+
+        ext = Path(filepath).suffix.lower()
+        metadata["ext"] = ext.lstrip(".")
+        metadata["Source"] = "PDF XMP"
+        doc.close()
+
+    except Exception as e:
+        metadata["Title"] = Path(filepath).stem
+        ext = Path(filepath).suffix.lower()
+        metadata["ext"] = ext.lstrip(".")
+        metadata["Source"] = "filename"
+        metadata["_error"] = str(e)
+
+    return metadata
+
+
+def _parse_comicinfo_xml(xml_data: bytes, metadata: dict) -> dict:
+    """Parse ComicInfo.xml bytes into metadata fields."""
+    root = ET.fromstring(xml_data)
+    for elem in root.iter():
+        tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+        if tag == "Title" and elem.text:
+            metadata["Title"] = elem.text
+        elif tag == "Series" and elem.text:
+            metadata["Series"] = elem.text
+        elif tag == "Number" and elem.text:
+            try:
+                metadata["Issue"] = int(elem.text)
+            except ValueError:
+                pass
+        elif tag == "Writer" and elem.text:
+            metadata["Author"] = elem.text
+        elif tag == "Volume" and elem.text:
+            try:
+                metadata["Volume"] = int(elem.text)
+            except ValueError:
+                pass
+    metadata["Source"] = "ComicInfo.xml"
+    return metadata
+
+
+def _read_comicinfo_xml(filepath: str) -> Optional[bytes]:
+    """Read ComicInfo.xml from a CBZ or CBR archive."""
+    import zipfile
+
+    lower = filepath.lower()
+    if lower.endswith(".cbz"):
+        with zipfile.ZipFile(filepath, "r") as zf:
+            for name in zf.namelist():
+                if name.lower().endswith("comicinfo.xml"):
+                    return zf.read(name)
+        return None
+
+    if lower.endswith(".cbr"):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            extract_cmds = [
+                ["7z", "e", "-y", f"-o{tmp}", filepath, "ComicInfo.xml"],
+                ["unar", "-q", "-o", tmp, filepath],
+                ["bsdtar", "-xf", filepath, "-C", tmp],
+            ]
+            for cmd in extract_cmds:
+                try:
+                    subprocess.run(cmd, capture_output=True, timeout=60, check=False)
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    continue
+                for candidate in tmp_path.rglob("ComicInfo.xml"):
+                    return candidate.read_bytes()
+                comicinfo = tmp_path / "ComicInfo.xml"
+                if comicinfo.exists():
+                    return comicinfo.read_bytes()
+        return None
+
+    return None
+
+
+def extract_comic_metadata(filepath: str) -> dict:
+    """Extract metadata from CBZ/CBR comic archive."""
+    metadata = {
+        "Title": Path(filepath).stem,
+        "Author": "Unknown Author",
+        "Series": Path(filepath).stem,
+        "ext": Path(filepath).suffix.lower().lstrip("."),
+        "Source": "filename",
+    }
+    try:
+        xml_data = _read_comicinfo_xml(filepath)
+        if xml_data:
+            _parse_comicinfo_xml(xml_data, metadata)
+    except Exception as e:
+        metadata["_error"] = str(e)
+
+    return metadata
+
+
+def extract_audiobook_metadata(filepath: str) -> dict:
+    """Extract metadata from audiobook file (M4B/MP3)."""
+    metadata = {"Title": Path(filepath).stem, "Author": "Unknown Author",
+                "ext": Path(filepath).suffix.lower().lstrip("."), "Source": "ffprobe"}
+
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", filepath],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            fmt = json.loads(result.stdout).get("format", {}).get("tags", {})
+            if fmt.get("title"):
+                metadata["Title"] = fmt["title"]
+            if fmt.get("artist"):
+                metadata["Author"] = fmt["artist"]
+            elif fmt.get("album_artist"):
+                metadata["Author"] = fmt["album_artist"]
+            if fmt.get("album"):
+                metadata["Album"] = fmt["album"]
+            if fmt.get("isbn"):
+                metadata["ISBN"] = fmt["isbn"]
+            metadata["Source"] = "ffprobe tags"
+    except Exception:
+        pass
+
+    return metadata
+
+
+def extract_filename_metadata(filepath: str, media_type: str) -> dict:
+    """Extract metadata from filename using heuristics."""
+    stem = Path(filepath).stem
+    ext = Path(filepath).suffix.lower().lstrip(".")
+    metadata = {"Title": stem, "ext": ext, "Source": "filename"}
+
+    if media_type == "shows":
+        # Show Name S01E01 or Show.Name.S01E01
+        m = re.search(r"(.+?)[.\s]+[Ss](\d{2})[Ee](\d{2})", stem)
+        if m:
+            metadata["Show"] = m.group(1).replace(".", " ").strip()
+            metadata["Season"] = int(m.group(2))
+            metadata["Episode"] = int(m.group(3))
+            metadata["Title"] = f"{metadata['Show']} S{m.group(2)}E{m.group(3)}"
+
+    elif media_type == "movies":
+        # Title (Year) or Title.Year
+        m = re.search(r"(.+?)[.\s]+\(?(\d{4})\)?", stem)
+        if m:
+            metadata["Title"] = m.group(1).replace(".", " ").strip()
+            metadata["Year"] = m.group(2)
+
+        # Quality indicators
+        for qual in ["1080p", "2160p", "720p", "HDR", "DV", "WEB-DL", "BluRay"]:
+            if qual.lower() in stem.lower():
+                metadata.setdefault("Quality", []).append(qual)
+
+    elif media_type == "music":
+        # Artist - Album - Track# - Title
+        parts = re.split(r"\s*[-–—]\s*", stem)
+        if len(parts) >= 2:
+            metadata["Artist"] = parts[0].strip()
+            metadata["Title"] = parts[-1].strip()
+            if len(parts) == 3:
+                metadata["Album"] = parts[1].strip()
+            elif len(parts) == 4:
+                metadata["Album"] = parts[1].strip()
+                try:
+                    metadata["Track"] = int(re.search(r"\d+", parts[2]).group())
+                except:
+                    pass
+
+    return metadata
+
+
+# ---------------------------------------------------------------------------
+# Metadata enrichment via APIs
+# ---------------------------------------------------------------------------
+
+
+def enrich_books_google(metadata: dict) -> dict:
+    """Enrich book metadata using Google Books API (free, no key needed)."""
+    isbn = metadata.get("ISBN")
+    title = metadata.get("Title", "")
+    author = metadata.get("Author", "")
+
+    if not title:
+        return metadata
+
+    try:
+        if isbn:
+            url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}"
+        else:
+            query = f'{title} {author}'.strip()
+            url = f"https://www.googleapis.com/books/v1/volumes?q={requests.utils.quote(query)}"
+
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            return metadata
+
+        data = resp.json()
+        items = data.get("items", [])
+        if not items:
+            return metadata
+
+        vol = items[0]["volumeInfo"]
+        if vol.get("title"):
+            metadata["Title"] = vol["title"]
+        if vol.get("authors"):
+            metadata["Author"] = vol["authors"][0]
+        if vol.get("publisher"):
+            metadata["Publisher"] = vol["publisher"]
+        if vol.get("publishedDate"):
+            metadata["Year"] = vol["publishedDate"][:4]
+        if vol.get("description") and not metadata.get("Description"):
+            metadata["Description"] = vol["description"]
+        if vol.get("categories"):
+            metadata["Categories"] = ", ".join(vol["categories"])
+
+        # Industry identifiers
+        for ident in vol.get("industryIdentifiers", []):
+            if ident.get("type") == "ISBN_13":
+                metadata["ISBN"] = ident["identifier"]
+            elif ident.get("type") == "ISBN_10" and "ISBN" not in metadata:
+                metadata["ISBN"] = ident["identifier"]
+
+        metadata["Source"] = "Google Books API"
+
+    except Exception:
+        pass
+
+    return metadata
+
+
+def enrich_books_openlibrary(metadata: dict) -> dict:
+    """Fallback enrichment via Open Library API (free, no key needed)."""
+    if metadata.get("Source") == "Google Books API":
+        return metadata  # Already enriched
+
+    title = metadata.get("Title", "")
+    author = metadata.get("Author", "")
+
+    if not title:
+        return metadata
+
+    try:
+        query = f'{title} {author}'.strip()
+        url = f"https://openlibrary.org/search.json?q={requests.utils.quote(query)}&limit=1"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            return metadata
+
+        data = resp.json()
+        docs = data.get("docs", [])
+        if not docs:
+            return metadata
+
+        doc = docs[0]
+        if doc.get("title"):
+            metadata["Title"] = doc["title"]
+        if doc.get("author_name"):
+            metadata["Author"] = doc["author_name"][0]
+        if doc.get("first_publish_year"):
+            metadata["Year"] = str(doc["first_publish_year"])
+        if doc.get("isbn"):
+            metadata["ISBN"] = doc["isbn"][0]
+        if doc.get("publisher"):
+            metadata["Publisher"] = doc["publisher"][0] if isinstance(doc["publisher"], list) else doc["publisher"]
+
+        metadata.setdefault("Source", "Open Library")
+
+    except Exception:
+        pass
+
+    return metadata
+
+
+def enrich_comics(metadata: dict) -> dict:
+    """Enrich comic metadata — primarily from ComicInfo.xml already parsed."""
+    # Comics primarily rely on ComicInfo.xml. If we got filename-only, try harder.
+    if metadata.get("Source") == "filename":
+        stem = Path(metadata.get("_filepath", "")).stem if metadata.get("_filepath") else ""
+        # Try common naming: Series #Issue - Title
+        m = re.match(r"(.+?)\s+#(\d+)(?:\s*[-–]\s*(.+))?", stem)
+        if m:
+            metadata["Series"] = m.group(1).strip()
+            metadata["Issue"] = int(m.group(2))
+            if m.group(3):
+                metadata["Title"] = m.group(3).strip()
+            else:
+                metadata["Title"] = f"{m.group(1).strip()} #{m.group(2)}"
+
+    return metadata
+
+
+def enrich_music_musicbrainz(metadata: dict) -> dict:
+    """Enrich music metadata using MusicBrainz API (free, rate-limited)."""
+    title = metadata.get("Title", "")
+    artist = metadata.get("Artist", "")
+
+    if not title or not artist:
+        return metadata
+
+    try:
+        import musicbrainzngs
+        musicbrainzngs.set_useragent("medcat", __version__, "https://github.com/pokanop/scripts")
+        musicbrainzngs.set_rate_limit(1)
+
+        result = musicbrainzngs.search_recordings(
+            recording=f'"{title}" AND artist:"{artist}"', limit=1
+        )
+        recordings = result.get("recording-list", [])
+        if not recordings:
+            return metadata
+
+        rec = recordings[0]
+        if rec.get("title"):
+            metadata["Title"] = rec["title"]
+        if rec.get("artist-credit"):
+            metadata["Artist"] = rec["artist-credit"][0].get("artist", {}).get("name", artist)
+
+        metadata.setdefault("Source", "MusicBrainz")
+        time.sleep(1)  # Rate limit compliance
+
+    except Exception:
+        pass
+
+    return metadata
+
+
+# ---------------------------------------------------------------------------
+# EPUB metadata writeback
+# ---------------------------------------------------------------------------
+
+
+def write_epub_metadata(filepath: str, metadata: dict):
+    """Write enriched metadata back into EPUB."""
+    try:
+        import ebooklib
+        from ebooklib import epub
+
+        book = epub.read_epub(filepath)
+
+        ns = {"dc": "http://purl.org/dc/elements/1.1/", "opf": "http://www.idpf.org/2007/opf"}
+
+        if "Title" in metadata:
+            book.set_title(metadata["Title"])
+        if "Author" in metadata:
+            book.add_author(metadata["Author"])
+        if "Publisher" in metadata:
+            book.add_metadata("DC", "publisher", metadata["Publisher"])
+        if "Language" in metadata:
+            book.set_language(metadata["Language"])
+        if "ISBN" in metadata:
+            book.add_metadata(
+                "DC", "identifier", metadata["ISBN"],
+                {f"{ns['opf']}scheme": "ISBN"},
+            )
+
+        # Set custom series metadata (Calibre extension)
+        cal_ns = "http://calibre.kovidgoyal.net/2009/metadata"
+        if "Series" in metadata:
+            book.add_metadata(None, "meta", metadata["Series"], {
+                "name": f"{cal_ns}:series",
+                "content": metadata["Series"],
+            })
+
+        epub.write_epub(filepath, book)
+
+    except Exception as e:
+        console.print(f"[yellow]⚠ Could not write EPUB metadata: {e}[/]")
+
+
+# ---------------------------------------------------------------------------
+# Media type detection
+# ---------------------------------------------------------------------------
+
+
+BOOK_EXTENSIONS = {".epub", ".pdf"}
+COMIC_EXTENSIONS = {".cbz", ".cbr"}
+AUDIOBOOK_EXTENSIONS = {".m4b", ".aa", ".aax"}
+VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".m4v"}
+MUSIC_EXTENSIONS = {".flac", ".mp3", ".ogg", ".opus", ".wav", ".aac", ".alac"}
+SKIP_EXTENSIONS = {".nfo", ".srt", ".sfv", ".txt", ".log", ".url", ".m3u"}
+SHOW_FILENAME_RE = re.compile(r"[Ss]\d{2}[Ee]\d{2}")
+
+
+def is_likely_audiobook(filepath: str) -> bool:
+    """Heuristic to distinguish audiobook MP3s from music tracks."""
+    ext = Path(filepath).suffix.lower()
+    if ext in AUDIOBOOK_EXTENSIONS:
+        return True
+    if ext != ".mp3":
+        return False
+
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", filepath],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0:
+            return False
+
+        fmt = json.loads(result.stdout).get("format", {})
+        tags = fmt.get("tags", {})
+        duration = float(fmt.get("duration", 0))
+        genre = tags.get("genre", "").lower()
+
+        if any(word in genre for word in ("audiobook", "audiobooks", "speech", "spoken")):
+            return True
+        if tags.get("isbn"):
+            return True
+        if duration >= 3600 and tags.get("album"):
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def is_likely_show(filepath: str) -> bool:
+    """Detect TV episodes from filename patterns like S01E01."""
+    return bool(SHOW_FILENAME_RE.search(Path(filepath).stem))
+
+
+def file_matches_media_type(filepath: str, media_type: str) -> bool:
+    """Return True if filepath belongs to the requested media type."""
+    ext = Path(filepath).suffix.lower()
+
+    if media_type == "books":
+        return ext in BOOK_EXTENSIONS
+    if media_type == "comics":
+        return ext in COMIC_EXTENSIONS
+    if media_type == "audiobooks":
+        return ext in AUDIOBOOK_EXTENSIONS or (ext == ".mp3" and is_likely_audiobook(filepath))
+    if media_type == "music":
+        return ext in MUSIC_EXTENSIONS and not (ext == ".mp3" and is_likely_audiobook(filepath))
+    if media_type in ("movies", "documentaries"):
+        return ext in VIDEO_EXTENSIONS and not is_likely_show(filepath)
+    if media_type == "shows":
+        return ext in VIDEO_EXTENSIONS and is_likely_show(filepath)
+    return False
+
+
+def detect_media_type(filepath: str) -> str:
+    """Detect media type from file extension and light heuristics."""
+    ext = Path(filepath).suffix.lower()
+    if ext in BOOK_EXTENSIONS:
+        return "books"
+    if ext in COMIC_EXTENSIONS:
+        return "comics"
+    if ext in AUDIOBOOK_EXTENSIONS:
+        return "audiobooks"
+    if ext in MUSIC_EXTENSIONS:
+        if is_likely_audiobook(filepath):
+            return "audiobooks"
+        return "music"
+    if ext in VIDEO_EXTENSIONS:
+        if is_likely_show(filepath):
+            return "shows"
+        return "movies"
+    return "unknown"
+
+
+def find_media_files(path: str, media_type: Optional[str] = None) -> list:
+    """Recursively find media files of given type."""
+    p = Path(path)
+    if p.is_file():
+        if media_type:
+            return [str(p)] if file_matches_media_type(str(p), media_type) else []
+        return [str(p)] if p.suffix.lower() not in SKIP_EXTENSIONS else []
+
+    if not p.is_dir():
+        return []
+
+    files = []
+    for root, _, filenames in os.walk(p):
+        for fname in filenames:
+            filepath = str(Path(root) / fname)
+            ext = Path(fname).suffix.lower()
+            if ext in SKIP_EXTENSIONS:
+                continue
+            if media_type and not file_matches_media_type(filepath, media_type):
+                continue
+            files.append(filepath)
+
+    return sorted(files)
+
+
+# ---------------------------------------------------------------------------
+# Media Handlers
+# ---------------------------------------------------------------------------
+
+
+class MediaHandler(ABC):
+    """Base handler for a media type."""
+
+    media_type: str = "unknown"
+    human_name: str = "Unknown"
+
+    @abstractmethod
+    def extract_metadata(self, filepath: str) -> dict:
+        ...
+
+    def enrich_metadata(self, metadata: dict) -> dict:
+        """Override for API enrichment."""
+        return metadata
+
+    def writeback_metadata(self, filepath: str, metadata: dict):
+        """Override to write metadata back to file."""
+        pass
+
+    def build_destination(self, metadata: dict, dest_config: dict) -> Path:
+        """Build destination path from metadata and config."""
+        structure = format_structure(dest_config["structure"], metadata)
+        rename = format_structure(dest_config["rename"], metadata)
+        dest_dir = Path(dest_config["path"]) / structure
+        dest_file = dest_dir / rename
+        return dest_file
+
+
+class BookHandler(MediaHandler):
+    media_type = "books"
+    human_name = "Books"
+
+    def extract_metadata(self, filepath: str) -> dict:
+        metadata = {"_filepath": filepath, "ext": Path(filepath).suffix.lower().lstrip("."),
+                    "Source": "filename", "Title": Path(filepath).stem, "Author": "Unknown Author"}
+
+        if filepath.lower().endswith(".epub"):
+            epub_meta = extract_epub_metadata(filepath)
+            metadata.update(epub_meta)
+        elif filepath.lower().endswith(".pdf"):
+            pdf_meta = extract_pdf_metadata(filepath)
+            metadata.update(pdf_meta)
+
+        return metadata
+
+    def enrich_metadata(self, metadata: dict) -> dict:
+        # Try Google Books first (best quality), then Open Library
+        if metadata.get("Source") not in ("Google Books API",):
+            metadata = enrich_books_google(metadata)
+        if metadata.get("Source") not in ("Google Books API",):
+            metadata = enrich_books_openlibrary(metadata)
+        return metadata
+
+    def writeback_metadata(self, filepath: str, metadata: dict):
+        if filepath.lower().endswith(".epub"):
+            write_epub_metadata(filepath, metadata)
+
+
+class ComicHandler(MediaHandler):
+    media_type = "comics"
+    human_name = "Comics"
+
+    def extract_metadata(self, filepath: str) -> dict:
+        metadata = extract_comic_metadata(filepath)
+        metadata["_filepath"] = filepath
+        return metadata
+
+    def enrich_metadata(self, metadata: dict) -> dict:
+        return enrich_comics(metadata)
+
+
+class MangaHandler(ComicHandler):
+    media_type = "manga"
+    human_name = "Manga"
+
+
+class AudiobookHandler(MediaHandler):
+    media_type = "audiobooks"
+    human_name = "Audiobooks"
+
+    def extract_metadata(self, filepath: str) -> dict:
+        metadata = extract_audiobook_metadata(filepath)
+        metadata["_filepath"] = filepath
+        return metadata
+
+    def enrich_metadata(self, metadata: dict) -> dict:
+        if metadata.get("Source") not in ("Google Books API",):
+            metadata = enrich_books_google(metadata)
+        if metadata.get("Source") not in ("Google Books API",):
+            metadata = enrich_books_openlibrary(metadata)
+        return metadata
+
+
+class MovieHandler(MediaHandler):
+    media_type = "movies"
+    human_name = "Movies"
+
+    def extract_metadata(self, filepath: str) -> dict:
+        return extract_filename_metadata(filepath, "movies")
+
+
+class ShowHandler(MediaHandler):
+    media_type = "shows"
+    human_name = "TV Shows"
+
+    def extract_metadata(self, filepath: str) -> dict:
+        return extract_filename_metadata(filepath, "shows")
+
+
+class MusicHandler(MediaHandler):
+    media_type = "music"
+    human_name = "Music"
+
+    def extract_metadata(self, filepath: str) -> dict:
+        metadata = {"_filepath": filepath, "ext": Path(filepath).suffix.lower().lstrip("."),
+                    "Source": "ffprobe", "Title": Path(filepath).stem, "Artist": "Unknown Artist",
+                    "Album": "Unknown Album", "Track": 1}
+
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", filepath],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                tags = json.loads(result.stdout).get("format", {}).get("tags", {})
+                if tags.get("title"):
+                    metadata["Title"] = tags["title"]
+                if tags.get("artist"):
+                    metadata["Artist"] = tags["artist"]
+                if tags.get("album"):
+                    metadata["Album"] = tags["album"]
+                try:
+                    if tags.get("track"):
+                        metadata["Track"] = int(tags["track"].split("/")[0])
+                except:
+                    pass
+        except Exception:
+            pass
+
+        if metadata["Artist"] == "Unknown Artist":
+            filename_meta = extract_filename_metadata(filepath, "music")
+            metadata.update(filename_meta)
+
+        return metadata
+
+    def enrich_metadata(self, metadata: dict) -> dict:
+        return enrich_music_musicbrainz(metadata)
+
+
+# Handler registry
+HANDLERS = {
+    "books": BookHandler(),
+    "comics": ComicHandler(),
+    "manga": MangaHandler(),
+    "audiobooks": AudiobookHandler(),
+    "movies": MovieHandler(),
+    "shows": ShowHandler(),
+    "music": MusicHandler(),
+    "documentaries": MovieHandler(),  # Same handler pattern as movies
+}
+
+
+def get_handler(media_type: str) -> Optional[MediaHandler]:
+    return HANDLERS.get(media_type)
+
+
+# ---------------------------------------------------------------------------
+# Scan triggers
+# ---------------------------------------------------------------------------
+
+
+def trigger_kavita_scan(library_id: int, config: dict):
+    """Trigger a Kavita library scan."""
+    svc = config.get("services", {}).get("kavita", {})
+    api_key = svc.get("api_key", "")
+    url = svc.get("url", "")
+
+    if not api_key or not url:
+        console.print("[yellow]⚠ Kavita not configured. Run: [bold]medcat setup --section services[/][/]")
+        return
+
+    try:
+        resp = requests.post(
+            f"{url}/api/library/scan?libraryId={library_id}",
+            headers={"X-API-Key": api_key},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            console.print(f"[green]✓ Triggered Kavita library {library_id} scan[/]")
+        else:
+            console.print(f"[yellow]⚠ Kavita scan trigger returned {resp.status_code}[/]")
+    except Exception as e:
+        console.print(f"[yellow]⚠ Could not trigger Kavita scan: {e}[/]")
+
+
+def trigger_readarr_scan(config: dict):
+    """Trigger a Readarr library scan."""
+    svc = config.get("services", {}).get("readarr", {})
+    api_key = svc.get("api_key", "")
+    url = svc.get("url", "")
+
+    if not api_key or not url:
+        return
+
+    try:
+        resp = requests.post(
+            f"{url}/api/v1/command",
+            json={"name": "RescanFolders"},
+            headers={"X-Api-Key": api_key},
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            console.print("[green]✓ Triggered Readarr library scan[/]")
+    except Exception as e:
+        console.print(f"[yellow]⚠ Could not trigger Readarr scan: {e}[/]")
+
+
+def trigger_arr_scan(service: str, command: str, config: dict, label: str):
+    """Trigger a Radarr/Sonarr/Lidarr disk scan."""
+    svc = config.get("services", {}).get(service, {})
+    api_key = svc.get("api_key", "")
+    url = svc.get("url", "").rstrip("/")
+    api_version = "v3" if service in ("radarr", "sonarr") else "v1"
+
+    if not api_key or not url:
+        console.print(
+            f"[yellow]⚠ {label} not configured. "
+            f"Run: [bold]medcat setup --section services[/][/]"
+        )
+        return
+
+    try:
+        resp = requests.post(
+            f"{url}/api/{api_version}/command",
+            json={"name": command},
+            headers={"X-Api-Key": api_key},
+            timeout=10,
+        )
+        if resp.status_code in (200, 201):
+            console.print(f"[green]✓ Triggered {label} {command}[/]")
+        else:
+            console.print(f"[yellow]⚠ {label} scan trigger returned {resp.status_code}[/]")
+    except Exception as e:
+        console.print(f"[yellow]⚠ Could not trigger {label} scan: {e}[/]")
+
+
+def trigger_scan(media_type: str, config: dict):
+    """Trigger appropriate scan based on media type."""
+    dest = config.get("destinations", {}).get(media_type, {})
+    scan_service = dest.get("scan", "")
+
+    if scan_service == "kavita":
+        library_id = dest.get("scan_library_id", 1)
+        trigger_kavita_scan(library_id, config)
+    elif scan_service == "readarr":
+        trigger_readarr_scan(config)
+    elif scan_service == "radarr":
+        trigger_arr_scan("radarr", "DownloadedMoviesScan", config, "Radarr")
+    elif scan_service == "sonarr":
+        trigger_arr_scan("sonarr", "DownloadedEpisodesScan", config, "Sonarr")
+    elif scan_service == "lidarr":
+        trigger_arr_scan("lidarr", "DownloadedAlbumsScan", config, "Lidarr")
+    elif scan_service == "abs":
+        console.print("[dim]Audiobookshelf uses folder watcher — scan not needed[/]")
+
+
+# ---------------------------------------------------------------------------
+# Interactive metadata rescue
+# ---------------------------------------------------------------------------
+
+
+# Sentinel values that indicate "no real data"
+_UNKNOWN_VALUES = {
+    "unknown author", "unknown title", "unknown series", "unknown artist",
+    "unknown album", "unknown show", "unknown", "",
+}
+
+
+def _is_unknown(value) -> bool:
+    """Check if a metadata value is effectively missing."""
+    if value is None:
+        return True
+    if isinstance(value, (int, float)):
+        return False
+    return str(value).strip().lower() in _UNKNOWN_VALUES
+
+
+# Per handler-type, which fields are critical and how to label them
+_CRITICAL_FIELDS = {
+    "books": [
+        ("Title",  "Title"),
+        ("Author", "Author"),
+    ],
+    "audiobooks": [
+        ("Title",  "Title"),
+        ("Author", "Author"),
+    ],
+    "comics": [
+        ("Series", "Series"),
+        ("Issue",  "Issue #"),
+    ],
+    "manga": [
+        ("Series", "Series"),
+        ("Volume", "Volume"),
+    ],
+    "movies": [
+        ("Title", "Title"),
+        ("Year",  "Year"),
+    ],
+    "shows": [
+        ("Show",    "Show name"),
+        ("Season",  "Season"),
+        ("Episode", "Episode"),
+    ],
+    "music": [
+        ("Artist", "Artist"),
+        ("Title",  "Track title"),
+    ],
+    "documentaries": [
+        ("Title", "Title"),
+        ("Year",  "Year"),
+    ],
+}
+
+
+def prompt_missing_metadata(metadata: dict, handler, filepath: str) -> dict:
+    """Prompt the user to fill in critical metadata that couldn't be determined.
+
+    Only prompts in interactive (TTY) sessions. In batch/piped mode, returns
+    metadata as-is with defaults intact.
+
+    Returns the (possibly updated) metadata dict.
+    """
+    import sys
+
+    # Don't prompt if stdin is not a TTY (piped / batch mode)
+    if not sys.stdin.isatty():
+        return metadata
+
+    media_type = getattr(handler, "media_type", "unknown")
+    fields = _CRITICAL_FIELDS.get(media_type, [])
+
+    if not fields:
+        return metadata
+
+    # Check which fields are actually missing
+    missing = []
+    for key, label in fields:
+        val = metadata.get(key)
+        if _is_unknown(val):
+            missing.append((key, label))
+
+    if not missing:
+        return metadata
+
+    # Determine source quality — if enrichment succeeded, don't nag
+    source = metadata.get("Source", "filename")
+    enriched = source in (
+        "Google Books API", "Open Library", "MusicBrainz",
+        "ComicVine", "TMDb", "IMDb",
+    )
+    if enriched:
+        return metadata
+
+    # Show a warning header
+    fname = Path(filepath).name
+    console.print()
+    console.print(
+        f"[yellow]⚠ Could not determine all metadata for[/] [bold]{escape(fname)}[/]"
+    )
+    console.print("[dim]  Fill in the blanks, or press Enter to use the default.[/]")
+    console.print()
+
+    for key, label in missing:
+        current = metadata.get(key, "")
+        # For numeric fields, show the raw default
+        if key in ("Issue", "Volume", "Season", "Episode", "Track", "Year"):
+            prompt_label = f"  {label}"
+            default_display = str(current) if current else ""
+        else:
+            prompt_label = f"  {label}"
+            default_display = str(current) if not _is_unknown(current) else ""
+
+        val = _prompt(prompt_label, default=default_display)
+        if val:
+            # Try to coerce numeric fields
+            if key in ("Issue", "Volume", "Season", "Episode", "Track", "Year"):
+                try:
+                    if "." in val:
+                        val = float(val)
+                    else:
+                        val = int(val)
+                except ValueError:
+                    pass  # Keep as string
+            metadata[key] = val
+
+    # Re-derive title from filename if still unknown
+    if _is_unknown(metadata.get("Title")) and not _is_unknown(metadata.get("Series")):
+        metadata.setdefault("Title", Path(filepath).stem)
+
+    return metadata
+
+
+# ---------------------------------------------------------------------------
+# Core ingestion logic
+# ---------------------------------------------------------------------------
+
+
+def process_file(
+    filepath: str,
+    media_type: str,
+    config: dict,
+    dry_run: bool = False,
+    no_enrich: bool = False,
+    no_prompt: bool = False,
+    scan: bool = False,
+    yes: bool = False,
+) -> dict:
+    """Process a single media file: extract, enrich, move, scan."""
+    handler = get_handler(media_type)
+    if not handler:
+        return {"status": "error", "error": f"No handler for type: {media_type}", "file": filepath}
+
+    dest_config = config.get("destinations", {}).get(media_type, {})
+    if not dest_config:
+        return {"status": "error", "error": f"No destination config for: {media_type}", "file": filepath}
+
+    # Step 1: Extract metadata
+    metadata = handler.extract_metadata(filepath)
+
+    # Step 2: Enrich (unless disabled)
+    if not no_enrich:
+        with Progress(SpinnerColumn(), TextColumn("[dim]Enriching metadata...[/]"), transient=True) as progress:
+            progress.add_task("enrich", total=None)
+            metadata = handler.enrich_metadata(metadata)
+
+    # Step 2b: Prompt for missing critical metadata
+    if not no_prompt:
+        metadata = prompt_missing_metadata(metadata, handler, filepath)
+
+    # Step 3: Build destination
+    dest_file = handler.build_destination(metadata, dest_config)
+
+    result = {
+        "status": "ok",
+        "file": filepath,
+        "dest": str(dest_file),
+        "metadata": metadata,
+        "media_type": media_type,
+        "handler": handler,
+    }
+
+    # Step 4: Present and move
+    if not dry_run:
+        # Show what we found with rich formatting
+        render_file_result(result)
+
+        # Confirm or auto-confirm
+        if not yes:
+            confirm = console.input("\n[bold yellow]Proceed with move?[/] [dim](y/n/q)[/] ").strip().lower()
+            if confirm in ("q", "quit"):
+                result["status"] = "cancelled"
+                return result
+            if confirm not in ("y", "yes", ""):
+                result["status"] = "skipped"
+                return result
+
+        # Writeback metadata to file
+        try:
+            handler.writeback_metadata(filepath, metadata)
+        except Exception:
+            pass  # Best effort
+
+        # Copy to destination
+        try:
+            copy_to_destination(Path(filepath), dest_file, dest_config, config)
+            host = _get_transport_host(dest_config, config)
+            if destination_root_is_local(dest_config):
+                console.print(f"[green]  ✓ Moved to[/] [bold]{dest_file}[/]")
+            elif host:
+                console.print(
+                    f"[green]  ✓ Copied to[/] [bold]{dest_file}[/] "
+                    f"[dim](on {host})[/]"
+                )
+            else:
+                console.print(f"[green]  ✓ Copied to[/] [bold]{dest_file}[/]")
+
+            src = Path(filepath).resolve()
+            try:
+                if destination_root_is_local(dest_config):
+                    if src != dest_file.resolve():
+                        os.remove(filepath)
+                else:
+                    os.remove(filepath)
+            except OSError as exc:
+                console.print(f"[yellow]  ⚠ Copied but could not remove source: {exc}[/]")
+        except Exception as e:
+            result["status"] = "error"
+            result["error"] = str(e)
+            console.print(f"[red]  ✗ Failed: {e}[/]")
+            if not destination_root_is_local(dest_config):
+                console.print(
+                    "[dim]  Tip: mount the destination path locally or configure transport "
+                    "with [bold]medcat setup --section transport[/][/]"
+                )
+            return result
+
+        if scan:
+            trigger_scan(media_type, config)
+    else:
+        render_file_result(result)
+        host = _get_transport_host(dest_config, config)
+        if destination_root_is_local(dest_config):
+            console.print(f"  [dim]→ (dry-run)[/] {dest_file}")
+        elif host:
+            console.print(f"  [dim]→ (dry-run via SCP to {escape(host)})[/] {escape(dest_file)}")
+        else:
+            console.print(f"  [dim]→ (dry-run)[/] {dest_file}")
+
+    return result
+
+
+def render_file_result(result: dict):
+    """Render a single file result with rich formatting."""
+    meta = result["metadata"]
+    handler = result["handler"]
+    media_type = result["media_type"]
+
+    # Icon per type
+    icons = {"books": "📖", "comics": "💬", "audiobooks": "🎧", "movies": "🎬",
+             "shows": "📺", "music": "🎵", "documentaries": "🎥"}
+    icon = icons.get(media_type, "📄")
+
+    console.print(f"\n{icon} [bold]{meta.get('Title', 'Unknown')}[/]")
+
+    # Author/Artist line
+    author_line = ""
+    if meta.get("Author"):
+        author_line = f"by [cyan]{meta['Author']}[/]"
+    elif meta.get("Artist"):
+        author_line = f"by [cyan]{meta['Artist']}[/]"
+    if author_line:
+        console.print(f"   {author_line}")
+
+    # Extra metadata
+    extras = []
+    if meta.get("Series"):
+        extras.append(f"Series: [green]{meta['Series']}[/]")
+    if meta.get("Issue"):
+        extras.append(f"#{meta['Issue']}")
+    if meta.get("Volume"):
+        extras.append(f"Vol. {meta['Volume']}")
+    if meta.get("Publisher"):
+        extras.append(f"Publisher: {meta['Publisher']}")
+    if meta.get("ISBN"):
+        extras.append(f"ISBN: [dim]{meta['ISBN']}[/]")
+    if meta.get("Year") and meta.get("Year") != "0000":
+        extras.append(f"Year: {meta['Year']}")
+    if meta.get("Season"):
+        extras.append(f"S{meta['Season']:02d}")
+    if meta.get("Episode"):
+        extras.append(f"E{meta['Episode']:02d}")
+    if meta.get("Album"):
+        extras.append(f"Album: {meta['Album']}")
+    if meta.get("Track"):
+        extras.append(f"Track: {meta['Track']:02d}")
+
+    if extras:
+        console.print(f"   {' | '.join(extras)}")
+
+    source = meta.get("Source", "unknown")
+    sources = {
+        "Google Books API": "green",
+        "Open Library": "blue",
+        "MusicBrainz": "blue",
+        "EPUB metadata": "cyan",
+        "ComicInfo.xml": "cyan",
+        "PDF XMP": "cyan",
+        "ffprobe tags": "cyan",
+        "ffprobe": "cyan",
+        "filename": "yellow",
+    }
+    color = sources.get(source, "dim")
+    console.print(f"   Source: [{color}]{source}[/]")
+
+    if meta.get("_error"):
+        console.print(f"   [yellow]⚠ {meta['_error']}[/]")
+
+
+# ---------------------------------------------------------------------------
+# CLI Commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_ingest(args):
+    """Handle 'ingest' command."""
+    config = load_config()
+
+    if _needs_setup():
+        console.print("[yellow]⚠ medcat hasn't been configured yet. Run [bold]medcat setup[/] first.[/]")
+        console.print()
+
+    # Validate dest type
+    media_type = args.dest
+    if not media_type:
+        # Detect from first file
+        files = find_media_files(args.paths[0])
+        if files:
+            media_type = detect_media_type(files[0])
+        else:
+            media_type = "books"
+
+    if media_type not in HANDLERS:
+        console.print(f"[red]Unknown media type: {media_type}[/]")
+        console.print(f"[dim]Supported types: {', '.join(HANDLERS.keys())}[/]")
+        sys.exit(1)
+
+    handler = HANDLERS[media_type]
+    dest_config = config.get("destinations", {}).get(media_type, {})
+
+    if not dest_config or not dest_config.get("path"):
+        console.print(f"[red]No destination configured for: {media_type}[/]")
+        console.print(f"[dim]Run: medcat setup --section destinations[/]")
+        sys.exit(1)
+
+    # Collect all files
+    all_files = []
+    for path in args.paths:
+        all_files.extend(find_media_files(path, media_type))
+
+    if not all_files:
+        console.print("[yellow]No matching media files found.[/]")
+        return
+
+    host = _get_transport_host(dest_config, config)
+    transport = (
+        "local"
+        if destination_root_is_local(dest_config)
+        else (f"SCP → {host}" if host else "remote (no host)")
+    )
+    console.print(f"[bold]{handler.human_name}[/] → [dim]{escape(dest_config['path'])}[/] [dim]({escape(transport)})[/]")
+    console.print(f"[dim]Found {len(all_files)} file(s) to process[/]")
+    if args.dry_run:
+        console.print("[yellow]🔍 DRY RUN — no files will be moved[/]")
+
+    # Process files
+    results = []
+    process_kwargs = {
+        "media_type": media_type,
+        "config": config,
+        "dry_run": args.dry_run,
+        "no_enrich": args.no_enrich,
+        "no_prompt": args.no_prompt,
+        "scan": args.scan,
+        "yes": args.yes,
+    }
+    interactive = not args.yes and not args.dry_run
+
+    if interactive:
+        # Progress bars refresh the terminal and hide console.input() prompts.
+        for i, filepath in enumerate(all_files, 1):
+            if len(all_files) > 1:
+                console.print(f"\n[dim]File {i}/{len(all_files)}[/]")
+            results.append(process_file(filepath, **process_kwargs))
+    else:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task(f"Processing {handler.human_name.lower()}...", total=len(all_files))
+            for filepath in all_files:
+                results.append(process_file(filepath, **process_kwargs))
+                progress.update(task, advance=1)
+
+    # Summary
+    ok = [r for r in results if r["status"] == "ok"]
+    skipped = [r for r in results if r["status"] == "skipped"]
+    errors = [r for r in results if r["status"] == "error"]
+    cancelled = [r for r in results if r["status"] == "cancelled"]
+
+    summary = []
+    if ok:
+        summary.append(f"[green]{len(ok)} ingested[/]")
+    if skipped:
+        summary.append(f"[yellow]{len(skipped)} skipped[/]")
+    if errors:
+        summary.append(f"[red]{len(errors)} errors[/]")
+    if cancelled:
+        summary.append(f"[dim]{len(cancelled)} cancelled[/]")
+
+    if summary:
+        console.print(f"\n[bold]Summary:[/] {' | '.join(summary)}")
+
+    if errors:
+        console.print("\n[red]Errors:[/]")
+        for r in errors:
+            console.print(f"  [red]✗[/] {r['file']}: {r.get('error', 'unknown')}")
+
+    if not args.dry_run and ok and not args.scan:
+        console.print(f"\n[dim]💡 Run [bold]medcat scan --service kavita[/] (or another service) to refresh the library after ingestion.[/]")
+
+
+def cmd_identify(args):
+    """Handle 'identify' command."""
+    config = load_config()
+
+    files = []
+    for path in args.paths:
+        files.extend(find_media_files(path))
+
+    if not files:
+        console.print("[yellow]No files found.[/]")
+        return
+
+    for filepath in files:
+        media_type = detect_media_type(filepath)
+        handler = get_handler(media_type)
+        if not handler:
+            console.print(f"[dim]{filepath}[/] → [yellow]unknown type[/]")
+            continue
+
+        dest_config = config.get("destinations", {}).get(media_type, {})
+        metadata = handler.extract_metadata(filepath)
+
+        if not args.no_enrich:
+            metadata = handler.enrich_metadata(metadata)
+
+        dest_file = handler.build_destination(metadata, dest_config)
+
+        result = {"status": "ok", "file": filepath, "dest": str(dest_file),
+                  "metadata": metadata, "media_type": media_type, "handler": handler}
+        render_file_result(result)
+        console.print(f"  → [dim]{dest_file}[/]")
+
+
+def cmd_scan(args):
+    """Handle 'scan' command."""
+    config = load_config()
+
+    service = args.service
+    if not service:
+        # Default to first configured service with scan capability
+        for svc_name in KNOWN_SERVICES:
+            if svc_name in config.get("services", {}):
+                service = svc_name
+                break
+    if not service:
+        console.print("[yellow]No services configured. Run: [bold]medcat setup --section services[/][/]")
+        return
+
+    library_id = args.library_id or 1
+
+    if service == "kavita":
+        trigger_kavita_scan(library_id, config)
+    elif service == "readarr":
+        trigger_readarr_scan(config)
+    elif service == "radarr":
+        trigger_arr_scan("radarr", "DownloadedMoviesScan", config, "Radarr")
+    elif service == "sonarr":
+        trigger_arr_scan("sonarr", "DownloadedEpisodesScan", config, "Sonarr")
+    elif service == "lidarr":
+        trigger_arr_scan("lidarr", "DownloadedAlbumsScan", config, "Lidarr")
+    else:
+        console.print(f"[yellow]Scan not implemented for: {service}[/]")
+        console.print(f"[dim]Supported: {', '.join(KNOWN_SERVICES.keys())}[/]")
+
+
+def cmd_setup(args):
+    """Handle 'setup' command — interactive configuration wizard."""
+    run_setup_wizard(section=getattr(args, "section", None))
+
+
+def _mask_secrets(obj):
+    """Recursively mask api_key values in a config dict for display."""
+    if isinstance(obj, dict):
+        return {k: ("***" if k in ("api_key", "apikey", "key") and isinstance(v, str) and v else
+                     _mask_secrets(v) if isinstance(v, (dict, list)) else v)
+                for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_mask_secrets(item) for item in obj]
+    return obj
+
+
+def cmd_config(args):
+    """Handle 'config' command — view and manage configuration."""
+    config = load_config()
+
+    # --- config get <key> ---
+    if getattr(args, "config_action", None) == "get":
+        key = args.config_key
+        val = _config_get_nested(config, key)
+        if val is None:
+            console.print(f"[yellow]Key not found: {key}[/]")
+        elif isinstance(val, dict):
+            masked = _mask_secrets(val)
+            console.print(json.dumps(masked, indent=2))
+        else:
+            display = "***" if "api_key" in key.lower() else val
+            console.print(f"{display}")
+        return
+
+    # --- config set <key> <value> ---
+    if getattr(args, "config_action", None) == "set":
+        key = args.config_key
+        value = args.config_value
+        _config_set_nested(config, key, value)
+        save_config(config)
+        display = "***" if "api_key" in key.lower() else value
+        console.print(f"[green]✓[/] Set [bold]{key}[/] = [dim]{display}[/]")
+        return
+
+    # --- config unset <key> ---
+    if getattr(args, "config_action", None) == "unset":
+        key = args.config_key
+        if _config_unset_nested(config, key):
+            save_config(config)
+            console.print(f"[green]✓[/] Removed [bold]{key}[/]")
+        else:
+            console.print(f"[yellow]Key not found: {key}[/]")
+        return
+
+    # --- config list [section] ---
+    if getattr(args, "config_action", None) == "list":
+        section = getattr(args, "section", None)
+        if section:
+            node = _config_get_nested(config, section)
+            if isinstance(node, dict):
+                for k, v in _mask_secrets(node).items():
+                    if isinstance(v, dict):
+                        console.print(f"  [bold]{k}:[/]")
+                        for sk, sv in v.items():
+                            console.print(f"    {sk} = {sv}")
+                    else:
+                        console.print(f"  {k} = {v}")
+            else:
+                console.print(f"[yellow]Section not found: {section}[/]")
+        else:
+            # List all top-level sections
+            for section_name in ("transport", "destinations", "services"):
+                node = config.get(section_name)
+                if node:
+                    count = len(node) if isinstance(node, dict) else 0
+                    console.print(f"  [bold]{section_name}[/] ({count} entries)")
+                else:
+                    console.print(f"  [dim]{section_name}[/] (not configured)")
+        return
+
+    # --- config --show ---
+    if getattr(args, "show", False):
+        masked = _mask_secrets(config)
+        console.print(json.dumps(masked, indent=2))
+        return
+
+    # --- config --check ---
+    if getattr(args, "check", False):
+        issues = validate_config(config)
+        if not issues:
+            console.print("[green]✓ Configuration looks good![/]")
+            return
+
+        severity_colors = {"critical": "red", "warn": "yellow", "info": "blue"}
+        for issue in issues:
+            color = severity_colors.get(issue["severity"], "dim")
+            icon = {"critical": "✗", "warn": "⚠", "info": "ℹ"}.get(issue["severity"], "•")
+            console.print(f"  [{color}]{icon} {issue['section']}:[/] {issue['message']}")
+        return
+
+    # --- config test [services...] ---
+    if getattr(args, "config_action", None) == "test":
+        services_to_test = getattr(args, "test_services", []) or list(config.get("services", {}).keys())
+        if not services_to_test:
+            console.print("[yellow]No services configured to test. Run: [bold]medcat setup --section services[/][/]")
+            return
+
+        for svc_name in services_to_test:
+            if svc_name not in config.get("services", {}):
+                console.print(f"  [dim]• {svc_name}: not configured, skipping[/]")
+                continue
+            console.print(f"  [dim]Testing {svc_name}...[/]", end="")
+            result = test_service_connection(svc_name, config)
+            if result["ok"]:
+                msg = "[green]✓ connected[/]"
+                if result.get("warning"):
+                    msg += f" [yellow]({result['warning']})[/]"
+                console.print(f"\r  [green]✓ {svc_name}:[/] connected")
+            else:
+                console.print(f"\r  [red]✗ {svc_name}:[/] {result.get('error', 'Failed')}")
+        return
+
+    # --- config --reset ---
+    if getattr(args, "reset", False):
+        save_config(dict(DEFAULT_CONFIG))
+        SETUP_MARKER.unlink(missing_ok=True)
+        console.print("[green]✓ Config reset to clean defaults.[/]")
+        console.print("[dim]Run [bold]medcat setup[/] to reconfigure.[/]")
+        return
+
+
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Search & Download Engine
+# ---------------------------------------------------------------------------
+
+
+def _human_size(n: int) -> str:
+    """Format byte count as human-readable string."""
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < 1024:
+            return f"{n:.1f} {unit}" if isinstance(n, float) else f"{n} {unit}"
+        n /= 1024
+    return f"{n:.1f} PB"
+
+
+def _format_age(age_minutes: float) -> str:
+    """Format age in minutes as human-readable string."""
+    if age_minutes < 60:
+        return f"{int(age_minutes)}m ago"
+    hours = age_minutes / 60
+    if hours < 24:
+        return f"{int(hours)}h ago"
+    days = hours / 24
+    if days < 30:
+        return f"{int(days)}d ago"
+    return f"{int(days / 30)}mo ago"
+
+
+# ---------------------------------------------------------------------------
+# Search result type
+# ---------------------------------------------------------------------------
+
+
+class SearchResult:
+    """Normalized search result from any source."""
+
+    def __init__(self, *, title, source, size=None, seeders=None, leechers=None,
+                 age=None, guid=None, download_url=None, magnet_url=None,
+                 info_url=None, indexer=None, categories=None, protocol=None,
+                 raw=None, media_type=None, author=None, year=None,
+                 identifier=None, format=None, description=None):
+        self.title = title
+        self.source = source          # "prowlarr", "archive.org", "youtube", "magnet", "direct"
+        self.size = size              # bytes (int)
+        self.seeders = seeders
+        self.leechers = leechers
+        self.age = age                # minutes (float)
+        self.guid = guid
+        self.download_url = download_url
+        self.magnet_url = magnet_url
+        self.info_url = info_url
+        self.indexer = indexer
+        self.categories = categories or []
+        self.protocol = protocol      # "torrent", "usenet", "nzb", "direct", "stream"
+        self.raw = raw                # original API response
+        self.media_type = media_type
+        self.author = author
+        self.year = year
+        self.identifier = identifier  # Archive.org item ID, YouTube video ID, etc.
+        self.format = format
+        self.description = description  # Short description (from URL probes, etc.)
+
+    @property
+    def size_human(self):
+        return _human_size(self.size) if self.size else "—"
+
+    @property
+    def age_human(self):
+        return _format_age(self.age) if self.age else "—"
+
+    def __repr__(self):
+        return f"<SearchResult: {self.title[:50]} ({self.source})>"
+
+
+# ---------------------------------------------------------------------------
+# Search source: Prowlarr
+# ---------------------------------------------------------------------------
+
+
+def _prowlarr_search(query: str, config: dict, media_type: str = None,
+                     limit: int = 30) -> list:
+    """Search Prowlarr indexers. Returns list of SearchResult."""
+    svc = config.get("services", {}).get("prowlarr", {})
+    url = svc.get("url", "").rstrip("/")
+    api_key = svc.get("api_key", "")
+
+    if not url or not api_key:
+        console.print("[yellow]⚠ Prowlarr not configured. Run: [bold]medcat setup --section services[/][/]")
+        return []
+
+    categories = []
+    if media_type and media_type in PROWLARR_CATEGORIES:
+        categories = PROWLARR_CATEGORIES[media_type]
+
+    params = {"query": query, "limit": limit}
+    if categories:
+        params["categories"] = categories
+
+    try:
+        resp = requests.get(
+            f"{url}/api/v1/search",
+            params=params,
+            headers={"X-Api-Key": api_key},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            console.print(f"[red]✗ Prowlarr returned HTTP {resp.status_code}[/]")
+            return []
+
+        results = []
+        for item in resp.json():
+            r = SearchResult(
+                title=item.get("title", "?"),
+                source="prowlarr",
+                size=item.get("size"),
+                seeders=item.get("seeders"),
+                leechers=item.get("leechers"),
+                age=item.get("ageMinutes"),
+                guid=item.get("guid"),
+                download_url=item.get("downloadUrl"),
+                magnet_url=item.get("magnetUrl"),
+                info_url=item.get("infoUrl"),
+                indexer=item.get("indexer"),
+                categories=[c.get("name", "") for c in item.get("categories", [])],
+                protocol=item.get("protocol", "").lower() if item.get("protocol") else None,
+                raw=item,
+            )
+            results.append(r)
+        return results
+
+    except requests.ConnectionError:
+        console.print(f"[red]✗ Cannot connect to Prowlarr at {url}[/]")
+        return []
+    except Exception as e:
+        console.print(f"[red]✗ Prowlarr error: {e}[/]")
+        return []
+
+
+def _prowlarr_download(result: SearchResult, config: dict) -> bool:
+    """Trigger download via Prowlarr — pushes to configured download client."""
+    svc = config.get("services", {}).get("prowlarr", {})
+    url = svc.get("url", "").rstrip("/")
+    api_key = svc.get("api_key", "")
+
+    if not result.guid or not result.raw:
+        console.print("[red]✗ No download info in search result[/]")
+        return False
+
+    try:
+        # Prowlarr: POST the release back to trigger download
+        resp = requests.post(
+            f"{url}/api/v1/search",
+            json=result.raw,
+            headers={"X-Api-Key": api_key},
+            timeout=15,
+        )
+        if resp.status_code in (200, 201):
+            return True
+        else:
+            console.print(f"[red]✗ Prowlarr download failed: HTTP {resp.status_code}[/]")
+            return False
+    except Exception as e:
+        console.print(f"[red]✗ Prowlarr download error: {e}[/]")
+        return False
+
+
+def _prowlarr_download_magnet(result: SearchResult, config: dict) -> bool:
+    """Send a magnet URL to torrent client via Prowlarr indexer download."""
+    svc = config.get("services", {}).get("prowlarr", {})
+    url = svc.get("url", "").rstrip("/")
+    api_key = svc.get("api_key", "")
+    indexer_id = result.raw.get("indexerId") if result.raw else None
+
+    if not indexer_id:
+        return False
+
+    try:
+        link = result.magnet_url or result.download_url
+        if not link:
+            return False
+        resp = requests.get(
+            f"{url}/api/v1/indexer/{indexer_id}/download",
+            params={"link": link},
+            headers={"X-Api-Key": api_key},
+            timeout=15,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Search source: Internet Archive
+# ---------------------------------------------------------------------------
+
+
+def _archive_search(query: str, media_type: str = None, limit: int = 20) -> list:
+    """Search Internet Archive. Returns list of SearchResult."""
+    # Build media-type-specific query filters
+    mediatype_map = {
+        "books": "texts",
+        "audiobooks": "audio",
+        "movies": "movies",
+        "shows": "movies",
+        "music": "audio",
+        "documentaries": "movies",
+    }
+    ia_mediatype = mediatype_map.get(media_type)
+
+    # Build the query
+    q_parts = [query]
+    if ia_mediatype:
+        q_parts.append(f"mediatype:{ia_mediatype}")
+
+    params = {
+        "q": " AND ".join(q_parts),
+        "fl": "identifier,title,creator,date,description,downloads,avg_rating,num_reviews,language,format,size",
+        "sort": ["downloads desc", "avg_rating desc"],
+        "rows": limit,
+        "page": 1,
+        "output": "json",
+    }
+
+    try:
+        resp = requests.get(
+            "https://archive.org/advancedsearch.php",
+            params=params,
+            timeout=20,
+        )
+        if resp.status_code != 200:
+            console.print(f"[red]✗ Internet Archive returned HTTP {resp.status_code}[/]")
+            return []
+
+        data = resp.json()
+        docs = data.get("response", {}).get("docs", [])
+        results = []
+        for doc in docs:
+            title = doc.get("title", doc.get("identifier", "Unknown"))
+            creator = doc.get("creator", "")
+            # Parse date to year
+            date_str = doc.get("date", "")
+            year = date_str[:4] if len(date_str) >= 4 else None
+            # Format list
+            formats = doc.get("format", [])
+            if isinstance(formats, str):
+                formats = [formats]
+
+            r = SearchResult(
+                title=title,
+                source="archive.org",
+                size=doc.get("size"),
+                guid=doc.get("identifier"),
+                identifier=doc.get("identifier"),
+                info_url=f"https://archive.org/details/{doc.get('identifier', '')}",
+                download_url=f"https://archive.org/download/{doc.get('identifier', '')}",
+                author=creator if isinstance(creator, str) else "; ".join(creator or []),
+                year=year,
+                protocol="direct",
+                media_type=media_type,
+                format=", ".join(formats[:5]) if formats else None,
+                raw=doc,
+            )
+            results.append(r)
+        return results
+
+    except Exception as e:
+        console.print(f"[red]✗ Internet Archive error: {e}[/]")
+        return []
+
+
+def _archive_download(result: SearchResult, dest_dir: str = None) -> bool:
+    """Download an Internet Archive item. Uses 'ia' CLI if available, else direct HTTP."""
+    identifier = result.identifier
+    if not identifier:
+        return False
+
+    dest = dest_dir or tempfile.mkdtemp(prefix="medcat_ia_")
+
+    # Try 'ia' CLI first (handles large multi-file items well)
+    ia_cli = shutil.which("ia")
+    if ia_cli:
+        console.print(f"[dim]  Using ia CLI to download {identifier}...[/]")
+        try:
+            proc = subprocess.run(
+                ["ia", "download", "--destdir", dest, identifier],
+                capture_output=True, text=True, timeout=300,
+            )
+            if proc.returncode == 0:
+                console.print(f"[green]  ✓ Downloaded to {escape(dest)}[/]")
+                return True
+            else:
+                console.print(f"[yellow]  ⚠ ia CLI failed: {proc.stderr[:200]}[/]")
+        except FileNotFoundError:
+            pass
+
+    # Fallback: direct HTTP download for single-file items
+    console.print(f"[dim]  Downloading from archive.org...[/]")
+    try:
+        # Get the item metadata to find files
+        meta_resp = requests.get(
+            f"https://archive.org/metadata/{identifier}",
+            params={"output": "json"},
+            timeout=15,
+        )
+        if meta_resp.status_code != 200:
+            return False
+
+        metadata = meta_resp.json()
+        files = metadata.get("files", [])
+
+        # Pick the best file based on media type preferences
+        preferred_exts = {
+            "books": [".epub", ".pdf"],
+            "audiobooks": [".mp3", ".m4b", ".ogg"],
+            "music": [".flac", ".mp3", ".ogg"],
+            "movies": [".mp4", ".mkv"],
+        }
+        prefs = preferred_exts.get(result.media_type, [])
+        target_file = None
+
+        for ext in prefs:
+            for f in files:
+                name = f.get("name", "")
+                if name.lower().endswith(ext) and f.get("source") != "metadata":
+                    target_file = name
+                    break
+            if target_file:
+                break
+
+        if not target_file and files:
+            # Fall back to first non-metadata file
+            for f in files:
+                if f.get("source") != "metadata" and not f["name"].startswith("_"):
+                    target_file = f["name"]
+                    break
+
+        if not target_file:
+            console.print("[yellow]  ⚠ No downloadable file found[/]")
+            return False
+
+        dl_url = f"https://archive.org/download/{identifier}/{target_file}"
+        console.print(f"[dim]  Downloading {escape(target_file)} ({dl_url})[/]")
+
+        r = requests.get(dl_url, stream=True, timeout=120)
+        if r.status_code != 200:
+            console.print(f"[red]  ✗ Download failed: HTTP {r.status_code}[/]")
+            return False
+
+        out_path = os.path.join(dest, target_file)
+        total = int(r.headers.get("content-length", 0))
+        with open(out_path, "wb") as f:
+            downloaded = 0
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+                downloaded += len(chunk)
+
+        console.print(f"[green]  ✓ Downloaded to {escape(out_path)}[/]")
+        return True
+
+    except Exception as e:
+        console.print(f"[red]  ✗ Download error: {e}[/]")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Search source: YouTube
+# ---------------------------------------------------------------------------
+
+
+def _youtube_search(query: str, media_type: str = None, limit: int = 15) -> list:
+    """Search YouTube. Returns list of SearchResult."""
+    yt_dlp = shutil.which("yt-dlp")
+    if not yt_dlp:
+        console.print("[yellow]⚠ yt-dlp not found. Install: pip install yt-dlp[/]")
+        return []
+
+    try:
+        cmd = [
+            yt_dlp, "--flat-playlist", "--dump-json", "--no-download",
+            f"--playlist-end={limit}",
+            f"ytsearch{limit}:{query}",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+        if proc.returncode != 0:
+            # Try line-by-line parsing
+            results = []
+            for line in proc.stdout.strip().split("\n"):
+                if not line.strip():
+                    continue
+                try:
+                    import json as _json
+                    item = _json.loads(line)
+                    results.append(item)
+                except Exception:
+                    continue
+        else:
+            import json as _json
+            results = [_json.loads(line) for line in proc.stdout.strip().split("\n") if line.strip()]
+
+        out = []
+        for item in results:
+            duration = item.get("duration")
+            # Format duration
+            if duration and isinstance(duration, (int, float)):
+                mins, secs = divmod(int(duration), 60)
+                hours, mins = divmod(mins, 60)
+                dur_str = f"{hours}:{mins:02d}:{secs:02d}" if hours else f"{mins}:{secs:02d}"
+            else:
+                dur_str = "—"
+
+            r = SearchResult(
+                title=item.get("title", "?"),
+                source="youtube",
+                guid=item.get("id"),
+                identifier=item.get("id"),
+                info_url=f"https://youtube.com/watch?v={item.get('id', '')}",
+                download_url=f"https://youtube.com/watch?v={item.get('id', '')}",
+                size=None,
+                protocol="stream",
+                media_type=media_type,
+                author=item.get("channel"),
+                format=dur_str,
+                raw=item,
+            )
+            out.append(r)
+        return out
+
+    except subprocess.TimeoutExpired:
+        console.print("[yellow]⚠ YouTube search timed out[/]")
+        return []
+    except Exception as e:
+        console.print(f"[red]✗ YouTube search error: {e}[/]")
+        return []
+
+
+def _youtube_download(result: SearchResult, dest_dir: str = None,
+                      audio_only: bool = False) -> bool:
+    """Download a YouTube video/audio using yt-dlp.
+
+    Video format strategy (QuickTime / Apple ecosystem compatible):
+        1. H.264 video + AAC audio in MP4  (universal, no re-encode)
+        2. Any video + AAC audio in MP4     (may remux VP9/AV1 video)
+        3. Best single pre-merged stream    (fallback, still MP4)
+
+    Audio-only: extracted to MP3 at highest quality.
+    """
+    yt_dlp = shutil.which("yt-dlp")
+    if not yt_dlp:
+        console.print("[red]✗ yt-dlp not found. Install: pip install yt-dlp[/]")
+        return False
+
+    dest = dest_dir or tempfile.mkdtemp(prefix="medcat_yt_")
+    url = result.download_url or result.info_url
+    if not url:
+        return False
+
+    cmd = [yt_dlp, "--no-playlist", "-o", os.path.join(dest, "%(title)s.%(ext)s")]
+
+    if audio_only or result.media_type in ("music", "audiobooks"):
+        cmd += ["-x", "--audio-format", "mp3", "--audio-quality", "0"]
+    else:
+        # Format selection that ensures QuickTime / macOS / iOS compatibility.
+        #
+        # YouTube serves its best video in VP9 (webm) or AV1 — codecs that
+        # QuickTime cannot decode.  The old format string
+        #   bestvideo[ext=mp4]+bestaudio[ext=m4a]
+        # could still pick VP9 video (ext is about the *container*, not the
+        # codec) or pair H.264 video with Opus audio, both of which cause
+        # "media not compatible" errors in QuickTime.
+        #
+        # Fix: explicitly request H.264 video (vcodec^=avc1) + AAC audio
+        # (acodec^=mp4a) in an MP4 container.  Fall back progressively to
+        # any MP4 pre-merged stream, then to remuxing whatever we get.
+        cmd += [
+            "-f",
+            # 1) Ideal: H.264 + AAC (no re-encode needed)
+            "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[acodec^=mp4a]/"
+            # 2) H.264 video + any audio → remux to MP4
+            "bestvideo[vcodec^=avc1]+bestaudio/"
+            # 3) Any pre-merged MP4 (often 720p)
+            "best[ext=mp4]/"
+            # 4) Last resort: best single stream of any format
+            "best",
+            # Force output to MP4 container regardless of source format
+            "--merge-output-format", "mp4",
+            # Remux (no re-encode) into mp4 if the container isn't mp4
+            "--remux-video", "mp4",
+        ]
+
+    cmd.append(url)
+
+    try:
+        console.print(f"[dim]  Downloading from YouTube...[/]")
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if proc.returncode == 0:
+            console.print(f"[green]  ✓ Downloaded to {escape(dest)}[/]")
+            return True
+        else:
+            console.print(f"[red]  ✗ yt-dlp failed: {proc.stderr[:200]}[/]")
+            return False
+    except subprocess.TimeoutExpired:
+        console.print("[red]  ✗ Download timed out[/]")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Search source: Direct magnet/torrent
+# ---------------------------------------------------------------------------
+
+
+def _send_magnet_to_client(magnet_url: str, config: dict) -> bool:
+    """Send a magnet link to the configured torrent client."""
+    # Try Deluge first
+    deluge = config.get("services", {}).get("deluge", {})
+    if deluge.get("url"):
+        if _deluge_add_magnet(magnet_url, deluge):
+            return True
+
+    # Try qBittorrent
+    qbt = config.get("services", {}).get("qbittorrent", {})
+    if qbt.get("url"):
+        if _qbittorrent_add_magnet(magnet_url, qbt):
+            return True
+
+    console.print("[yellow]⚠ No torrent client configured. Run: [bold]medcat setup --section services[/][/]")
+    return False
+
+
+def _deluge_add_magnet(magnet_url: str, svc_config: dict) -> bool:
+    """Add magnet to Deluge via Web UI JSON-RPC."""
+    url = svc_config["url"].rstrip("/")
+    password = svc_config.get("password", "")
+
+    try:
+        # Step 1: Authenticate
+        auth = requests.post(
+            f"{url}/json",
+            json={"id": 1, "method": "auth.login", "params": [password]},
+            timeout=10,
+        )
+        if auth.status_code != 200 or not auth.json().get("result"):
+            console.print("[red]✗ Deluge auth failed[/]")
+            return False
+
+        cookie = auth.headers.get("Set-Cookie", "")
+        headers = {"Cookie": cookie} if cookie else {}
+
+        # Step 2: Add magnet
+        resp = requests.post(
+            f"{url}/json",
+            json={"id": 2, "method": "core.add_torrent_magnet", "params": [magnet_url, {}]},
+            headers=headers,
+            timeout=10,
+        )
+        result = resp.json().get("result")
+        if result:
+            console.print(f"[green]  ✓ Added to Deluge: {escape(str(result)[:50])}[/]")
+            return True
+        else:
+            console.print(f"[red]✗ Deluge rejected magnet[/]")
+            return False
+
+    except Exception as e:
+        console.print(f"[red]✗ Deluge error: {e}[/]")
+        return False
+
+
+def _qbittorrent_add_magnet(magnet_url: str, svc_config: dict) -> bool:
+    """Add magnet to qBittorrent via Web API."""
+    url = svc_config["url"].rstrip("/")
+    username = svc_config.get("username", "admin")
+    password = svc_config.get("password", "")
+
+    try:
+        session = requests.Session()
+        # Authenticate
+        auth = session.post(
+            f"{url}/api/v2/auth/login",
+            data={"username": username, "password": password},
+            timeout=10,
+        )
+        if auth.status_code != 200 or auth.text.strip().lower() not in ("ok", "ok."):
+            console.print("[red]✗ qBittorrent auth failed[/]")
+            return False
+
+        # Add magnet
+        resp = session.post(
+            f"{url}/api/v2/torrents/add",
+            data={"urls": magnet_url},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            console.print("[green]  ✓ Added to qBittorrent[/]")
+            return True
+        else:
+            console.print(f"[red]✗ qBittorrent returned {resp.status_code}[/]")
+            return False
+
+    except Exception as e:
+        console.print(f"[red]✗ qBittorrent error: {e}[/]")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Unified search dispatcher
+# ---------------------------------------------------------------------------
+
+
+# Source registry: name → (search_fn, download_fn, label, needs_config)
+SEARCH_SOURCES = {
+    "prowlarr": {
+        "search": lambda q, cfg, mt, lim: _prowlarr_search(q, cfg, mt, lim),
+        "download": lambda r, cfg: _prowlarr_download(r, cfg) or _prowlarr_download_magnet(r, cfg),
+        "label": "Prowlarr (usenet/torrent indexers)",
+        "needs_config": True,
+        "icon": "🔍",
+    },
+    "archive": {
+        "search": lambda q, cfg, mt, lim: _archive_search(q, mt, lim),
+        "download": lambda r, cfg: _archive_download(r),
+        "label": "Internet Archive (free media)",
+        "needs_config": False,
+        "icon": "🏛️",
+    },
+    "youtube": {
+        "search": lambda q, cfg, mt, lim: _youtube_search(q, mt, lim),
+        "download": lambda r, cfg: _youtube_download(r),
+        "label": "YouTube (yt-dlp)",
+        "needs_config": False,
+        "icon": "▶️",
+    },
+}
+
+# Media-type to default source mapping
+DEFAULT_SOURCES_BY_TYPE = {
+    "books": ["prowlarr", "archive"],
+    "audiobooks": ["prowlarr", "archive", "youtube"],
+    "comics": ["prowlarr", "archive"],
+    "manga": ["prowlarr", "archive"],
+    "movies": ["prowlarr", "youtube"],
+    "shows": ["prowlarr", "youtube"],
+    "music": ["prowlarr", "youtube", "archive"],
+    "documentaries": ["prowlarr", "youtube", "archive"],
+}
+
+
+def _resolve_sources(sources_arg: str, media_type: str = None) -> list:
+    """Resolve source argument to list of source names.
+    
+    sources_arg can be:
+      - comma-separated list of source names
+      - "all" for all available sources
+      - "auto" or None for media-type defaults
+    """
+    if not sources_arg or sources_arg == "auto":
+        if media_type:
+            return DEFAULT_SOURCES_BY_TYPE.get(media_type, ["prowlarr", "archive"])
+        return ["prowlarr", "archive"]
+
+    if sources_arg == "all":
+        return list(SEARCH_SOURCES.keys())
+
+    return [s.strip() for s in sources_arg.split(",") if s.strip() in SEARCH_SOURCES]
+
+
+# ---------------------------------------------------------------------------
+# Result rendering
+# ---------------------------------------------------------------------------
+
+
+def _render_search_results(results: list, title: str = "Search Results") -> None:
+    """Render search results as a Rich table."""
+    if not results:
+        console.print("[dim]No results found.[/]")
+        return
+
+    table = Table(title=title, show_lines=False, padding=(0, 1))
+    table.add_column("#", style="dim", width=3, justify="right")
+    table.add_column("Source", style="dim", width=10)
+    table.add_column("Title", style="bold", max_width=50, no_wrap=False)
+    table.add_column("Size", justify="right", width=9)
+    table.add_column("Seeds", justify="right", width=5, style="green")
+    table.add_column("Age", width=7, style="dim")
+    table.add_column("Extra", style="dim", max_width=30)
+
+    for i, r in enumerate(results, 1):
+        # Source icon
+        src_info = SEARCH_SOURCES.get(r.source, {})
+        icon = src_info.get("icon", "?")
+
+        # Extra info varies by source
+        extra_parts = []
+        if r.indexer:
+            extra_parts.append(r.indexer)
+        if r.author:
+            extra_parts.append(r.author[:25])
+        if r.year:
+            extra_parts.append(str(r.year))
+        if r.format:
+            extra_parts.append(r.format[:20])
+        extra = " | ".join(extra_parts) if extra_parts else ""
+
+        seeds_str = str(r.seeders) if r.seeders is not None else ""
+
+        table.add_row(
+            str(i),
+            f"{icon} {r.source}",
+            r.title[:60],
+            r.size_human,
+            seeds_str,
+            r.age_human,
+            extra,
+        )
+
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# URL routing engine — classifies, probes, and routes any URL to the right handler
+# ---------------------------------------------------------------------------
+
+# Recognised URL patterns — return source name + optional parsing
+URL_PATTERNS = [
+    # YouTube / YouTube Music / Shorts
+    (r"^(https?://)?(www\.|music\.)?(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)", "youtube"),
+    # Internet Archive
+    (r"^(https?://)?archive\.org/(details|download)/", "archive"),
+    # Magnet links
+    (r"^magnet:\?xt=urn:btih:", "magnet"),
+    # Torrent files
+    (r"\.torrent(\?.*)?$", "torrent"),
+]
+
+
+def _looks_like_url(s: str) -> bool:
+    """Return True when the string is likely a URL (or magnet link)."""
+    s = s.strip()
+    return s.startswith(("http://", "https://", "magnet:"))
+
+
+def _classify_url(url: str) -> str:
+    """Classify a URL into: youtube, archive, magnet, torrent, direct, unknown."""
+    url = url.strip()
+    for pattern, source in URL_PATTERNS:
+        if re.search(pattern, url, re.IGNORECASE):
+            return source
+    # Recognise generic torrent file URLs
+    if url.lower().endswith(".torrent"):
+        return "torrent"
+    return "direct"
+
+
+def _guess_media_type_from_url(url: str, content_type: str = "") -> Optional[str]:
+    """Guess the medcat media type from URL path or Content-Type header."""
+    # Try Content-Type first
+    ct = content_type.lower()
+    ct_map = {
+        "application/epub+zip": "books",
+        "application/pdf": "books",
+        "application/x-cbz": "comics",
+        "application/x-cbr": "comics",
+        "audio/mpeg": "music",
+        "audio/flac": "music",
+        "audio/m4b": "audiobooks",
+        "audio/aac": "audiobooks",
+        "audio/x-m4a": "audiobooks",
+        "video/mp4": "movies",
+        "video/x-matroska": "movies",
+        "video/webm": "movies",
+    }
+    for prefix, mt in ct_map.items():
+        if prefix in ct:
+            return mt
+
+    # Try file extension from URL path
+    ext = Path(urlparse(url).path).suffix.lower()
+    ext_map = {
+        ".epub": "books",
+        ".pdf": "books",
+        ".cbz": "comics",
+        ".cbr": "comics",
+        ".m4b": "audiobooks",
+        ".aax": "audiobooks",
+        ".aa": "audiobooks",
+        ".mp3": "music",
+        ".flac": "music",
+        ".opus": "music",
+        ".mkv": "movies",
+        ".mp4": "movies",
+        ".avi": "movies",
+        ".mov": "movies",
+        ".torrent": None,  # skip — handled separately
+    }
+    return ext_map.get(ext)
+
+
+def _probe_youtube_url(url: str, audio_only: bool = False) -> Optional[SearchResult]:
+    """Probe a YouTube URL with yt-dlp to get title, duration, and preview."""
+    yt_dlp = shutil.which("yt-dlp")
+    if not yt_dlp:
+        return None
+
+    try:
+        cmd = [
+            yt_dlp, "--dump-json", "--no-download", "--no-playlist",
+            "--flat-playlist",
+        ]
+        proc = subprocess.run(
+            cmd + [url],
+            capture_output=True, text=True, timeout=20,
+        )
+        if proc.returncode != 0:
+            return None
+        import json as _json
+        item = _json.loads(proc.stdout)
+
+        duration = item.get("duration")
+        dur_str = None
+        if duration and isinstance(duration, (int, float)):
+            mins, secs = divmod(int(duration), 60)
+            hours, mins = divmod(mins, 60)
+            dur_str = f"{hours}:{mins:02d}:{secs:02d}" if hours else f"{mins}:{secs:02d}"
+
+        description = item.get("description", "")[:200] if item.get("description") else None
+
+        title = item.get("title", "Unknown")
+        channel = item.get("channel") or item.get("uploader", "")
+        vid_id = item.get("id") or item.get("display_id", "")
+
+        return SearchResult(
+            title=title,
+            source="youtube",
+            guid=vid_id,
+            identifier=vid_id,
+            info_url=f"https://youtube.com/watch?v={vid_id}",
+            download_url=f"https://youtube.com/watch?v={vid_id}",
+            protocol="stream",
+            media_type=None,  # caller can override
+            author=channel,
+            format=dur_str,
+            description=description,
+            raw=item,
+        )
+    except Exception:
+        return None
+
+
+def _probe_direct_url(url: str) -> Optional[SearchResult]:
+    """Probe a direct file URL via HEAD request to get size, type, filename."""
+    try:
+        resp = requests.head(url, allow_redirects=True, timeout=15,
+                             headers={"User-Agent": "medcat/2.1"})
+        if resp.status_code >= 400:
+            # Some servers reject HEAD — fall back to GET with stream
+            resp = requests.get(url, allow_redirects=True, stream=True,
+                                timeout=15,
+                                headers={"User-Agent": "medcat/2.1"})
+            resp.close()
+
+        content_type = resp.headers.get("content-type", "").split(";")[0].strip()
+        content_length = resp.headers.get("content-length")
+        size = int(content_length) if content_length and content_length.isdigit() else None
+
+        # Derive filename from URL path or Content-Disposition
+        filename = None
+        cd = resp.headers.get("content-disposition", "")
+        cd_match = re.search(r'filename[^;=\n]*=["\']?([^"\';\n]*)', cd, re.IGNORECASE)
+        if cd_match:
+            filename = cd_match.group(1).strip()
+        if not filename:
+            filename = Path(urlparse(url).path).name or None
+
+        # Derive media type
+        media_type = _guess_media_type_from_url(url, content_type)
+
+        return SearchResult(
+            title=filename or url.rstrip("/").split("/")[-1] or "Unknown",
+            source="direct",
+            size=size,
+            download_url=url,
+            protocol="direct",
+            media_type=media_type,
+            format=content_type or "unknown",
+            description=f"Content-Type: {content_type}" if content_type else None,
+            guid=url,
+        )
+    except Exception:
+        return None
+
+
+def _download_direct_url(result: SearchResult, dest_dir: str) -> bool:
+    """Download a direct HTTP/HTTPS file to a destination directory."""
+    url = result.download_url
+    if not url:
+        return False
+
+    # Derive safe output filename
+    output_name = result.title
+    if not output_name or output_name == "Unknown":
+        output_name = Path(urlparse(url).path).name or "download"
+    # Sanitise
+    output_name = re.sub(r'[<>:"/\\|?*]', '_', output_name)
+    out_path = os.path.join(dest_dir, output_name)
+
+    # Prefer wget for resume support, fall back to requests
+    wget = shutil.which("wget")
+    if wget:
+        console.print(f"[dim]  Using wget → {escape(out_path)}[/]")
+        try:
+            proc = subprocess.run(
+                [wget, "-q", "--show-progress", "-O", out_path, url],
+                timeout=600,
+            )
+            if proc.returncode == 0:
+                console.print(f"[green]  ✓ Downloaded to {escape(out_path)}[/]")
+                return True
+        except subprocess.TimeoutExpired:
+            console.print("[red]  ✗ wget timed out[/]")
+            return False
+        except Exception as e:
+            console.print(f"[yellow]  ⚠ wget failed: {e} — falling back to requests[/]")
+
+    # Fallback: requests streaming download
+    console.print(f"[dim]  Downloading with requests → {escape(out_path)}[/]")
+    try:
+        r = requests.get(url, stream=True, timeout=120)
+        if r.status_code >= 400:
+            console.print(f"[red]  ✗ Download failed: HTTP {r.status_code}[/]")
+            return False
+
+        total = int(r.headers.get("content-length", 0))
+        downloaded = 0
+        last_pct = -1
+        with open(out_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total:
+                    pct = int(downloaded / total * 100)
+                    if pct >= last_pct + 10 or pct == 100:
+                        console.print(f"[dim]    {pct}% ({_human_size(downloaded)} / {_human_size(total)})[/]")
+                        last_pct = pct
+
+        console.print(f"[green]  ✓ Downloaded to {escape(out_path)}[/]")
+        return True
+    except Exception as e:
+        console.print(f"[red]  ✗ Download error: {e}[/]")
+        return False
+
+
+def _download_torrent_file(url: str, config: dict) -> bool:
+    """Download a .torrent file and send it to the torrent client."""
+    try:
+        r = requests.get(url, timeout=30)
+        if r.status_code != 200:
+            console.print(f"[red]  ✗ Failed to fetch .torrent: HTTP {r.status_code}[/]")
+            return False
+
+        torrent_data = r.content
+        content_type = r.headers.get("content-type", "")
+
+        # If the response IS a magnet link or torrent data, handle accordingly
+        if "magnet:" in r.text[:20]:
+            return _send_magnet_to_client(r.text.strip(), config)
+
+        # Save to temp file and try to send to client
+        tmp = tempfile.NamedTemporaryFile(suffix=".torrent", delete=False)
+        try:
+            tmp.write(torrent_data)
+            tmp.close()
+
+            # Try qBittorrent
+            qbt = config.get("services", {}).get("qbittorrent", {})
+            if qbt.get("url"):
+                session = requests.Session()
+                auth = session.post(
+                    qbt["url"].rstrip("/") + "/api/v2/auth/login",
+                    data={"username": qbt.get("username", "admin"),
+                          "password": qbt.get("password", "")},
+                    timeout=10,
+                )
+                if auth.status_code == 200:
+                    with open(tmp.name, "rb") as tf:
+                        resp = session.post(
+                            qbt["url"].rstrip("/") + "/api/v2/torrents/add",
+                            files={"torrents": ("file.torrent", tf, "application/x-bittorrent")},
+                            timeout=15,
+                        )
+                    if resp.status_code == 200:
+                        console.print("[green]  ✓ Torrent added to qBittorrent[/]")
+                        return True
+                    else:
+                        console.print(f"[yellow]  ⚠ qBittorrent rejected torrent: HTTP {resp.status_code}[/]")
+
+            # Try Deluge
+            deluge = config.get("services", {}).get("deluge", {})
+            if deluge.get("url"):
+                import base64
+                encoded = base64.b64encode(torrent_data).decode()
+                # Auth
+                auth = requests.post(
+                    deluge["url"].rstrip("/") + "/json",
+                    json={"id": 1, "method": "auth.login",
+                          "params": [deluge.get("password", "")]},
+                    timeout=10,
+                )
+                cookie = auth.headers.get("Set-Cookie", "")
+                headers = {"Cookie": cookie} if cookie else {}
+                # Add torrent (base64-encoded)
+                resp = requests.post(
+                    deluge["url"].rstrip("/") + "/json",
+                    json={"id": 2, "method": "core.add_torrent_file",
+                          "params": ["medcat.torrent", encoded, {}]},
+                    headers=headers,
+                    timeout=10,
+                )
+                if resp.json().get("result"):
+                    console.print("[green]  ✓ Torrent added to Deluge[/]")
+                    return True
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+
+        console.print("[red]  ✗ Could not add torrent to any configured client[/]")
+        return False
+    except Exception as e:
+        console.print(f"[red]  ✗ Torrent download error: {e}[/]")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# CLI: medcat grab
+# ---------------------------------------------------------------------------
+
+
+def cmd_grab(args):
+    """Handle 'grab' command — download from any URL with auto-routing."""
+    config = load_config()
+    url = getattr(args, "url", "")
+    media_type = getattr(args, "type", None) or getattr(args, "dest", None)
+    audio_only = getattr(args, "audio", False)
+    scan = getattr(args, "scan", False)
+    no_ingest = getattr(args, "no_ingest", False)
+    dry_run = getattr(args, "dry_run", False)
+    info_only = getattr(args, "info", False)
+
+    if not url:
+        console.print("[red]✗ No URL provided[/]")
+        return
+
+    url_source = _classify_url(url)
+
+    console.print()
+    console.print(f"⬇ [bold]Grab:[/] {escape(url[:80])}{'...' if len(url) > 80 else ''}")
+    console.print(f"[dim]  Detected: {url_source}[/]")
+    if media_type:
+        console.print(f"[dim]  Media type: {media_type}[/]")
+    console.print()
+
+    result = None
+
+    # ── YouTube ──
+    if url_source == "youtube":
+        result = _probe_youtube_url(url, audio_only)
+        if not result:
+            console.print("[red]✗ Could not probe YouTube URL (yt-dlp required)[/]")
+            return
+        if not media_type and audio_only:
+            media_type = "music"
+
+        _render_single_result(result, media_type)
+
+        if info_only:
+            return
+
+        # Determine destination
+        dest_dir = None
+        mt = media_type or result.media_type
+        if mt and not no_ingest:
+            dest_config = config.get("destinations", {}).get(mt, {})
+            dest_path = dest_config.get("path", "")
+            if dest_path and destination_root_is_local(dest_config):
+                dest_dir = dest_path
+
+        if dry_run:
+            if dest_dir:
+                console.print(f"[dim]  Would download to: {escape(dest_dir)}[/]")
+            else:
+                console.print("[dim]  Would download to temp directory[/]")
+            return
+
+        use_audio = audio_only or mt in ("music", "audiobooks")
+        ok = _youtube_download(result, dest_dir=dest_dir, audio_only=use_audio)
+        if not ok:
+            return
+
+    # ── Magnet ──
+    elif url_source == "magnet":
+        result = SearchResult(
+            title=url[:80],
+            source="magnet",
+            magnet_url=url,
+            protocol="torrent",
+            media_type=media_type,
+            download_url=url,
+        )
+        _render_single_result(result, media_type)
+
+        if info_only:
+            return
+        if dry_run:
+            console.print("[dim]  Would send magnet to torrent client[/]")
+            return
+
+        ok = _send_magnet_to_client(url, config)
+        if ok:
+            console.print("[green]  ✓ Magnet sent to torrent client[/]")
+        else:
+            return
+
+    # ── Internet Archive ──
+    elif url_source == "archive":
+        # Extract identifier from archive.org URL
+        ident_match = re.search(r"archive\.org/(details|download)/([^/?#]+)", url)
+        if not ident_match:
+            console.print("[red]✗ Could not extract Archive.org identifier from URL[/]")
+            return
+        identifier = ident_match.group(2)
+
+        # Try to get metadata
+        try:
+            meta = requests.get(
+                f"https://archive.org/metadata/{identifier}",
+                timeout=15,
+            ).json()
+            title = meta.get("metadata", {}).get("title", identifier)
+            creator = meta.get("metadata", {}).get("creator", "")
+            result = SearchResult(
+                title=title,
+                source="archive.org",
+                identifier=identifier,
+                guid=identifier,
+                info_url=f"https://archive.org/details/{identifier}",
+                download_url=f"https://archive.org/download/{identifier}",
+                author=creator,
+                protocol="direct",
+                media_type=media_type,
+                raw=meta,
+            )
+        except Exception:
+            result = SearchResult(
+                title=identifier,
+                source="archive.org",
+                identifier=identifier,
+                guid=identifier,
+                download_url=f"https://archive.org/download/{identifier}",
+                protocol="direct",
+            )
+
+        _render_single_result(result, media_type)
+
+        if info_only:
+            return
+
+        dest_dir = None
+        mt = media_type
+        if mt and not no_ingest:
+            dest_config = config.get("destinations", {}).get(mt, {})
+            dest_path = dest_config.get("path", "")
+            if dest_path and destination_root_is_local(dest_config):
+                dest_dir = dest_path
+
+        if dry_run:
+            if dest_dir:
+                console.print(f"[dim]  Would download to: {escape(dest_dir)}[/]")
+            else:
+                console.print("[dim]  Would download to temp directory[/]")
+            return
+
+        ok = _archive_download(result, dest_dir=dest_dir)
+        if not ok:
+            return
+
+    # ── Torrent file ──
+    elif url_source == "torrent":
+        result = SearchResult(
+            title=Path(urlparse(url).path).name or url[:60],
+            source="torrent",
+            download_url=url,
+            protocol="torrent",
+            media_type=media_type,
+        )
+        _render_single_result(result, media_type)
+
+        if info_only:
+            return
+        if dry_run:
+            console.print("[dim]  Would download .torrent and send to client[/]")
+            return
+
+        ok = _download_torrent_file(url, config)
+        if not ok:
+            return
+
+    # ── Direct URL ──
+    else:
+        result = _probe_direct_url(url)
+        if not result:
+            console.print("[red]✗ Could not probe URL[/]")
+            return
+
+        if not media_type:
+            media_type = result.media_type
+
+        _render_single_result(result, media_type)
+
+        if info_only:
+            return
+
+        # Determine destination
+        dest_dir = None
+        mt = media_type
+        if mt and not no_ingest:
+            dest_config = config.get("destinations", {}).get(mt, {})
+            dest_path = dest_config.get("path", "")
+            if dest_path and destination_root_is_local(dest_config):
+                dest_dir = dest_path
+
+        if not dest_dir:
+            dest_dir = tempfile.mkdtemp(prefix="medcat_dl_")
+
+        if dry_run:
+            console.print(f"[dim]  Would download to: {escape(dest_dir)}[/]")
+            return
+
+        ok = _download_direct_url(result, dest_dir)
+        if not ok:
+            return
+
+        # Rename to media-type-appropriate name if we know the type
+        if mt and ok:
+            _auto_rename_downloaded(dest_dir, mt, result)
+
+    # ── Post-download ingest and scan ──
+    mt = media_type
+    if mt and not no_ingest and not dry_run and ok:
+        dest_config = config.get("destinations", {}).get(mt, {})
+        dest_path = dest_config.get("path", "")
+        if dest_path and dest_path != dest_dir:
+            # Downloaded to temp — need to ingest properly
+            console.print(f"\n[dim]  Ingesting into {escape(dest_path)}...[/]")
+            # Find the downloaded file
+            try:
+                downloaded_files = list(Path(dest_dir).glob("*"))
+                if downloaded_files:
+                    downloaded_file = str(downloaded_files[0].resolve())
+                    # Use medcat ingest subshell
+                    cmd = [sys.executable, sys.argv[0], "ingest",
+                           "--dest", mt, "--yes", downloaded_file]
+                    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                    if proc.returncode == 0:
+                        console.print(proc.stdout.strip())
+                    else:
+                        console.print(f"[yellow]  ⚠ Ingest had issues: {proc.stderr[:300]}[/]")
+            except Exception as e:
+                console.print(f"[yellow]  ⚠ Ingest error: {e}[/]")
+
+        if scan:
+            dest_config = config.get("destinations", {}).get(mt, {})
+            scan_svc = dest_config.get("scan", "")
+            if scan_svc:
+                trigger_scan(mt, config)
+
+    console.print()
+
+
+def _render_single_result(result: SearchResult, media_type: str = None):
+    """Render a single search result as a summary panel."""
+    panel = Panel(
+        f"[bold]{escape(result.title[:100])}[/]\n"
+        + (f"  Author: {escape(result.author)}\n" if result.author else "")
+        + (f"  Source: {result.source}\n")
+        + (f"  Size: {result.size_human}\n" if result.size else "")
+        + (f"  Duration: {result.format}\n" if result.format and result.source == "youtube" else "")
+        + (f"  Type: {media_type or result.media_type or 'unknown'}\n")
+        + (f"  Content: {result.description}\n" if result.description else ""),
+        title="🔍 URL Info",
+        border_style="cyan",
+    )
+    console.print(panel)
+
+
+def _auto_rename_downloaded(dest_dir: str, media_type: str, result: SearchResult):
+    """Rename a directly-downloaded file to match media type conventions."""
+    try:
+        files = [f for f in Path(dest_dir).iterdir() if f.is_file()]
+        if not files:
+            return
+        target = files[0]
+        ext = target.suffix
+
+        # Derive a better name
+        if media_type in ("books", "audiobooks"):
+            author = result.author or ""
+            title = result.title.replace("/", "-").replace(":", " -")
+            if author and title and title != target.stem:
+                new_name = f"{title} - {author}{ext}"
+            else:
+                new_name = f"{title}{ext}"
+        elif media_type in ("music",):
+            new_name = result.title.replace("/", "-") + ext
+        else:
+            # Movies/shows/comics — keep as is for now, ingest will handle
+            return
+
+        # Sanitise and rename
+        new_name = re.sub(r'[<>:"/\\|?*]', '_', new_name)
+        if new_name != target.name:
+            new_path = target.with_name(new_name)
+            target.rename(new_path)
+            console.print(f"[dim]  Renamed: {escape(target.name)} → {escape(new_name)}[/]")
+    except Exception:
+        pass  # Non‑critical; ingest will handle naming anyway
+
+
+# ---------------------------------------------------------------------------
+# CLI: medcat search
+# ---------------------------------------------------------------------------
+
+
+def cmd_search(args):
+    """Handle 'search' command — search for media across multiple sources."""
+    config = load_config()
+
+    query = args.query
+    media_type = getattr(args, "type", None) or None
+
+    # --- URL auto-detection: if query looks like a URL, redirect to grab ---
+    if _looks_like_url(query):
+        console.print(f"[dim]  Detected URL → using grab mode[/]")
+        # Build a synthetic args namespace for grab
+        class _GrabArgs:
+            pass
+        ga = _GrabArgs()
+        ga.url = query
+        ga.type = media_type
+        ga.dest = getattr(args, "dest", None) or media_type
+        ga.audio = getattr(args, "audio", False)
+        ga.scan = getattr(args, "scan", False)
+        ga.no_ingest = getattr(args, "no_ingest", False)
+        ga.dry_run = False
+        ga.info = False
+        return cmd_grab(ga)
+
+    sources = _resolve_sources(getattr(args, "source", "auto"), media_type)
+    limit = getattr(args, "limit", 20)
+
+    console.print()
+    console.print(f"🔎 [bold]Searching:[/] {escape(query)}")
+    if media_type:
+        console.print(f"[dim]  Type: {media_type}[/]")
+    console.print(f"[dim]  Sources: {', '.join(sources)}[/]")
+    console.print()
+
+    # Search all selected sources
+    all_results = []
+    for src_name in sources:
+        src = SEARCH_SOURCES.get(src_name)
+        if not src:
+            continue
+        if src["needs_config"] and not config.get("services", {}).get(src_name, {}).get("url"):
+            console.print(f"[dim]  Skipping {src_name} (not configured)[/]")
+            continue
+
+        console.print(f"[dim]  Searching {src['label']}...[/]")
+        try:
+            results = src["search"](query, config, media_type, limit)
+            all_results.extend(results)
+            console.print(f"[dim]    → {len(results)} results[/]")
+        except Exception as e:
+            console.print(f"[yellow]    ⚠ {src_name} error: {e}[/]")
+
+    if not all_results:
+        console.print("[yellow]No results found.[/]")
+        return
+
+    # Sort: torrents by seeders desc, then by source
+    def sort_key(r):
+        s = r.seeders if r.seeders is not None else -1
+        return (-s, r.source)
+    all_results.sort(key=sort_key)
+
+    # Render results
+    _render_search_results(all_results, f"Results for: {query}")
+
+    # Interactive selection (if not --list-only)
+    if getattr(args, "list_only", False):
+        return
+
+    if not sys.stdin.isatty():
+        console.print("\n[dim]Run without piping to select and download results.[/]")
+        return
+
+    # Let user pick results to download
+    console.print()
+    while True:
+        choice = console.input(
+            "[bold cyan]Download[/] (number, range, 'a'll, 'q'uit): "
+        ).strip().lower()
+
+        if choice in ("q", "quit", ""):
+            break
+
+        if choice == "a":
+            selected = list(all_results)
+        elif "-" in choice and choice.replace("-", "").isdigit():
+            # Range like 3-7
+            parts = choice.split("-", 1)
+            start, end = int(parts[0]), int(parts[1])
+            selected = all_results[start-1:end]
+        elif choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(all_results):
+                selected = [all_results[idx - 1]]
+            else:
+                console.print(f"[yellow]  Invalid: {idx}. Pick 1-{len(all_results)}.[/]")
+                continue
+        else:
+            # Try comma-separated
+            try:
+                indices = [int(x.strip()) for x in choice.split(",")]
+                selected = [all_results[i - 1] for i in indices if 1 <= i <= len(all_results)]
+                if not selected:
+                    continue
+            except (ValueError, IndexError):
+                console.print("[yellow]  Invalid input. Use number, range, 'a', or 'q'.[/]")
+                continue
+
+        # Download selected
+        for r in selected:
+            console.print(f"\n[bold]  → {escape(r.title[:60])}[/] ({r.source})")
+            src = SEARCH_SOURCES.get(r.source)
+            if not src:
+                continue
+
+            # Determine download destination
+            dest_dir = None
+            mt = r.media_type or media_type
+            if mt and not getattr(args, "no_ingest", False):
+                dest_config = config.get("destinations", {}).get(mt, {})
+                dest_path = dest_config.get("path", "")
+                if dest_path and destination_root_is_local(dest_config):
+                    dest_dir = dest_path
+
+            # Handle YouTube audio extraction
+            if r.source == "youtube" and mt in ("music", "audiobooks"):
+                ok = _youtube_download(r, dest_dir=dest_dir, audio_only=True)
+            elif r.source == "archive":
+                ok = _archive_download(r, dest_dir=dest_dir)
+            elif r.source == "prowlarr" and r.magnet_url and not r.download_url:
+                ok = _send_magnet_to_client(r.magnet_url, config)
+            else:
+                ok = src["download"](r, config)
+
+            if ok:
+                # Source-appropriate success messaging
+                if r.source == "prowlarr":
+                    # Prowlarr pushes to download client (sabnzbd, Deluge, etc.)
+                    # File lands in the download client's configured directory,
+                    # and the *arr services (Sonarr/Radarr/Readarr) typically
+                    # auto-import from there. No manual ingest needed.
+                    console.print("[green]  ✓ Sent to download client via Prowlarr[/]")
+                    console.print("[dim]  The download client will handle the file. No manual ingest needed — your *arr services auto-import.[/]")
+                elif r.source in ("youtube", "archive") and dest_dir and not getattr(args, "no_ingest", False):
+                    # Direct local download — file lands in dest_dir
+                    console.print(f"[green]  ✓ Downloaded to {escape(dest_dir)}[/]")
+                    console.print(f"[dim]  Run 'medcat ingest {escape(dest_dir)}' to process.[/]")
+                elif r.source in ("youtube", "archive"):
+                    # Direct download to temp dir — tell user where it went
+                    console.print("[green]  ✓ Download complete[/]")
+                    console.print("[dim]  File downloaded to temp directory. Use --no-ingest with a destination path, or move manually.[/]")
+                else:
+                    # Magnet/torrent sent to client
+                    console.print("[green]  ✓ Sent to torrent client[/]")
+                    console.print("[dim]  The torrent client will download the file to its configured directory.[/]")
+            else:
+                console.print(f"[red]  ✗ Download failed[/]")
+
+        # Ask if they want to select more
+        if not _prompt_yes_no("\n  Download more?", default=False):
+            break
+
+    console.print()
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="medcat",
+        description="Ingest media files into your media stack with metadata enrichment",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            examples:
+              medcat setup                           # First-time interactive setup
+              medcat setup --section services        # Reconfigure just services
+              medcat identify ~/Downloads/*.epub     # Show metadata without moving
+              medcat ingest book.epub                # Ingest with auto-detection
+              medcat ingest --dest comics ./comics/ --dry-run
+              medcat ingest --dest books ~/Downloads/ --scan --yes
+              # Manage config
+              medcat config get services.kavita.url
+              medcat config set services.radarr.api_key YOUR_KEY
+              medcat config unset services.lidarr
+              medcat config list destinations
+              medcat config --check
+              medcat config test kavita radarr
+
+              # Search for media (supports queries and URLs)
+              medcat search "Dune"
+              medcat search "Foundation" --type books
+              medcat search "Interstellar" --source prowlarr,youtube
+              medcat search "Miles Davis" --type music --source all --limit 10
+              medcat search "1948 George Orwell" --list-only
+              medcat search https://youtube.com/watch?v=... --type music  # URL auto-grab
+
+              # Grab — direct download from any URL
+              medcat grab https://youtube.com/watch?v=dQw4w9WgXcQ
+              medcat grab https://youtube.com/watch?v=... --audio --dest music
+              medcat grab magnet:?xt=urn:btih:... --type movies
+              medcat grab https://archive.org/details/example --type books
+              medcat grab https://example.com/file.epub --dest books --scan
+              medcat grab URL --info    # Just show metadata, don't download
+              medcat grab URL --dry-run # Preview what would happen
+
+              # Trigger a service scan
+              medcat scan --service kavita
+              medcat scan --service kavita --library-id 1
+        """),
+    )
+
+    subparsers = parser.add_subparsers(dest="command", help="Commands")
+
+    # --- setup ---
+    setup_p = subparsers.add_parser("setup", help="Interactive setup wizard (first launch or reconfigure)")
+    setup_p.add_argument("--section", "-s",
+                         choices=["transport", "destinations", "services"],
+                         help="Only configure a specific section")
+
+    # --- ingest ---
+    ingest = subparsers.add_parser("ingest", help="Ingest media files into the stack")
+    ingest.add_argument("paths", nargs="+", help="Files or directories to process")
+    ingest.add_argument("--dest", "-d", choices=list(HANDLERS.keys()),
+                        help="Destination type (auto-detected from files if not set)")
+    ingest.add_argument("--dry-run", "-n", action="store_true", help="Show what would happen without moving files")
+    ingest.add_argument("--no-enrich", action="store_true", help="Skip metadata enrichment via APIs")
+    ingest.add_argument("--no-prompt", action="store_true", help="Don't prompt for missing metadata (use defaults)")
+    ingest.add_argument("--scan", "-s", action="store_true", help="Trigger library scan after ingestion")
+    ingest.add_argument("--yes", "-y", action="store_true", help="Auto-confirm all actions (no prompts)")
+
+    # --- identify ---
+    identify = subparsers.add_parser("identify", help="Show file metadata without moving anything")
+    identify.add_argument("paths", nargs="+", help="Files or directories to inspect")
+    identify.add_argument("--no-enrich", action="store_true", help="Skip API enrichment")
+
+    # --- scan ---
+    scan = subparsers.add_parser("scan", help="Trigger a library scan on a service")
+    scan.add_argument("--service",
+                      help="Service to trigger scan on (auto-detected if omitted)")
+    scan.add_argument("--library-id", type=int, help="Library ID for Kavita (default: 1)")
+
+    # --- search ---
+    search = subparsers.add_parser("search", help="Search for media across multiple sources")
+    search.add_argument("query", help="Search query (title, author, or URL for direct grab)")
+    search.add_argument("--type", "-t", choices=list(HANDLERS.keys()),
+                        help="Media type to filter by (books, movies, etc.)")
+    search.add_argument("--source", "-s",
+                        help="Search source(s): prowlarr, archive, youtube, all, auto (default: auto)")
+    search.add_argument("--limit", "-n", type=int, default=20,
+                        help="Max results per source (default: 20)")
+    search.add_argument("--list-only", action="store_true",
+                        help="Only show results, don't prompt for download")
+    search.add_argument("--no-ingest", action="store_true",
+                        help="Don't auto-ingest downloaded files")
+    search.add_argument("--audio", action="store_true",
+                        help="Force audio extraction (YouTube/grab mode)")
+    search.add_argument("--dest", "-d", choices=list(HANDLERS.keys()),
+                        help="Destination type for URL grabs (overrides auto-detection)")
+
+    # --- grab ---
+    grab = subparsers.add_parser("grab", help="Download media from any URL (YouTube, magnet, archive, direct)")
+    grab.add_argument("url", help="URL to download from (YouTube, magnet link, archive.org, torrent, direct file)")
+    grab.add_argument("--type", "-t", "--dest", "-d", dest="dest",
+                      choices=list(HANDLERS.keys()),
+                      help="Media type / destination (books, movies, music, etc.)")
+    grab.add_argument("--audio", action="store_true",
+                      help="Force audio extraction for YouTube/media")
+    grab.add_argument("--scan", "-s", action="store_true",
+                      help="Trigger library scan after download")
+    grab.add_argument("--no-ingest", action="store_true",
+                      help="Download only, don't auto-ingest into media stack")
+    grab.add_argument("--dry-run", "-n", action="store_true",
+                      help="Show what would happen without downloading")
+    grab.add_argument("--info", action="store_true",
+                      help="Only show URL metadata, don't download")
+
+    # --- config ---
+    config_p = subparsers.add_parser("config", help="Manage configuration")
+    config_p.add_argument("--show", action="store_true", help="Show full configuration (secrets masked)")
+    config_p.add_argument("--check", action="store_true", help="Validate configuration completeness")
+    config_p.add_argument("--reset", action="store_true", help="Reset to clean defaults")
+
+    config_sub = config_p.add_subparsers(dest="config_action", help="Config sub-commands")
+    config_list = config_sub.add_parser("list", help="List config sections or keys within a section")
+    config_list.add_argument("section", nargs="?", default=None, help="Section to list (e.g. destinations, services)")
+    config_get = config_sub.add_parser("get", help="Get a config value by dot-separated path")
+    config_get.add_argument("config_key", metavar="key", help="Dot-separated key path")
+    config_set = config_sub.add_parser("set", help="Set a config value")
+    config_set.add_argument("config_key", metavar="key", help="Dot-separated key path")
+    config_set.add_argument("config_value", metavar="value", help="Value to set")
+    config_unset = config_sub.add_parser("unset", help="Remove a config key")
+    config_unset.add_argument("config_key", metavar="key", help="Dot-separated key path")
+    config_test = config_sub.add_parser("test", help="Test service connections")
+    config_test.add_argument("test_services", nargs="*", metavar="service",
+                             help="Service names to test (default: all configured)")
+
+    return parser
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if not args.command:
+        if _needs_setup():
+            console.print(Panel.fit(
+                "[bold]🐱 Welcome to medcat![/]\n\n"
+                "No configuration found. Let's set things up:\n\n"
+                "[cyan]  medcat setup[/]\n\n"
+                "[dim]This will guide you through configuring destinations, services, and transport.[/]",
+                border_style="cyan",
+            ))
+        else:
+            parser.print_help()
+        sys.exit(0)
+
+    commands = {
+        "setup": cmd_setup,
+        "ingest": cmd_ingest,
+        "identify": cmd_identify,
+        "scan": cmd_scan,
+        "search": cmd_search,
+        "grab": cmd_grab,
+        "config": cmd_config,
+    }
+
+    if args.command not in commands:
+        parser.print_help()
+        sys.exit(1)
+
+    commands[args.command](args)
+
+
+if __name__ == "__main__":
+    main()
