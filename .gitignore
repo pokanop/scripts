@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+venv/
+.scripts-install.json
+
+# Voxtract cache (local data, not code)
+_unsorted
