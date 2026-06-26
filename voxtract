@@ -1,0 +1,2216 @@
+#!/usr/bin/env python3
+"""
+voxtract — Voice Extract Tool  v3.0.0
+Extract and isolate speech from video and audio across multiple sources.
+
+Sources: YouTube, Spotify, Jellyfin, Plex, podcasts (RSS), HTTP URLs, local files/directories.
+
+Architecture:
+    Source adapters (YouTube, Spotify, Jellyfin, Plex, HTTP, Local, Podcast)
+    → fetch audio to cache
+    → clip by timestamp (ffmpeg)
+    → optionally isolate speech (Demucs neural network)
+
+Dependencies:
+    pip install yt-dlp demucs requests
+    ffmpeg on PATH
+
+Usage:
+    # YouTube
+    voxtract fetch youtube://dQw4w9WgXcQ
+
+    # Jellyfin
+    voxtract sources add jellyfin --url http://jellyfin:8096 --key YOUR_API_KEY
+    voxtract list jellyfin://jellyfin  -q "interstellar"
+    voxtract fetch jellyfin://jellyfin/Items/abc123
+
+    # Plex
+    voxtract sources add plex --url http://plex:32400 --token YOUR_TOKEN
+    voxtract list plex://plex  --type movie -q "inception"
+    voxtract fetch plex://plex/metadata/45678
+
+    # Direct URL
+    voxtract fetch https://example.com/speech.mp3
+
+    # Local directory (batch)
+    voxtract fetch dir:///path/to/audiobooks
+    voxtract clip dir:///path/to/movies/TheInterview.mkv -s 10:00 -d 30 --isolate
+    voxtract clip youtube://dQw4w9WgXcQ -s 0:30 -d 60 --isolate --lufs -14
+    voxtract clip spotify://track/4cOdK2wGLETKBW3PvgPWqT -s 0:30 -d 15 --gain +6
+
+    # Podcast RSS feed
+    voxtract list podcast://https://feeds.simplecast.com/xyz123
+    voxtract fetch podcast://https://feeds.simplecast.com/xyz123#ep-3
+
+    # Spotify
+    voxtract sources add spotify --id CLIENT_ID --secret CLIENT_SECRET
+    voxtract list spotify://search -q "podcast name" -t show
+    voxtract fetch spotify://track/4cOdK2wGLETKBW3PvgPWqT
+    voxtract clip spotify://track/4cOdK2wGLETKBW3PvgPWqT -s 0:30 -d 15 --isolate
+"""
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from abc import ABC, abstractmethod
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Optional
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+
+__version__ = "3.0.0"
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+CONFIG_DIR = Path(os.environ.get("VOXTRACT_CONFIG", Path.home() / ".voxtract"))
+CACHE_DIR = CONFIG_DIR / "cache"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+DEMUCS_MODEL = os.environ.get("VOXTRACT_DEMUCS_MODEL", "htdemucs")
+AUDIO_FORMAT = "wav"
+VERBOSE = False
+
+# Stable torch model cache — avoids 300MB re-downloads across profiles/envs
+# IMPORTANT: $HOME may be profile-overridden (e.g. /root/.hermes/profiles/coder/home)
+# We need the REAL user home for a shared model cache.
+def _resolve_real_home() -> Path:
+    """Find the actual user home, stripping Hermes profile overrides."""
+    h = Path(os.environ.get("HOME", "/root")).resolve()
+    # Walk up: /root/.hermes/profiles/coder/home → /root
+    parts = h.parts
+    if ".hermes" in parts:
+        idx = parts.index(".hermes")
+        return Path(*parts[:idx]) if idx > 0 else Path("/")
+    return h
+
+_REAL_HOME = _resolve_real_home()
+TORCH_HOME = os.environ.get("VOXTRACT_MODEL_DIR",
+                            os.environ.get("TORCH_HOME",
+                                           str(_REAL_HOME / ".cache" / "torch")))
+
+# Loudness normalization defaults (EBU R128 broadcast standard)
+LOUDNESS_TARGET = float(os.environ.get("VOXTRACT_LOUDNESS", "-16"))   # LUFS (integrated loudness)
+LOUDNESS_RANGE = float(os.environ.get("VOXTRACT_LRA", "11"))         # Loudness Range cap (LU)
+LOUDNESS_PEAK = float(os.environ.get("VOXTRACT_PEAK", "-1.5"))       # True peak cap (dBTP)
+
+# ---------------------------------------------------------------------------
+# UI / Styling
+# ---------------------------------------------------------------------------
+
+_NO_COLOR = bool(os.environ.get("NO_COLOR"))
+_HAS_TTY = hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
+
+# ANSI codes
+_RESET  = "\033[0m"
+_BOLD   = "\033[1m"
+_DIM    = "\033[2m"
+_RED    = "\033[31m"
+_GREEN  = "\033[32m"
+_YELLOW = "\033[33m"
+_BLUE   = "\033[34m"
+_MAGENTA = "\033[35m"
+_CYAN   = "\033[36m"
+_WHITE  = "\033[37m"
+_BG_RED = "\033[41m"
+
+def _use_color():
+    return _HAS_TTY and not _NO_COLOR
+
+def styled(text: str, *codes: str) -> str:
+    if not _use_color():
+        return text
+    return "".join(codes) + text + _RESET
+
+def icon(name: str) -> str:
+    icons = {
+        "download":  "⬇️ ",
+        "success":   "✅",
+        "clip":      "✂️ ",
+        "music":     "🎵",
+        "mic":       "🎤",
+        "brain":     "🧠",
+        "speaker":   "🔊",
+        "folder":    "📁",
+        "clock":     "⏱️ ",
+        "wave":      "🌊",
+        "lock":      "🔒",
+        "gear":      "⚙️ ",
+        "sparkle":   "✨",
+        "rocket":    "🚀",
+        "warn":      "⚠️ ",
+        "cross":     "❌",
+        "check":     "✔",
+        "info":      "ℹ️ ",
+        "cache":     "💾",
+        "source":    "📡",
+        "extract":   "🎯",
+        "normalize": "📊",
+        "search":    "🔍",
+        "server":    "🖥️ ",
+        "link":      "🔗",
+        "package":   "📦",
+    }
+    return icons.get(name, "")
+
+def progress_bar(pct: float, width: int = 30) -> str:
+    filled = int(width * pct / 100)
+    empty = width - filled
+    bar = "█" * filled + "░" * empty
+    if _use_color():
+        color = _GREEN if pct >= 100 else _CYAN
+        return styled(f"[{bar}] {pct:.0f}%", color, _BOLD)
+    return f"[{bar}] {pct:.0f}%"
+
+def human_size(size_bytes: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if abs(size_bytes) < 1024:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f} TB"
+
+def print_header(text: str):
+    icon_char = ""
+    for ic in ("✂️", "⬇️", "🧠", "💾", "📡", "⚙️", "ℹ️", "🔍"):
+        if ic in text:
+            icon_char = ic
+            break
+    pad = max(0, 40 - len(text))
+    line = styled(f"  ━━━ {text} {'━' * pad}  ", _BOLD, _CYAN)
+    print(f"\n{line}")
+
+def print_step(step: int, total: int, text: str):
+    label = styled(f"[{step}/{total}]", _BOLD, _CYAN)
+    print(f"  {label} {text}")
+
+def print_success(text: str):
+    print(styled(f"  {icon('success')} {text}", _BOLD, _GREEN))
+
+def print_error(text: str):
+    print(styled(f"  {icon('cross')} {text}", _BOLD, _RED), file=sys.stderr)
+
+def print_info(text: str):
+    print(styled(f"  {icon('info')} {text}", _DIM, _CYAN))
+
+def print_warning(text: str):
+    print(styled(f"  {icon('warn')} {text}", _YELLOW))
+
+def print_elapsed(label: str, seconds: float):
+    if seconds < 1:
+        t = f"{seconds*1000:.0f}ms"
+    elif seconds < 60:
+        t = f"{seconds:.1f}s"
+    else:
+        m, s = divmod(seconds, 60)
+        t = f"{int(m)}m {s:.0f}s"
+    print(styled(f"    {icon('clock')} {label}: {t}", _DIM))
+
+# ---------------------------------------------------------------------------
+# File Locking for Parallel Safety
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def cache_lock(cache_dir: Path, timeout: float = 300):
+    """Acquire exclusive lock on a cache directory for parallel safety.
+
+    Prevents concurrent voxtract processes from corrupting shared cache
+    files (vocals.wav, meta.json) when clipping from the same source.
+    Parallel clips from DIFFERENT sources use different lock files and
+    never block each other.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = cache_dir / ".lock"
+    lock_fd = open(lock_path, "w")
+    acquired = False
+    try:
+        deadline = time.monotonic() + timeout
+        while not acquired:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except (IOError, OSError):
+                if time.monotonic() >= deadline:
+                    print_error(f"Lock timeout after {timeout:.0f}s — another voxtract process holds {lock_path}")
+                    sys.exit(1)
+                wait = min(2.0, deadline - time.monotonic())
+                if wait > 0:
+                    print_info(f"Waiting for lock on {cache_dir.name}...")
+                    time.sleep(0.5)
+        lock_fd.write(f"{os.getpid()}\n{time.time()}\n")
+        lock_fd.flush()
+        yield
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except (IOError, OSError):
+                pass
+        lock_fd.close()
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def ensure_dirs():
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+
+def load_config() -> dict:
+    ensure_dirs()
+    if CONFIG_FILE.exists():
+        return json.loads(CONFIG_FILE.read_text())
+    return {"sources": {}}
+
+
+def save_config(cfg: dict):
+    ensure_dirs()
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+
+
+def parse_time(t: str) -> float:
+    if ":" not in t:
+        return float(t)
+    parts = t.split(":")
+    if len(parts) == 2:   return float(parts[0]) * 60 + float(parts[1])
+    if len(parts) == 3:  return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+    raise ValueError(f"Invalid time: {t}")
+
+
+def format_time(seconds: float) -> str:
+    h, m, s = int(seconds // 3600), int((seconds % 3600) // 60), seconds % 60
+    if h: return f"{h}:{m:02d}:{s:05.2f}"
+    return f"{m}:{s:05.2f}"
+
+
+def cache_id(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+def run(cmd: list[str], desc: str = ""):
+    if desc: print(f"  {desc}...")
+    if VERBOSE:
+        print(styled(f"    $ {' '.join(str(c) for c in cmd)}", _DIM))
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        print_error(f"Command failed: {' '.join(str(c) for c in cmd)}")
+        if r.stderr: print(styled(r.stderr.strip(), _RED), file=sys.stderr)
+        sys.exit(1)
+    return r
+
+
+def probe_duration(audio_path: Path) -> float:
+    out = run(["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+               "-of", "csv=p=0", str(audio_path)]).stdout.strip()
+    return float(out)
+
+
+def probe_loudness(audio_path: Path) -> dict:
+    """Analyze audio loudness stats via ffmpeg loudnorm single-pass (dry run)."""
+    r = subprocess.run(
+        ["ffmpeg", "-i", str(audio_path),
+         "-af", f"loudnorm=I={LOUDNESS_TARGET}:LRA={LOUDNESS_RANGE}:TP={LOUDNESS_PEAK}:print_format=json",
+         "-f", "null", "-"],
+        capture_output=True, text=True
+    )
+    # loudnorm prints JSON stats to stderr
+    stderr = r.stderr
+    json_start = stderr.rfind("{")
+    json_end = stderr.rfind("}") + 1
+    if json_start >= 0 and json_end > json_start:
+        try:
+            return json.loads(stderr[json_start:json_end])
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
+def loudnorm_audio(input_path: Path, output_path: Path, target_lufs: float = None,
+                   lra: float = None, true_peak: float = None, gain_db: float = None):
+    """Two-pass EBU R128 loudness normalization — broadcast-quality, no distortion.
+
+    Pass 1: Analyze the audio's loudness characteristics.
+    Pass 2: Apply precise linear normalization using measured values.
+
+    This is the standard broadcast normalization pipeline used by Netflix, BBC, etc.
+    It guarantees perceptually consistent volume without clipping or dynamic compression.
+
+    Args:
+        input_path:  Source audio file
+        output_path: Destination file (format detected from extension)
+        target_lufs: Target integrated loudness in LUFS (default: -16)
+                     -24 = podcast standard (AES recommended)
+                     -16 = loud, clear voice (YouTube/Spotify typical)
+                     -14 = very loud, punchy
+                     -23 = EBU R128 broadcast standard
+        lra:         Maximum Loudness Range in LU (default: 11)
+                     Lower = more compressed/dynamic range reduced
+                     Higher = more dynamic, quiet parts stay quiet
+        true_peak:   Maximum true peak in dBTP (default: -1.5)
+                     -1.0 to -2.0 is safe; prevents inter-sample clipping
+        gain_db:     Simple gain boost in dB (bypasses loudnorm if set)
+                     Positive = louder, Negative = quieter
+    """
+    t_lufs = target_lufs if target_lufs is not None else LOUDNESS_TARGET
+    t_lra = lra if lra is not None else LOUDNESS_RANGE
+    t_peak = true_peak if true_peak is not None else LOUDNESS_PEAK
+
+    if gain_db is not None:
+        # Simple linear gain — bypass loudnorm entirely
+        print(f"  {icon('speaker')} Applying gain: {gain_db:+.1f} dB")
+        run(["ffmpeg", "-y", "-i", str(input_path),
+             "-af", f"volume={gain_db}dB",
+             str(output_path)],
+            desc="Applying gain")
+        return
+
+    # ---- Pass 1: Measure ----
+    print(f"  {icon('normalize')} Loudnorm pass 1: measuring loudness (target: {t_lufs} LUFS)...")
+    stats = probe_loudness(input_path)
+
+    if not stats:
+        # Fallback: single-pass normalization (less precise but still works)
+        print_warning("Could not measure loudness — using single-pass fallback")
+        run(["ffmpeg", "-y", "-i", str(input_path),
+             "-af", f"loudnorm=I={t_lufs}:LRA={t_lra}:TP={t_peak}",
+             str(output_path)],
+            desc="Normalizing (single-pass)")
+        return
+
+    measured_i = float(stats.get("input_i", t_lufs))
+    measured_lra = float(stats.get("input_lra", t_lra))
+    measured_tp = float(stats.get("input_tp", t_peak))
+    measured_thresh = float(stats.get("input_thresh", -70))
+    offset = float(stats.get("target_offset", 0))
+
+    delta = t_lufs - measured_i
+    print(f"  {icon('normalize')} Measured: {measured_i:.1f} LUFS → target: {t_lufs} LUFS (Δ {delta:+.1f} dB)")
+    print(f"     Range: {measured_lra:.1f} LU | Peak: {measured_tp:.1f} dBTP")
+
+    # ---- Pass 2: Apply with measured values for precision ----
+    linear_filter = (
+        f"loudnorm=I={t_lufs}:LRA={t_lra}:TP={t_peak}"
+        f":measured_I={measured_i}:measured_LRA={measured_lra}"
+        f":measured_TP={measured_tp}:measured_thresh={measured_thresh}"
+        f":offset={offset}:linear=true"
+    )
+    run(["ffmpeg", "-y", "-i", str(input_path),
+         "-af", linear_filter,
+         str(output_path)],
+        desc="Normalizing (two-pass precision)")
+
+    # Verify
+    final_stats = probe_loudness(output_path)
+    if final_stats:
+        final_i = float(final_stats.get("output_i", 0))
+        final_tp = float(final_stats.get("output_tp", 0))
+        print(f"  {icon('check')} Result: {final_i:.1f} LUFS | Peak: {final_tp:.1f} dBTP")
+
+
+# ---------------------------------------------------------------------------
+# Source Adapter Protocol
+# ---------------------------------------------------------------------------
+
+class SourceAdapter(ABC):
+    """Base for all media source adapters."""
+    scheme: str = ""           # e.g. "jellyfin", "youtube", "file"
+    scheme_prefix: str = ""    # e.g. "jellyfin" → voxtract parses "jellyfin://"
+
+    @abstractmethod
+    def can_handle(self, uri: str) -> bool:
+        """Does this adapter handle this URI?"""
+        ...
+
+    @abstractmethod
+    def fetch(self, uri: str, dest_dir: Path, force: bool = False) -> dict:
+        """Download/import audio to dest_dir. Returns metadata dict."""
+        ...
+
+    @abstractmethod
+    def list_items(self, uri: str, query: str = "", item_type: str = "",
+                    limit: int = 20) -> list[dict]:
+        """Search/browse items. Returns list of {id, title, type, year, duration}."""
+        ...
+
+    def get_source_key(self, uri: str) -> str:
+        """Stable cache key for the source."""
+        return cache_id(uri)
+
+
+# ---------------------------------------------------------------------------
+# YouTube / yt-dlp Adapter
+# ---------------------------------------------------------------------------
+
+class YouTubeAdapter(SourceAdapter):
+    scheme = "youtube"
+
+    def can_handle(self, uri: str) -> bool:
+        # Normalize: youtube://VIDEOID or full youtube.com/watch?v=ID or youtu.be/ID
+        if uri.startswith("youtube://"): return True
+        if uri.startswith(("http://", "https://")):
+            if not uri.startswith(("jellyfin://", "plex://", "podcast://", "file://", "dir://")):
+                # Assume any HTTP URL without a known scheme prefix could be yt-dlp compatible
+                return True
+        return False
+
+    def fetch(self, uri: str, dest_dir: Path, force: bool = False) -> dict:
+        url = uri
+        if uri.startswith("youtube://"):
+            video_id = uri.replace("youtube://", "")
+            url = f"https://www.youtube.com/watch?v={video_id}"
+
+        audio_file = dest_dir / f"source.{AUDIO_FORMAT}"
+        if audio_file.exists() and not force:
+            title = json.loads((dest_dir / "meta.json").read_text()).get("title", "")
+            return {"title": title, "duration": probe_duration(audio_file)}
+
+        print(f"  Downloading audio with yt-dlp: {url}")
+        tmp = tempfile.mkdtemp()
+        try:
+            tmp_audio = os.path.join(tmp, "source.%(ext)s")
+            run(["yt-dlp", "-x", "--audio-format", AUDIO_FORMAT,
+                 "--audio-quality", "0", "-o", tmp_audio, url],
+                desc="yt-dlp download")
+            downloaded = list(Path(tmp).glob("source.*"))
+            if not downloaded:
+                print("Error: yt-dlp produced no audio", file=sys.stderr)
+                sys.exit(1)
+            shutil.move(str(downloaded[0]), str(audio_file))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        title = run(["yt-dlp", "--get-title", url]).stdout.strip()
+        return {"title": title, "duration": probe_duration(audio_file), "source": uri}
+
+    def list_items(self, uri: str, query: str = "", item_type: str = "",
+                    limit: int = 20) -> list[dict]:
+        args = ["yt-dlp", f"ytsearch{limit}:{query}", "--dump-json", "--flat-playlist"]
+        r = subprocess.run(args, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"Search failed: {r.stderr}", file=sys.stderr)
+            return []
+        results = []
+        for line in r.stdout.strip().split("\n"):
+            if line:
+                data = json.loads(line)
+                results.append({
+                    "id": data.get("id", ""),
+                    "title": data.get("title", ""),
+                    "type": "video",
+                    "year": data.get("upload_date", "")[:4] if data.get("upload_date") else "",
+                    "duration": data.get("duration", 0),
+                    "uri": f"youtube://{data.get('id', '')}",
+                })
+        return results
+
+
+# ---------------------------------------------------------------------------
+# Jellyfin Adapter
+# ---------------------------------------------------------------------------
+
+class JellyfinAdapter(SourceAdapter):
+    scheme = "jellyfin"
+
+    def _resolve_server(self, server_ref: str) -> dict:
+        """Look up a named server from config."""
+        cfg = load_config()
+        server = cfg.get("sources", {}).get("jellyfin", {}).get(server_ref)
+        if not server:
+            # Try as hostname directly
+            if "." in server_ref or server_ref == "localhost":
+                print(f"Server '{server_ref}' not in config. Add it with: voxtract sources add jellyfin --name {server_ref} --url http://{server_ref}:8096 --key KEY")
+                sys.exit(1)
+            print(f"Jellyfin server '{server_ref}' not found in config.", file=sys.stderr)
+            sys.exit(1)
+        return server
+
+    def _api_call(self, server: dict, path: str, params: dict = None,
+                   method: str = "GET", body: dict = None) -> dict | list:
+        """Make an authenticated Jellyfin API call."""
+        import requests
+        url = f"{server['url']}{path}"
+        headers = {
+            "Authorization": f'MediaBrowser Client="voxtract", Device="Linux", DeviceId="voxtract-1", Version="1.0", Token="{server["token"]}"',
+        }
+        if method == "GET":
+            r = requests.get(url, params=params, headers=headers, timeout=30)
+        elif method == "POST":
+            r = requests.post(url, json=body, params=params, headers=headers, timeout=30)
+        else:
+            r = requests.request(method, url, json=body, params=params, headers=headers, timeout=30)
+
+        if r.status_code == 401:
+            print("Jellyfin authentication failed. Check your API key/token.", file=sys.stderr)
+            print("Update with: voxtract sources update jellyfin --key NEW_KEY", file=sys.stderr)
+            sys.exit(1)
+        if r.status_code != 200:
+            print(f"Jellyfin API error {r.status_code}: {r.text[:200]}", file=sys.stderr)
+            sys.exit(1)
+        return r.json()
+
+    def _authenticate(self, url: str, username: str = None, password: str = None,
+                       api_key: str = None) -> dict:
+        """Authenticate with Jellyfin, return {url, token, user_id}."""
+        import requests
+
+        url = url.rstrip("/")
+        headers = {
+            "Authorization": 'MediaBrowser Client="voxtract", Device="Linux", DeviceId="voxtract-1", Version="1.0"',
+        }
+
+        if api_key:
+            # Test the API key
+            test_headers = headers.copy()
+            test_headers["Authorization"] = f'MediaBrowser Token="{api_key}"'
+            r = requests.get(f"{url}/System/Info/Public", headers=test_headers, timeout=10)
+            if r.status_code == 200:
+                # Get user info
+                r2 = requests.get(f"{url}/Users", headers=test_headers, timeout=10)
+                users = r2.json() if r2.status_code == 200 else [{"Id": "me"}]
+                return {"url": url, "token": api_key, "user_id": users[0]["Id"]}
+            print(f"API key test failed: {r.status_code}", file=sys.stderr)
+            sys.exit(1)
+
+        elif username and password:
+            body = {"Username": username, "Pw": password}
+            r = requests.post(f"{url}/Users/AuthenticateByName", headers=headers,
+                              json=body, timeout=10)
+            if r.status_code != 200:
+                print(f"Jellyfin login failed: {r.status_code}", file=sys.stderr)
+                sys.exit(1)
+            data = r.json()
+            return {"url": url, "token": data["AccessToken"], "user_id": data["User"]["Id"]}
+
+        print("Provide either --key (API key) or --user/--pass for Jellyfin", file=sys.stderr)
+        sys.exit(1)
+
+    def can_handle(self, uri: str) -> bool:
+        return uri.startswith("jellyfin://")
+
+    def fetch(self, uri: str, dest_dir: Path, force: bool = False) -> dict:
+        # URI: jellyfin://SERVER/Items/ITEMID
+        # or:   jellyfin://SERVER/Search?q=term  (picks first result)
+        parsed = urlparse(uri)
+        server_ref = parsed.hostname  # e.g. "homelab" or "jellyfin.local"
+        server = self._resolve_server(server_ref)
+
+        audio_file = dest_dir / f"source.{AUDIO_FORMAT}"
+
+        if audio_file.exists() and not force:
+            meta = json.loads((dest_dir / "meta.json").read_text())
+            return meta
+
+        # Extract item path
+        path = parsed.path.strip("/")
+        if not path:
+            print("Jellyfin URI must include an item path: jellyfin://SERVER/Items/ID", file=sys.stderr)
+            sys.exit(1)
+
+        # Get item metadata
+        parts = path.split("/")
+        if "Items" in parts:
+            item_id = parts[parts.index("Items") + 1]
+        else:
+            item_id = parts[-1]
+
+        item_data = self._api_call(server, f"/Users/{server['user_id']}/Items/{item_id}")
+        title = item_data.get("Name", "Unknown")
+        runtime_ticks = item_data.get("RunTimeTicks", 0)
+        duration = runtime_ticks / 10_000_000 if runtime_ticks else 0
+
+        item_type = item_data.get("Type", "")
+        print(f"  Source: {title} ({item_type}) — {format_time(duration)}")
+
+        # Stream/download: use Audio endpoint for everything (works for video too)
+        audio_url = item_data.get("MediaSources", [{}])[0].get("Path", "")
+        print(f"  Media path: {audio_url}")
+
+        if audio_url and Path(audio_url).exists():
+            # Local file on the Jellyfin server — copy directly if accessible
+            # (this relies on the same filesystem, which may not be the case)
+            # Fall back to streaming
+            pass
+
+        # Use the universal audio stream
+        stream_url = (f"{server['url']}/Audio/{item_id}/universal"
+                      f"?UserId={server['user_id']}"
+                      f"&AudioCodec=pcm_s16le"
+                      f"&Container=wav"
+                      f"&TranscodingContainer=ts"
+                      f"&TranscodingProtocol=hls"
+                      f"&MaxStreamingBitrate=999999999")
+
+        # Download with streaming + ffmpeg
+        import requests
+        print(f"  Streaming audio from Jellyfin...")
+        r = requests.get(stream_url, headers={
+            "Authorization": f'MediaBrowser Token="{server["token"]}"',
+        }, stream=True, timeout=600)
+
+        tmp_wav = str(dest_dir / f"source_raw.wav")
+        if r.status_code == 200:
+            with open(tmp_wav, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+
+            # Convert to standard WAV
+            run(["ffmpeg", "-y", "-i", tmp_wav,
+                 "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+                 str(audio_file)],
+                desc="Converting Jellyfin stream to WAV")
+            Path(tmp_wav).unlink(missing_ok=True)
+        else:
+            print(f"Stream failed: HTTP {r.status_code}", file=sys.stderr)
+            sys.exit(1)
+
+        return {"title": title, "duration": duration or probe_duration(audio_file),
+                "source": uri, "server": server_ref, "item_id": item_id}
+
+    def list_items(self, uri: str, query: str = "", item_type: str = "",
+                    limit: int = 20) -> list[dict]:
+        parsed = urlparse(uri)
+        server_ref = parsed.hostname
+        server = self._resolve_server(server_ref)
+
+        params = {"Recursive": "true", "Limit": str(limit), "SortBy": "SortName",
+                  "SortOrder": "Ascending"}
+        if query:
+            params["SearchTerm"] = query
+
+        # Determine what to list
+        path = parsed.path.strip("/")
+        if not path:
+            path = "Items"
+
+        if "Views" in path:
+            items = self._api_call(server, f"/Users/{server['user_id']}/Views", params)
+        elif "Items" in path:
+            parts = path.split("/")
+            if len(parts) > 1 and parts[-2] == "Items":
+                parent_id = parts[-1]
+                items = self._api_call(server, f"/Users/{server['user_id']}/Items",
+                                       {"ParentId": parent_id, **params})
+            else:
+                items = self._api_call(server, f"/Users/{server['user_id']}/Items", params)
+        elif "Search" in path:
+            items = self._api_call(server, f"/Items", {"SearchTerm": query, **params})
+        else:
+            items = self._api_call(server, f"/Users/{server['user_id']}/Items", params)
+
+        results = []
+        for item in (items if isinstance(items, list) else items.get("Items", [])):
+            if item_type and item.get("Type", "").lower() != item_type.lower():
+                continue
+            duration = (item.get("RunTimeTicks", 0) / 10_000_000) if item.get("RunTimeTicks") else 0
+            results.append({
+                "id": item.get("Id", ""),
+                "title": item.get("Name", ""),
+                "type": item.get("Type", ""),
+                "year": item.get("ProductionYear", ""),
+                "duration": duration,
+                "uri": f"jellyfin://{server_ref}/Items/{item.get('Id')}",
+            })
+        return results
+
+
+# ---------------------------------------------------------------------------
+# Plex Adapter
+# ---------------------------------------------------------------------------
+
+class PlexAdapter(SourceAdapter):
+    scheme = "plex"
+
+    def _resolve_server(self, server_ref: str) -> dict:
+        cfg = load_config()
+        server = cfg.get("sources", {}).get("plex", {}).get(server_ref)
+        if not server:
+            print(f"Plex server '{server_ref}' not in config.", file=sys.stderr)
+            print(f"Add with: voxtract sources add plex --name {server_ref} --url http://{server_ref}:32400 --token TOKEN", file=sys.stderr)
+            sys.exit(1)
+        return server
+
+    def _api_call(self, server: dict, path: str, params: dict = None) -> dict:
+        import requests
+        url = f"{server['url']}{path}"
+        p = params or {}
+        p["X-Plex-Token"] = server["token"]
+        headers = {"Accept": "application/json"}
+        r = requests.get(url, params=p, headers=headers, timeout=30)
+        if r.status_code == 401:
+            print("Plex authentication failed. Check your token.", file=sys.stderr)
+            sys.exit(1)
+        if r.status_code != 200:
+            print(f"Plex API error {r.status_code}: {r.text[:200]}", file=sys.stderr)
+            sys.exit(1)
+        return r.json()
+
+    def can_handle(self, uri: str) -> bool:
+        return uri.startswith("plex://")
+
+    def fetch(self, uri: str, dest_dir: Path, force: bool = False) -> dict:
+        # URI: plex://SERVER/metadata/RATING_KEY
+        parsed = urlparse(uri)
+        server_ref = parsed.hostname
+        server = self._resolve_server(server_ref)
+
+        audio_file = dest_dir / f"source.{AUDIO_FORMAT}"
+        if audio_file.exists() and not force:
+            return json.loads((dest_dir / "meta.json").read_text())
+
+        path = parsed.path.strip("/")
+        if not path:
+            print("Plex URI must include metadata path: plex://SERVER/metadata/KEY", file=sys.stderr)
+            sys.exit(1)
+
+        metadata = self._api_call(server, f"/{path}")
+        container = (metadata.get("MediaContainer") or metadata)
+        medias = (container.get("Metadata") or [(metadata.get("MediaContainer") or {})])
+        if isinstance(medias, list):
+            item = medias[0] if medias else {}
+        else:
+            item = medias
+
+        title = item.get("title", "Unknown")
+        duration_ms = item.get("duration", 0)
+        duration = duration_ms / 1000 if duration_ms else 0
+
+        print(f"  Source: {title} — {format_time(duration)}")
+
+        # Get media parts for download URL
+        parts = item.get("Media", [{}])[0].get("Part", [])
+        if not parts:
+            print("No media parts found", file=sys.stderr)
+            sys.exit(1)
+
+        part_key = parts[0].get("key", "")
+        download_url = f"{server['url']}{part_key}?download=1&X-Plex-Token={server['token']}"
+
+        import requests
+        print(f"  Downloading from Plex...")
+        r = requests.get(download_url, stream=True, timeout=600)
+        if r.status_code != 200:
+            print(f"Download failed: HTTP {r.status_code}", file=sys.stderr)
+            sys.exit(1)
+
+        tmp_file = str(dest_dir / f"source_download")
+        with open(tmp_file, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        run(["ffmpeg", "-y", "-i", tmp_file,
+             "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+             str(audio_file)],
+            desc="Converting Plex download to WAV")
+        Path(tmp_file).unlink(missing_ok=True)
+
+        return {"title": title, "duration": duration or probe_duration(audio_file),
+                "source": uri, "server": server_ref}
+
+    def list_items(self, uri: str, query: str = "", item_type: str = "",
+                    limit: int = 20) -> list[dict]:
+        parsed = urlparse(uri)
+        server_ref = parsed.hostname
+        server = self._resolve_server(server_ref)
+
+        # List libraries
+        path = parsed.path.strip("/")
+        if not path or path == "sections":
+            libs = self._api_call(server, "/library/sections")
+            results = []
+            for d in libs.get("MediaContainer", {}).get("Directory", []):
+                results.append({
+                    "id": d.get("key", ""),
+                    "title": d.get("title", ""),
+                    "type": d.get("type", "library"),
+                    "year": "",
+                    "duration": 0,
+                    "uri": f"plex://{server_ref}/library/sections/{d.get('key')}/all",
+                })
+            return results
+
+        # Browse section or search
+        if query:
+            data = self._api_call(server, f"/hubs/search", {"query": query, "limit": limit})
+            hubs = data.get("MediaContainer", {}).get("Hub", [])
+            results = []
+            for hub in hubs:
+                for item in hub.get("Metadata", []):
+                    dur = item.get("duration", 0) / 1000 if item.get("duration") else 0
+                    results.append({
+                        "id": item.get("ratingKey", ""),
+                        "title": item.get("title", ""),
+                        "type": item.get("type", ""),
+                        "year": item.get("year", ""),
+                        "duration": dur,
+                        "uri": f"plex://{server_ref}/library/metadata/{item.get('ratingKey')}",
+                    })
+            return results
+        else:
+            data = self._api_call(server, f"/{path}")
+            container = data.get("MediaContainer", {})
+            items = container.get("Metadata", container.get("Directory", []))
+            results = []
+            for item in items:
+                dur = item.get("duration", 0) / 1000 if item.get("duration") else 0
+                if item_type and item.get("type", "").lower() != item_type.lower():
+                    continue
+                results.append({
+                    "id": item.get("ratingKey", item.get("key", "")),
+                    "title": item.get("title", ""),
+                    "type": item.get("type", "unknown"),
+                    "year": item.get("year", ""),
+                    "duration": dur,
+                    "uri": f"plex://{server_ref}/library/metadata/{item.get('ratingKey', item.get('key'))}",
+                })
+            return results
+
+
+# ---------------------------------------------------------------------------
+# HTTP / Direct URL Adapter
+# ---------------------------------------------------------------------------
+
+class HTTPAdapter(SourceAdapter):
+    scheme = "http"
+
+    def __init__(self):
+        self._yt = YouTubeAdapter()
+
+    def can_handle(self, uri: str) -> bool:
+        if uri.startswith(("http://", "https://")):
+            # Check if it's a known media site that yt-dlp handles
+            if any(domain in uri for domain in
+                   ["youtube.com", "youtu.be", "vimeo.com", "dailymotion.com",
+                    "soundcloud.com", "bandcamp.com", "twitch.tv", "rumble.com",
+                    "bitchute.com", "odysee.com", "nicovideo.jp", "bilibili.com"]):
+                return False  # Let YouTubeAdapter handle these
+            return True
+        return False
+
+    def fetch(self, uri: str, dest_dir: Path, force: bool = False) -> dict:
+        audio_file = dest_dir / f"source.{AUDIO_FORMAT}"
+        if audio_file.exists() and not force:
+            return json.loads((dest_dir / "meta.json").read_text())
+
+        import requests
+        print(f"  Downloading: {uri}")
+        r = requests.get(uri, stream=True, timeout=600, allow_redirects=True,
+                         headers={"User-Agent": "voxtract/2.0"})
+        if r.status_code != 200:
+            print(f"HTTP download failed: {r.status_code}", file=sys.stderr)
+            sys.exit(1)
+
+        tmp_file = str(dest_dir / "source_download")
+        total = int(r.headers.get("content-length", 0))
+        downloaded = 0
+        with open(tmp_file, 'wb') as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total:
+                    pct = downloaded * 100 // total
+                    print(f"\r  Progress: {pct}%", end="", flush=True)
+        print()
+
+        # Convert to WAV (strip video if present)
+        run(["ffmpeg", "-y", "-i", tmp_file,
+             "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+             str(audio_file)],
+            desc="Converting to WAV")
+        Path(tmp_file).unlink(missing_ok=True)
+
+        # Try to get a filename from URL or Content-Disposition
+        title = uri.rstrip("/").split("/")[-1].split("?")[0] or "download"
+        cd = r.headers.get("Content-Disposition", "")
+        if cd and "filename=" in cd:
+            title = cd.split("filename=")[-1].strip('"')
+
+        return {"title": title, "duration": probe_duration(audio_file),
+                "source": uri}
+
+    def list_items(self, uri: str, query: str = "", item_type: str = "",
+                    limit: int = 20) -> list[dict]:
+        return []  # HTTP adapter doesn't browse
+
+
+# ---------------------------------------------------------------------------
+# Local File Adapter
+# ---------------------------------------------------------------------------
+
+class LocalFileAdapter(SourceAdapter):
+    scheme = "file"
+
+    def can_handle(self, uri: str) -> bool:
+        if uri.startswith("file://"):
+            return True
+        p = Path(uri)
+        return p.exists() and p.is_file() and not uri.startswith(("http", "jellyfin:", "plex:", "dir:", "podcast:"))
+
+    def fetch(self, uri: str, dest_dir: Path, force: bool = False) -> dict:
+        p = Path(uri.replace("file://", ""))
+        audio_file = dest_dir / f"source.{AUDIO_FORMAT}"
+
+        if audio_file.exists() and not force:
+            return json.loads((dest_dir / "meta.json").read_text())
+
+        print(f"  Importing: {p}")
+        run(["ffmpeg", "-y", "-i", str(p), "-vn",
+             "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+             str(audio_file)],
+            desc="Converting to WAV")
+
+        return {"title": p.name, "duration": probe_duration(audio_file),
+                "source": f"file://{p}"}
+
+    def list_items(self, uri: str, query: str = "", item_type: str = "",
+                    limit: int = 20) -> list[dict]:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Local Directory Adapter
+# ---------------------------------------------------------------------------
+
+class DirAdapter(SourceAdapter):
+    scheme = "dir"
+
+    def can_handle(self, uri: str) -> bool:
+        if uri.startswith("dir://"):
+            return True
+        p = Path(uri)
+        return p.exists() and p.is_dir()
+
+    def fetch(self, uri: str, dest_dir: Path, force: bool = False) -> dict:
+        # For a directory, fetch the first file as a convenience
+        # The real power is in list_items → then fetch individual files
+        items = self.list_items(uri)
+        if not items:
+            print("No media files found in directory", file=sys.stderr)
+            sys.exit(1)
+        print(f"Found {len(items)} media files. Use dir:///<path> with list to browse, then fetch specific files.")
+        print(f"First candidate: {items[0]['uri']}")
+
+        local = LocalFileAdapter()
+        return local.fetch(items[0]['path'], dest_dir, force)
+
+    def list_items(self, uri: str, query: str = "", item_type: str = "",
+                    limit: int = 20) -> list[dict]:
+        d = Path(uri.replace("dir://", ""))
+        if not d.exists():
+            print(f"Directory not found: {d}", file=sys.stderr)
+            return []
+
+        media_exts = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".opus",
+                      ".mp4", ".mkv", ".avi", ".mov", ".webm", ".wmv", ".flv",
+                      ".m4v", ".ts", ".mts", ".m2ts"}
+
+        results = []
+        for f in sorted(d.rglob("*")):
+            if f.suffix.lower() in media_exts and (not query or query.lower() in f.name.lower()):
+                # Get duration
+                try:
+                    dur_out = subprocess.run(
+                        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                         "-of", "csv=p=0", str(f)],
+                        capture_output=True, text=True, timeout=30)
+                    duration = float(dur_out.stdout.strip()) if dur_out.stdout.strip() else 0
+                except:
+                    duration = 0
+
+                results.append({
+                    "id": cache_id(str(f)),
+                    "title": f.relative_to(d).as_posix(),
+                    "path": str(f),
+                    "type": "audio" if f.suffix.lower() in {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".opus"} else "video",
+                    "year": "",
+                    "duration": duration,
+                    "uri": f"file://{f}",
+                })
+                if len(results) >= limit:
+                    break
+
+        return results
+
+
+# ---------------------------------------------------------------------------
+# Podcast RSS Adapter
+# ---------------------------------------------------------------------------
+
+class PodcastAdapter(SourceAdapter):
+    scheme = "podcast"
+
+    def _parse_feed(self, feed_url: str) -> list[dict]:
+        """Parse an RSS feed and return episode list."""
+        import requests
+        import xml.etree.ElementTree as ET
+
+        r = requests.get(feed_url, timeout=30,
+                         headers={"User-Agent": "voxtract/2.0"})
+        if r.status_code != 200:
+            print(f"RSS feed fetch failed: {r.status_code}", file=sys.stderr)
+            return []
+
+        try:
+            root = ET.fromstring(r.content)
+        except ET.ParseError as e:
+            print(f"RSS parse error: {e}", file=sys.stderr)
+            return []
+
+        # Handle both RSS 2.0 and Atom
+        ns = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd",
+              "atom": "http://www.w3.org/2005/Atom",
+              "content": "http://purl.org/rss/1.0/modules/content/"}
+
+        results = []
+        # Try RSS items first
+        for item in root.findall(".//item"):
+            title = item.findtext("title", "Untitled")
+            enclosure = item.find("enclosure")
+            audio_url = enclosure.get("url") if enclosure is not None else ""
+
+            if not audio_url:
+                # Try media:content
+                media_ns = {"media": "http://search.yahoo.com/mrss/"}
+                media_el = item.find("media:content", media_ns)
+                if media_el is not None:
+                    audio_url = media_el.get("url", "")
+
+            if audio_url:
+                results.append({
+                    "id": cache_id(audio_url),
+                    "title": title,
+                    "type": "podcast_episode",
+                    "year": item.findtext("pubDate", "")[-4:] if item.findtext("pubDate") else "",
+                    "duration": 0,
+                    "uri": f"http://{audio_url}" if not audio_url.startswith("http") else audio_url,
+                    "feed_url": feed_url,
+                })
+
+        # Try Atom entries
+        for entry in root.findall("{http://www.w3.org/2005/Atom}entry"):
+            title = entry.findtext("{http://www.w3.org/2005/Atom}title", "Untitled")
+            for link in entry.findall("{http://www.w3.org/2005/Atom}link"):
+                rel = link.get("rel", "alternate")
+                href = link.get("href", "")
+                if "audio" in rel or "enclosure" in rel:
+                    results.append({
+                        "id": cache_id(href),
+                        "title": title,
+                        "type": "podcast_episode",
+                        "year": "",
+                        "duration": 0,
+                        "uri": href if href.startswith("http") else f"http://{href}",
+                        "feed_url": feed_url,
+                    })
+
+        return results
+
+    def can_handle(self, uri: str) -> bool:
+        return uri.startswith("podcast://")
+
+    def fetch(self, uri: str, dest_dir: Path, force: bool = False) -> dict:
+        # URI: podcast://FEED_URL  or  podcast://FEED_URL#ep-N (fragment = index)
+        # or:   podcast://FEED_URL#episode_audio_url
+        actual_uri = uri.replace("podcast://", "")
+        fragment = ""
+        if "#" in actual_uri:
+            actual_uri, fragment = actual_uri.split("#", 1)
+
+        episodes = self._parse_feed(actual_uri)
+
+        if fragment:
+            if fragment.startswith("ep-"):
+                idx = int(fragment.split("-")[1])
+                if 0 <= idx < len(episodes):
+                    ep_uri = episodes[idx]["uri"]
+                else:
+                    print(f"Episode index {idx} out of range (0-{len(episodes)-1})", file=sys.stderr)
+                    sys.exit(1)
+            else:
+                ep_uri = fragment
+            http_adapter = HTTPAdapter()
+            return http_adapter.fetch(ep_uri, dest_dir, force)
+        else:
+            # Fetch latest episode
+            if episodes:
+                ep_uri = episodes[0]["uri"]
+                http_adapter = HTTPAdapter()
+                result = http_adapter.fetch(ep_uri, dest_dir, force)
+                result["source"] = uri
+                result["feed_url"] = actual_uri
+                return result
+            print("No episodes found in feed", file=sys.stderr)
+            sys.exit(1)
+
+    def list_items(self, uri: str, query: str = "", item_type: str = "",
+                    limit: int = 20) -> list[dict]:
+        feed_url = uri.replace("podcast://", "")
+        all_episodes = self._parse_feed(feed_url)
+
+        if query:
+            all_episodes = [e for e in all_episodes
+                           if query.lower() in e["title"].lower()]
+
+        return all_episodes[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Spotify Adapter
+# ---------------------------------------------------------------------------
+
+class SpotifyAdapter(SourceAdapter):
+    """Spotify source adapter using spotipy for metadata and spotdl for audio download.
+
+    URI scheme:
+        spotify://track/ID             - Fetch a music track (via spotdl → YouTube match)
+        spotify://album/ID             - List album tracks
+        spotify://playlist/ID          - List playlist tracks
+        spotify://show/ID              - List podcast show episodes
+        spotify://episode/ID           - Fetch a podcast episode (via YouTube search fallback)
+        spotify://artist/ID            - List artist top tracks
+        spotify://search               - Search (use -q query)
+
+    Configuration (via `voxtract sources add spotify`):
+        client_id, client_secret  — Spotify Web API credentials
+    """
+
+    scheme = "spotify"
+
+    # -- Config / Auth -------------------------------------------------------
+
+    def _get_creds(self) -> dict:
+        """Load Spotify credentials from config."""
+        cfg = load_config()
+        creds = cfg.get("sources", {}).get("spotify", {}).get("default")
+        if not creds or not creds.get("client_id"):
+            print("Spotify not configured. Run:", file=sys.stderr)
+            print("  voxtract sources add spotify --id CLIENT_ID --secret CLIENT_SECRET", file=sys.stderr)
+            print("  Get credentials at: https://developer.spotify.com/dashboard", file=sys.stderr)
+            sys.exit(1)
+        return creds
+
+    def _get_spotify_client(self):
+        """Return an authenticated spotipy.Spotify client."""
+        import spotipy
+        from spotipy.oauth2 import SpotifyClientCredentials
+        creds = self._get_creds()
+        auth = SpotifyClientCredentials(
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"],
+        )
+        return spotipy.Spotify(auth_manager=auth)
+
+    def _get_spotdl(self):
+        """Return a spotdl.Spotdl instance for downloading."""
+        from spotdl import Spotdl
+        creds = self._get_creds()
+        return Spotdl(
+            client_id=creds["client_id"],
+            client_secret=creds["client_secret"],
+            downloader_settings={
+                "format": "mp3",
+                "output": "source",
+            },
+        )
+
+    # -- Adapter Protocol ----------------------------------------------------
+
+    def can_handle(self, uri: str) -> bool:
+        return uri.startswith("spotify://")
+
+    def get_source_key(self, uri: str) -> str:
+        # Use the Spotify URI directly as the key basis
+        return cache_id(uri)
+
+    def fetch(self, uri: str, dest_dir: Path, force: bool = False) -> dict:
+        audio_file = dest_dir / f"source.{AUDIO_FORMAT}"
+        if audio_file.exists() and not force:
+            return json.loads((dest_dir / "meta.json").read_text())
+
+        # Parse URI: spotify://type/id
+        parsed = urlparse(uri)
+        path = parsed.path.strip("/")
+        if not path:
+            print("Spotify URI requires a path: spotify://track/ID, spotify://album/ID, etc.", file=sys.stderr)
+            sys.exit(1)
+
+        parts = path.split("/", 1)
+        sp_type = parts[0]  # track, album, episode, etc.
+        sp_id = parts[1] if len(parts) > 1 else ""
+
+        sp = self._get_spotify_client()
+
+        if sp_type == "track":
+            return self._fetch_track(sp, sp_id, dest_dir, uri)
+        elif sp_type == "episode":
+            return self._fetch_episode(sp, sp_id, dest_dir, uri)
+        elif sp_type == "album":
+            # Fetch first track of the album as convenience
+            tracks = sp.album_tracks(sp_id, limit=1)
+            if tracks["items"]:
+                return self._fetch_track(sp, tracks["items"][0]["id"], dest_dir, uri)
+            print("Album has no tracks", file=sys.stderr)
+            sys.exit(1)
+        elif sp_type == "playlist":
+            results = sp.playlist_items(sp_id, limit=1)
+            items = results.get("items", [])
+            if items and items[0].get("track"):
+                return self._fetch_track(sp, items[0]["track"]["id"], dest_dir, uri)
+            print("Playlist is empty", file=sys.stderr)
+            sys.exit(1)
+        else:
+            print(f"Cannot fetch Spotify type '{sp_type}'. Supported: track, album, playlist, episode", file=sys.stderr)
+            sys.exit(1)
+
+    def _fetch_track(self, sp, track_id: str, dest_dir: Path, uri: str) -> dict:
+        """Fetch a Spotify music track via spotdl (matches to YouTube)."""
+        # Get metadata first
+        track = sp.track(track_id)
+        artists = ", ".join(a["name"] for a in track["artists"])
+        title = f"{artists} - {track['name']}"
+        duration_s = track["duration_ms"] / 1000
+
+        print(f"  Track: {title}")
+        print(f"  Duration: {format_time(duration_s)}")
+        print(f"  Album: {track['album']['name']}")
+
+        # Use spotdl to download (it matches to YouTube internally)
+        print(f"  Matching to YouTube via spotdl...")
+        try:
+            sdl = self._get_spotdl()
+            songs = sdl.search([f"https://open.spotify.com/track/{track_id}"])
+            if songs:
+                song, path = sdl.download(songs[0])
+                if path and Path(path).exists():
+                    # Convert spotdl output to our standard WAV
+                    audio_file = dest_dir / f"source.{AUDIO_FORMAT}"
+                    run(["ffmpeg", "-y", "-i", str(path),
+                         "-vn", "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+                         str(audio_file)],
+                        desc="Converting to WAV")
+                    Path(path).unlink(missing_ok=True)
+                    return {"title": title, "duration": duration_s, "source": uri,
+                            "spotify_id": track_id, "type": "track"}
+        except Exception as e:
+            print(f"  spotdl failed: {e}", file=sys.stderr)
+
+        # Fallback: search YouTube directly using the track info
+        print(f"  Fallback: searching YouTube for '{title}'...")
+        yt_query = title
+        tmp = tempfile.mkdtemp()
+        try:
+            tmp_audio = os.path.join(tmp, "source.%(ext)s")
+            dl = subprocess.run(
+                ["yt-dlp", "-x", "--audio-format", AUDIO_FORMAT,
+                 "--audio-quality", "0", "-o", tmp_audio,
+                 f"ytsearch1:{yt_query}"],
+                capture_output=True, text=True
+            )
+            downloaded = list(Path(tmp).glob("source.*"))
+            if downloaded:
+                audio_file = dest_dir / f"source.{AUDIO_FORMAT}"
+                shutil.move(str(downloaded[0]), str(audio_file))
+                return {"title": title, "duration": duration_s, "source": uri,
+                        "spotify_id": track_id, "type": "track"}
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        print("Failed to download track", file=sys.stderr)
+        sys.exit(1)
+
+    def _fetch_episode(self, sp, episode_id: str, dest_dir: Path, uri: str) -> dict:
+        """Fetch a Spotify podcast episode.
+
+        spotdl doesn't support episodes, so we get metadata from Spotify
+        and search YouTube for the audio.
+        """
+        ep = sp.episode(episode_id)
+        show_name = ep.get("show", {}).get("name", "")
+        title = f"{show_name} - {ep['name']}" if show_name else ep["name"]
+        duration_s = ep["duration_ms"] / 1000
+
+        print(f"  Episode: {title}")
+        print(f"  Show: {show_name}")
+        print(f"  Duration: {format_time(duration_s)}")
+        print(f"  Released: {ep.get('release_date', 'unknown')}")
+
+        # Search YouTube for the episode audio
+        search_query = title
+        description = ep.get("description", "")[:200]
+        print(f"  Searching YouTube for episode audio...")
+
+        tmp = tempfile.mkdtemp()
+        try:
+            tmp_audio = os.path.join(tmp, "source.%(ext)s")
+            subprocess.run(
+                ["yt-dlp", "-x", "--audio-format", AUDIO_FORMAT,
+                 "--audio-quality", "0", "-o", tmp_audio,
+                 f"ytsearch3:{search_query}"],
+                capture_output=True, text=True, timeout=120,
+            )
+            downloaded = list(Path(tmp).glob("source.*"))
+            if downloaded:
+                audio_file = dest_dir / f"source.{AUDIO_FORMAT}"
+                shutil.move(str(downloaded[0]), str(audio_file))
+                return {"title": title, "duration": duration_s, "source": uri,
+                        "spotify_id": episode_id, "type": "episode",
+                        "show": show_name, "description": description}
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+        print("Could not find episode audio on YouTube", file=sys.stderr)
+        sys.exit(1)
+
+    def list_items(self, uri: str, query: str = "", item_type: str = "",
+                    limit: int = 20) -> list[dict]:
+        sp = self._get_spotify_client()
+        parsed = urlparse(uri)
+        path = parsed.path.strip("/")
+
+        if not path or path == "search":
+            return self._search(sp, query, item_type or "track", limit)
+
+        parts = path.split("/", 1)
+        sp_type = parts[0]
+        sp_id = parts[1] if len(parts) > 1 else ""
+
+        if sp_type == "album" and sp_id:
+            return self._list_album(sp, sp_id, limit)
+        elif sp_type == "playlist" and sp_id:
+            return self._list_playlist(sp, sp_id, limit)
+        elif sp_type == "show" and sp_id:
+            return self._list_show(sp, sp_id, limit)
+        elif sp_type == "artist" and sp_id:
+            return self._list_artist(sp, sp_id, limit)
+        else:
+            return self._search(sp, query, item_type or "track", limit)
+
+    def _search(self, sp, query: str, item_type: str, limit: int) -> list[dict]:
+        """Search Spotify."""
+        if not query:
+            print("Provide a search query with -q", file=sys.stderr)
+            return []
+
+        # Map voxtract types to Spotify types
+        type_map = {
+            "track": "track", "audio": "track",
+            "album": "album",
+            "show": "show", "series": "show",
+            "episode": "episode",
+            "artist": "artist",
+            "movie": "track",  # no movie type on Spotify
+        }
+        sp_type = type_map.get(item_type, "track")
+
+        try:
+            results = sp.search(q=query, type=sp_type, limit=limit)
+        except Exception as e:
+            print(f"Spotify search failed: {e}", file=sys.stderr)
+            return []
+
+        results_key = f"{sp_type}s"
+        items = results.get(results_key, {}).get("items", [])
+        output = []
+
+        for item in items:
+            if sp_type == "track":
+                artists = ", ".join(a["name"] for a in item["artists"])
+                dur = item["duration_ms"] / 1000
+                output.append({
+                    "id": item["id"],
+                    "title": f"{artists} - {item['name']}",
+                    "type": "track",
+                    "year": item.get("album", {}).get("release_date", "")[:4],
+                    "duration": dur,
+                    "uri": f"spotify://track/{item['id']}",
+                })
+            elif sp_type == "album":
+                output.append({
+                    "id": item["id"],
+                    "title": f"{', '.join(a['name'] for a in item['artists'])} - {item['name']}",
+                    "type": "album",
+                    "year": item.get("release_date", "")[:4],
+                    "duration": 0,
+                    "uri": f"spotify://album/{item['id']}",
+                })
+            elif sp_type == "show":
+                output.append({
+                    "id": item["id"],
+                    "title": item["name"],
+                    "type": "show",
+                    "year": "",
+                    "duration": 0,
+                    "uri": f"spotify://show/{item['id']}",
+                })
+            elif sp_type == "episode":
+                dur = item["duration_ms"] / 1000
+                output.append({
+                    "id": item["id"],
+                    "title": item["name"],
+                    "type": "episode",
+                    "year": item.get("release_date", "")[:4],
+                    "duration": dur,
+                    "uri": f"spotify://episode/{item['id']}",
+                })
+            elif sp_type == "artist":
+                output.append({
+                    "id": item["id"],
+                    "title": item["name"],
+                    "type": "artist",
+                    "year": "",
+                    "duration": 0,
+                    "uri": f"spotify://artist/{item['id']}",
+                })
+
+        return output
+
+    def _list_album(self, sp, album_id: str, limit: int) -> list[dict]:
+        results = sp.album_tracks(album_id, limit=limit)
+        album = sp.album(album_id)
+        album_name = album["name"]
+        album_artist = ", ".join(a["name"] for a in album["artists"])
+        output = []
+        for i, t in enumerate(results["items"]):
+            artists = ", ".join(a["name"] for a in t["artists"])
+            dur = t["duration_ms"] / 1000
+            output.append({
+                "id": t["id"],
+                "title": f"{artists} - {t['name']}",
+                "type": "track",
+                "year": album.get("release_date", "")[:4],
+                "duration": dur,
+                "uri": f"spotify://track/{t['id']}",
+            })
+        print(f"  Album: {album_artist} - {album_name} ({len(results['items'])} tracks)")
+        return output
+
+    def _list_playlist(self, sp, playlist_id: str, limit: int) -> list[dict]:
+        results = sp.playlist_items(playlist_id, limit=limit)
+        pl_name = sp.playlist(playlist_id, fields="name")["name"]
+        output = []
+        for item in results["items"]:
+            track = item.get("track")
+            if not track:
+                continue
+            artists = ", ".join(a["name"] for a in track["artists"])
+            dur = track["duration_ms"] / 1000
+            output.append({
+                "id": track["id"],
+                "title": f"{artists} - {track['name']}",
+                "type": "track",
+                "year": track.get("album", {}).get("release_date", "")[:4],
+                "duration": dur,
+                "uri": f"spotify://track/{track['id']}",
+            })
+        print(f"  Playlist: {pl_name}")
+        return output
+
+    def _list_show(self, sp, show_id: str, limit: int) -> list[dict]:
+        results = sp.show_episodes(show_id, limit=limit)
+        show = sp.show(show_id)
+        output = []
+        for ep in results["items"]:
+            dur = ep["duration_ms"] / 1000
+            output.append({
+                "id": ep["id"],
+                "title": ep["name"],
+                "type": "episode",
+                "year": ep.get("release_date", "")[:4],
+                "duration": dur,
+                "uri": f"spotify://episode/{ep['id']}",
+            })
+        print(f"  Show: {show['name']} ({len(results['items'])} episodes)")
+        return output
+
+    def _list_artist(self, sp, artist_id: str, limit: int) -> list[dict]:
+        results = sp.artist_top_tracks(artist_id)
+        artist = sp.artist(artist_id)
+        output = []
+        for t in results["tracks"][:limit]:
+            dur = t["duration_ms"] / 1000
+            output.append({
+                "id": t["id"],
+                "title": t["name"],
+                "type": "track",
+                "year": t.get("album", {}).get("release_date", "")[:4],
+                "duration": dur,
+                "uri": f"spotify://track/{t['id']}",
+            })
+        print(f"  Artist: {artist['name']} (top tracks)")
+        return output
+
+
+# ---------------------------------------------------------------------------
+# Adapter Registry
+# ---------------------------------------------------------------------------
+
+ADAPTERS: list[SourceAdapter] = [
+    SpotifyAdapter(),
+    JellyfinAdapter(),
+    PlexAdapter(),
+    PodcastAdapter(),
+    DirAdapter(),
+    YouTubeAdapter(),
+    HTTPAdapter(),
+    LocalFileAdapter(),
+]
+
+
+def find_adapter(uri: str) -> SourceAdapter:
+    for a in ADAPTERS:
+        if a.can_handle(uri):
+            return a
+    # Last resort: test if local path
+    p = Path(uri)
+    if p.exists():
+        return LocalFileAdapter()
+    # Try YouTube as catch-all
+    yt = YouTubeAdapter()
+    if yt.can_handle(uri):
+        return yt
+    print(f"Cannot handle source: {uri}", file=sys.stderr)
+    print("Supported: youtube://, jellyfin://, plex://, podcast://, http(s)://, file://, dir://", file=sys.stderr)
+    sys.exit(1)
+
+
+def resolve_source(uri: str, force_fetch: bool = False) -> tuple[SourceAdapter, str, Path]:
+    """Resolve a URI to an adapter + cache_id + cache_dir. Fetch if not cached.
+    
+    Uses file locking for parallel safety — concurrent clips from the same
+    source will serialize at the fetch/isolation step without corrupting cache.
+    """
+    adapter = find_adapter(uri)
+    sid = adapter.get_source_key(uri)
+    source_dir = CACHE_DIR / sid
+    audio_file = source_dir / f"source.{AUDIO_FORMAT}"
+
+    with cache_lock(source_dir):
+        if not audio_file.exists() or force_fetch:
+            source_dir.mkdir(parents=True, exist_ok=True)
+            meta = adapter.fetch(uri, source_dir, force=force_fetch)
+            meta["id"] = sid
+            meta["audio_file"] = str(audio_file)
+            meta_path = source_dir / "meta.json"
+            meta_path.write_text(json.dumps(meta, indent=2))
+            return adapter, sid, source_dir
+
+    return adapter, sid, source_dir
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_fetch(args):
+    """Fetch and cache audio from any source."""
+    print_header(f"{icon('download')} FETCH")
+    adapter = find_adapter(args.source)
+    sid = adapter.get_source_key(args.source)
+    source_dir = CACHE_DIR / sid
+    audio_file = source_dir / f"source.{AUDIO_FORMAT}"
+
+    if audio_file.exists() and not args.force:
+        print_success(f"Already cached: {sid}")
+        meta = json.loads((source_dir / "meta.json").read_text()) if (source_dir / "meta.json").exists() else {}
+        print(f"    {styled('Title:', _BOLD)}    {meta.get('title', 'Unknown')}")
+        print(f"    {styled('Duration:', _BOLD)} {format_time(meta.get('duration', 0))}")
+        print(f"    {styled('Source:', _BOLD)}   {args.source}")
+        print(f"    {styled('Size:', _BOLD)}     {human_size(audio_file.stat().st_size)}")
+        return
+
+    ensure_dirs()
+    t0 = time.monotonic()
+    with cache_lock(source_dir):
+        source_dir.mkdir(parents=True, exist_ok=True)
+        # Double-check after acquiring lock (another process may have fetched)
+        if audio_file.exists() and not args.force:
+            print_info("Source was fetched by another process while waiting")
+        else:
+            meta = adapter.fetch(args.source, source_dir, force=args.force)
+            meta["id"] = sid
+            meta["audio_file"] = str(audio_file)
+            (source_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+
+            if "duration" not in meta or not meta["duration"]:
+                meta["duration"] = probe_duration(audio_file)
+                (source_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+
+    elapsed = time.monotonic() - t0
+    print_success(f"Cached: {sid}")
+    print(f"    {styled('Title:', _BOLD)}    {meta.get('title', 'Unknown')}")
+    print(f"    {styled('Duration:', _BOLD)} {format_time(meta.get('duration', 0))}")
+    print(f"    {styled('Audio:', _BOLD)}    {audio_file}")
+    print(f"    {styled('Size:', _BOLD)}     {human_size(audio_file.stat().st_size)}")
+    print_elapsed("Fetch time", elapsed)
+
+
+def cmd_clip(args):
+    """Extract a clip from a source with optimized performance.
+    
+    Performance strategy:
+    - Uses input-side seeking (-ss before -i) for fast seeks without decoding
+      the entire source file from the beginning.
+    - Clips to raw PCM first (no encode overhead), then normalizes once.
+    - For clips from pre-isolated vocals, skips the decode/re-encode round trip.
+    - Parallel-safe: locks the source cache dir so concurrent clips from the
+      same source serialize at the isolation step without data corruption.
+    """
+    print_header(f"{icon('clip')} CLIP")
+    adapter, sid, source_dir = resolve_source(args.source)
+    audio_file = source_dir / f"source.{AUDIO_FORMAT}"
+
+    meta = json.loads((source_dir / "meta.json").read_text()) if (source_dir / "meta.json").exists() else {}
+    title = meta.get("title", sid)
+
+    # Parse timing
+    start = parse_time(args.start) if args.start else 0.0
+    if args.end:
+        end = parse_time(args.end)
+        duration = end - start
+    elif args.duration:
+        duration = float(args.duration)
+        end = start + duration
+    else:
+        end = meta.get("duration", probe_duration(audio_file))
+        duration = end - start
+
+    if duration <= 0:
+        print_error(f"Invalid clip duration ({duration:.1f}s)")
+        sys.exit(1)
+
+    print(f"  {styled('Source:', _BOLD)}   {title}")
+    print(f"  {styled('Segment:', _BOLD)} {format_time(start)} → {format_time(end)} ({duration:.1f}s)")
+
+    # Output path
+    output_dir = Path(args.output_dir) if args.output_dir else Path.cwd()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_fmt = args.format or "mp3"
+
+    safe_title = "".join(c if c.isalnum() or c in "- _." else "_" for c in title)[:60]
+    clip_name = f"{safe_title}_{format_time(start).replace(':','-')}_to_{format_time(end).replace(':','-')}"
+    if args.isolate:
+        clip_name += "_voice"
+    clip_name += f".{out_fmt}"
+    output_path = output_dir / clip_name
+
+    # Determine clip source — isolate vocals if requested (with lock!)
+    clip_source = audio_file
+    if args.isolate:
+        vocals_file = source_dir / "vocals.wav"
+        with cache_lock(source_dir):
+            # Re-check after acquiring lock — another process may have isolated
+            if vocals_file.exists():
+                print_info("Vocals already isolated (possibly by parallel process)")
+            else:
+                print_step(1, 3, f"{icon('brain')} Isolating speech with Demucs...")
+                ensure_demucs_model_cached()
+                cmd_isolate_source(sid, source_dir, audio_file)
+        clip_source = vocals_file
+
+    # Resolve loudness settings
+    gain_db = getattr(args, 'gain', None)
+    if gain_db is not None:
+        gain_db = float(gain_db)
+    target_lufs = getattr(args, 'lufs', None)
+    if target_lufs is not None:
+        target_lufs = float(target_lufs)
+    lra = getattr(args, 'lra', None)
+    if lra is not None:
+        lra = float(lra)
+    true_peak = getattr(args, 'tp', None)
+    if true_peak is not None:
+        true_peak = float(true_peak)
+
+    skip_normalize = getattr(args, 'no_normalize', False)
+    needs_normalize = not skip_normalize and (gain_db is not None or target_lufs is not None)
+
+    # Format-specific ffmpeg codec args
+    fmts = {
+        "mp3": ["-codec:a", "libmp3lame", "-qscale:a", "2"],
+        "wav": ["-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2"],
+        "flac": ["-acodec", "flac"],
+        "ogg": ["-codec:a", "libvorbis", "-qscale:a", "5"],
+        "m4a": ["-codec:a", "aac", "-b:a", "192k"],
+    }
+    codec_args = fmts.get(out_fmt, fmts["mp3"])
+
+    t0 = time.monotonic()
+
+    if skip_normalize and not needs_normalize:
+        # ── Fast path: single-pass seek + encode, no normalization ──
+        step_label = f"{icon('extract')} Extracting raw clip"
+        print_step(2 if args.isolate else 1, 2 if args.isolate else 1, step_label)
+        # Input-side seeking (-ss BEFORE -i) = fast keyframe seek, no full decode
+        ffmpeg_args = ["ffmpeg", "-y", "-ss", str(start), "-t", str(duration),
+                       "-i", str(clip_source)] + codec_args + [str(output_path)]
+        run(ffmpeg_args, desc=f"Extracting {out_fmt} (fast seek, raw)")
+    else:
+        # ── Optimized path: clip + normalize in minimal passes ──
+        step_num = 2 if args.isolate else 1
+        total_steps = 3 if args.isolate else 2
+
+        # Step 1: Extract clip to raw PCM temp (no encode overhead — just bytes)
+        print_step(step_num, total_steps, f"{icon('extract')} Extracting clip segment...")
+        tmp_raw = output_path.with_suffix(".raw.tmp.wav")
+        # -ss before -i for fast seek, output raw PCM so no encoding cost
+        run(["ffmpeg", "-y", "-ss", str(start), "-t", str(duration),
+             "-i", str(clip_source),
+             "-acodec", "pcm_s16le", "-ar", "44100", "-ac", "2",
+             str(tmp_raw)],
+            desc="Extracting segment (fast seek → raw PCM)")
+
+        # Step 2: Normalize from raw temp to final output
+        print_step(step_num + 1, total_steps, f"{icon('normalize')} Normalizing loudness...")
+        loudnorm_audio(tmp_raw, output_path,
+                       target_lufs=target_lufs, lra=lra,
+                       true_peak=true_peak, gain_db=gain_db)
+        tmp_raw.unlink(missing_ok=True)
+
+    elapsed = time.monotonic() - t0
+
+    file_size = output_path.stat().st_size
+    print_success(f"Clip saved: {output_path}")
+    print(f"    {styled('Source:', _BOLD)}    {title}")
+    print(f"    {styled('Segment:', _BOLD)}  {format_time(start)} → {format_time(end)}")
+    print(f"    {styled('Isolated:', _BOLD)} {'Yes' if args.isolate else 'No'}")
+    print(f"    {styled('Format:', _BOLD)}   {out_fmt}")
+    print(f"    {styled('Size:', _BOLD)}     {human_size(file_size)}")
+    print_elapsed("Extraction time", elapsed)
+
+
+def cmd_list(args):
+    """Search/browse items from a source."""
+    print_header(f"{icon('search')} LIST")
+    adapter = find_adapter(args.source)
+    items = adapter.list_items(args.source, query=args.query or "",
+                                item_type=args.type or "", limit=args.limit or 20)
+
+    if not items:
+        print_info("No items found.")
+        return
+
+    for i, item in enumerate(items):
+        dur_str = format_time(item.get("duration", 0))
+        item_type = item.get("type", "")
+        type_icon = {
+            "track": "🎵", "album": "💿", "artist": "🎤", "show": "📺",
+            "episode": "🎙️", "movie": "🎬", "video": "🎥", "audio": "🔊",
+            "series": "📚", "season": "📂", "library": "📁",
+            "podcast_episode": "🎙️",
+        }.get(item_type, "📄")
+        idx = styled(f"  {i+1:>3}.", _DIM)
+        print(f"{idx} {type_icon} {styled(item['title'], _BOLD)}")
+        print(f"      {styled(item_type, _DIM)}  {styled(dur_str, _DIM)}  {styled(item.get('uri', item.get('id',''))[:60], _DIM)}")
+
+
+def ensure_demucs_model_cached():
+    """Ensure the Demucs model is cached at a stable location.
+    
+    The #1 cause of repeated 300MB downloads is torch.hub.get_dir() returning
+    a profile-specific or session-specific path. We pin TORCH_HOME to a stable
+    shared location so the model persists across runs.
+    """
+    os.environ["TORCH_HOME"] = TORCH_HOME
+    try:
+        import torch
+        hub_dir = torch.hub.get_dir()
+        ckpt_dir = Path(hub_dir) / "checkpoints"
+        if ckpt_dir.exists() and any(ckpt_dir.glob("*.th")):
+            cached = list(ckpt_dir.glob("*.th"))[0]
+            print_success(f"Demucs model cached ({human_size(cached.stat().st_size)}): {cached}")
+            return
+    except ImportError:
+        pass
+    print_info(f"Downloading Demucs model (~300MB, first run only)...")
+    print_info(f"Model cache: {TORCH_HOME}/hub/checkpoints/")
+
+
+def cmd_isolate(args):
+    """Isolate speech from a cached source."""
+    print_header(f"{icon('brain')} ISOLATE")
+    adapter, sid, source_dir = resolve_source(args.source)
+    audio_file = source_dir / f"source.{AUDIO_FORMAT}"
+    vocals_file = source_dir / "vocals.wav"
+
+    meta = json.loads((source_dir / "meta.json").read_text()) if (source_dir / "meta.json").exists() else {}
+
+    if vocals_file.exists() and not args.force:
+        print_success(f"Already isolated: {vocals_file}")
+        print(f"    {styled('Source:', _BOLD)} {meta.get('title', sid)}")
+        print(f"    {styled('Size:', _BOLD)}   {human_size(vocals_file.stat().st_size)}")
+        return
+
+    ensure_demucs_model_cached()
+    t0 = time.monotonic()
+    with cache_lock(source_dir):
+        # Double-check after lock
+        if vocals_file.exists() and not args.force:
+            print_info("Isolation completed by parallel process while waiting")
+        else:
+            cmd_isolate_source(sid, source_dir, audio_file)
+
+    elapsed = time.monotonic() - t0
+    print_success(f"Isolated: {vocals_file}")
+    print(f"    {styled('Source:', _BOLD)} {meta.get('title', sid)}")
+    print(f"    {styled('Size:', _BOLD)}   {human_size(vocals_file.stat().st_size)}")
+    print_elapsed("Isolation time", elapsed)
+
+
+def cmd_isolate_source(sid: str, source_dir: Path, audio_file: Path):
+    """Run Demucs voice isolation."""
+    r = subprocess.run([sys.executable, "-c", "import demucs"], capture_output=True)
+    if r.returncode != 0:
+        print_info("Installing demucs...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "demucs"], check=True)
+
+    print(f"  {icon('brain')} Running Demucs {DEMUCS_MODEL}...")
+    print_info("Neural network separates vocals from instruments/background noise")
+
+    demucs_out = source_dir / "demucs_out"
+    run([sys.executable, "-m", "demucs",
+         "--two-stems", "vocals",
+         "-n", DEMUCS_MODEL,
+         "-o", str(demucs_out),
+         str(audio_file)],
+        desc="Demucs separation")
+
+    candidates = list(demucs_out.glob("*/source/vocals.wav"))
+    if not candidates:
+        candidates = list(demucs_out.glob("*/**/vocals.wav"))
+    if not candidates:
+        print_error("Demucs produced no vocals file")
+        sys.exit(1)
+
+    # Move raw vocals to temp, then normalize into final vocals.wav
+    raw_vocals = source_dir / "vocals_raw.wav"
+    shutil.move(str(candidates[0]), str(raw_vocals))
+    shutil.rmtree(demucs_out, ignore_errors=True)
+
+    vocals_file = source_dir / "vocals.wav"
+    loudnorm_audio(raw_vocals, vocals_file)
+    raw_vocals.unlink(missing_ok=True)
+
+    print(f"  {icon('wave')} Isolated → {vocals_file}")
+
+
+def cmd_cache(args):
+    """Cache management."""
+    print_header(f"{icon('cache')} CACHE")
+    ensure_dirs()
+    if args.cache_action == "list":
+        sources = [d for d in CACHE_DIR.iterdir() if d.is_dir() and (d / "meta.json").exists()]
+        if not sources:
+            print_info("Cache is empty.")
+            return
+        total_size = sum(
+            sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+            for d in sources
+        )
+        print(f"  {styled(f'{len(sources)} cached source(s)', _BOLD)}  •  {human_size(total_size)} total\n")
+        for d in sorted(sources):
+            meta = json.loads((d / "meta.json").read_text())
+            sid = meta.get("id", d.name)
+            title = meta.get("title", "Unknown")
+            source = meta.get("source", "?")
+            duration = meta.get("duration", 0)
+            has_vocals = (d / "vocals.wav").exists()
+            audio_size = (d / f"source.{AUDIO_FORMAT}").stat().st_size if (d / f"source.{AUDIO_FORMAT}").exists() else 0
+            vocals_icon = styled(f"{icon('mic')} vocals", _GREEN) if has_vocals else styled("no vocals", _DIM)
+            print(f"  {icon('folder')} {styled(sid, _BOLD)}")
+            print(f"     {styled('Title:', _BOLD)}    {title}")
+            print(f"     {styled('Source:', _BOLD)}   {source}")
+            print(f"     {styled('Duration:', _BOLD)} {format_time(duration)}")
+            print(f"     {styled('Audio:', _BOLD)}    {human_size(audio_size)}  •  {vocals_icon}")
+            print()
+
+    elif args.cache_action == "clean":
+        if CACHE_DIR.exists():
+            size = sum(f.stat().st_size for f in CACHE_DIR.rglob("*") if f.is_file())
+            shutil.rmtree(CACHE_DIR)
+            print_success(f"Cache cleaned ({human_size(size)} freed)")
+        else:
+            print_info("Cache is already empty.")
+
+    elif args.cache_action == "remove":
+        adapter, sid, source_dir = resolve_source(args.source)
+        if source_dir.exists():
+            size = sum(f.stat().st_size for f in source_dir.rglob("*") if f.is_file())
+            shutil.rmtree(source_dir)
+            print_success(f"Removed: {sid} ({human_size(size)} freed)")
+        else:
+            print_info(f"Not in cache: {sid}")
+
+    elif args.cache_action == "info":
+        adapter, sid, source_dir = resolve_source(args.source)
+        meta = json.loads((source_dir / "meta.json").read_text())
+        print(json.dumps(meta, indent=2))
+
+
+def cmd_sources(args):
+    """Manage media source connections (Jellyfin, Plex, etc.)."""
+    cfg = load_config()
+
+    if args.sources_cmd == "list":
+        sources = cfg.get("sources", {})
+        if not sources:
+            print("No configured media servers.")
+            print("\nAdd one with:")
+            print("  voxtract sources add spotify --id CLIENT_ID --secret CLIENT_SECRET")
+            print("  voxtract sources add jellyfin --name home --url http://jellyfin:8096 --key KEY")
+            print("  voxtract sources add plex --name home --url http://plex:32400 --token TOKEN")
+            return
+        for kind, servers in sources.items():
+            print(f"[{kind}]")
+            for name, info in servers.items():
+                if kind == "spotify":
+                    masked = (info.get("client_id", ""))[:6] + "***"
+                    print(f"  {name}: client_id={masked}")
+                else:
+                    masked_token = (info.get("token") or info.get("key", ""))[:6] + "***"
+                    print(f"  {name}: {info.get('url','?')}  (auth: {masked_token})")
+            print()
+
+    elif args.sources_cmd == "add":
+        kind = args.src_type
+        name = args.name or "default"
+
+        if kind == "jellyfin":
+            if args.url and args.key:
+                adapter = JellyfinAdapter()
+                creds = adapter._authenticate(args.url, username=args.user,
+                                              password=args.password, api_key=args.key)
+                cfg.setdefault("sources", {}).setdefault("jellyfin", {})[name] = creds
+                save_config(cfg)
+                print(f"✓ Jellyfin '{name}' added ({creds['url']})")
+            else:
+                print("Jellyfin requires --url and --key (or --user/--pass)", file=sys.stderr)
+
+        elif kind == "plex":
+            if args.url and args.token:
+                cfg.setdefault("sources", {}).setdefault("plex", {})[name] = {
+                    "url": args.url.rstrip("/"), "token": args.token
+                }
+                save_config(cfg)
+                print(f"✓ Plex '{name}' added ({args.url})")
+            else:
+                print("Plex requires --url and --token", file=sys.stderr)
+
+        elif kind == "spotify":
+            # Spotify uses --id (client_id) and --secret (client_secret)
+            sp_id = getattr(args, "id", None) or args.key
+            sp_secret = getattr(args, "secret", None)
+            if sp_id and sp_secret:
+                # Validate credentials
+                try:
+                    import spotipy
+                    from spotipy.oauth2 import SpotifyClientCredentials
+                    auth = SpotifyClientCredentials(client_id=sp_id, client_secret=sp_secret)
+                    test = spotipy.Spotify(auth_manager=auth)
+                    test.search(q="test", limit=1)  # quick validation
+                except ImportError:
+                    print("spotipy not installed. Run: pip install spotipy", file=sys.stderr)
+                    sys.exit(1)
+                except Exception as e:
+                    print(f"Spotify auth failed: {e}", file=sys.stderr)
+                    print("Get credentials at: https://developer.spotify.com/dashboard", file=sys.stderr)
+                    sys.exit(1)
+
+                cfg.setdefault("sources", {}).setdefault("spotify", {})[name] = {
+                    "client_id": sp_id, "client_secret": sp_secret,
+                }
+                save_config(cfg)
+                print(f"✓ Spotify '{name}' added (client_id={sp_id[:6]}***)")
+            else:
+                print("Spotify requires --id CLIENT_ID --secret CLIENT_SECRET", file=sys.stderr)
+                print("  Get credentials at: https://developer.spotify.com/dashboard", file=sys.stderr)
+
+        else:
+            print(f"Unknown source type: {kind}", file=sys.stderr)
+            print("Supported: spotify, jellyfin, plex", file=sys.stderr)
+
+    elif args.sources_cmd == "remove":
+        kind = args.src_type
+        name = args.name or "default"
+        if cfg.get("sources", {}).get(kind, {}).pop(name, None):
+            save_config(cfg)
+            print(f"✓ Removed {kind} '{name}'")
+        else:
+            print(f"Not found: {kind} '{name}'")
+
+
+def cmd_info(args):
+    """Show voxtract version and configuration info."""
+    print(styled(f"\n  {icon('wave')} voxtract v{__version__}", _BOLD, _CYAN))
+    print(styled(f"  {'━' * 38}", _DIM))
+    print(f"  {styled('Config:', _BOLD)}    {CONFIG_FILE}")
+    print(f"  {styled('Cache:', _BOLD)}     {CACHE_DIR}")
+    print(f"  {styled('Demucs:', _BOLD)}    {DEMUCS_MODEL}")
+
+    # Check torch model cache
+    model_status = styled("not cached", _YELLOW)
+    model_path = ""
+    try:
+        os.environ["TORCH_HOME"] = TORCH_HOME
+        import torch
+        hub_dir = torch.hub.get_dir()
+        ckpt_dir = Path(hub_dir) / "checkpoints"
+        if ckpt_dir.exists():
+            ckpts = list(ckpt_dir.glob("*.th"))
+            if ckpts:
+                model_status = styled(f"cached ({human_size(ckpts[0].stat().st_size)})", _GREEN)
+                model_path = str(ckpts[0])
+    except ImportError:
+        model_status = styled("torch not installed", _RED)
+    print(f"  {styled('Model:', _BOLD)}     {model_status}")
+    if model_path:
+        print(f"  {styled('Model path:', _BOLD)} {model_path}")
+    print(f"  {styled('Torch home:', _BOLD)} {TORCH_HOME}")
+
+    # Configured sources
+    cfg = load_config()
+    sources = cfg.get("sources", {})
+    src_count = sum(len(v) for v in sources.values())
+    print(f"  {styled('Sources:', _BOLD)}   {src_count} configured ({', '.join(sources.keys()) if sources else 'none'})")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="voxtract",
+        description=f"{icon('wave')} voxtract v{__version__} — Voice Extract Tool\nExtract and isolate speech from YouTube, Spotify, Jellyfin, Plex, podcasts, and more.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"""
+Source URIs:
+  youtube://VIDEO_ID           YouTube video
+  spotify://track/ID           Spotify track (via spotdl → YouTube)
+  spotify://album/ID           Spotify album (browse/list)
+  spotify://show/ID            Spotify podcast show
+  spotify://episode/ID         Spotify podcast episode
+  spotify://search             Spotify search (use -q)
+  jellyfin://SERVER/Items/ID   Jellyfin media server
+  plex://SERVER/metadata/KEY   Plex media server
+  podcast://FEED_URL           Podcast RSS feed
+  podcast://FEED_URL#ep-3      Specific episode by index
+  http(s)://example.com/file   Direct media URL
+  dir:///path/to/media         Directory of media files
+  /path/to/file.mp3            Local file
+
+Examples:
+  voxtract fetch youtube://dQw4w9WgXcQ
+  voxtract sources add spotify --id CLIENT_ID --secret CLIENT_SECRET
+  voxtract list spotify://search -q "radiohead" -t album
+  voxtract fetch spotify://track/4cOdK2wGLETKBW3PvgPWqT
+  voxtract clip spotify://track/4cOdK2wGLETKBW3PvgPWqT -s 0:30 -d 15 --isolate
+  voxtract list spotify://show/5Ji1Ts4hJiZ7m4c0ogezC8
+  voxtract fetch spotify://episode/abc123
+  voxtract clip jellyfin://home/Items/abc123 -s 1:30 -d 30 --isolate
+  voxtract list jellyfin://home -q "goodfellas"
+  voxtract sources add jellyfin --name home --url http://jellyfin:8096 --key KEY
+  voxtract sources list
+
+Config: ~/.voxtract/config.json
+Cache:  ~/.voxtract/cache/
+"""
+    )
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show debug output (ffmpeg commands)")
+    sub = parser.add_subparsers(dest="command", help="Commands")
+
+    # fetch
+    f = sub.add_parser("fetch", help="Download/cache source audio")
+    f.add_argument("source")
+    f.add_argument("--force", "-f", action="store_true")
+
+    # clip
+    c = sub.add_parser("clip", help="Extract an audio clip")
+    c.add_argument("source")
+    c.add_argument("--start", "-s")
+    c.add_argument("--end", "-e")
+    c.add_argument("--duration", "-d")
+    c.add_argument("--isolate", "-i", action="store_true")
+    c.add_argument("--output-dir", "-o")
+    c.add_argument("--format", "-f", choices=["mp3","wav","flac","ogg","m4a"])
+    c.add_argument("--gain", "-g", metavar="dB",
+                   help="Apply simple gain boost in dB (e.g. +6, -3). Bypasses loudnorm.")
+    c.add_argument("--lufs", "-l", type=float, metavar="LUFS",
+                   help="Target loudness in LUFS (default: -16). "
+                        "-24=podcast, -16=clear voice, -14=loud/punchy, -23=broadcast")
+    c.add_argument("--lra", type=float, metavar="LU",
+                   help="Max loudness range in LU (default: 11). Lower=more compressed.")
+    c.add_argument("--tp", type=float, metavar="dBTP",
+                   help="Max true peak in dBTP (default: -1.5). Prevents clipping.")
+    c.add_argument("--no-normalize", action="store_true",
+                   help="Skip loudness normalization entirely (raw clip)")
+
+    # list
+    l = sub.add_parser("list", help="Search/browse media items")
+    l.add_argument("source")
+    l.add_argument("--query", "-q")
+    l.add_argument("--type", "-t", choices=["track","album","artist","show","episode","movie","audio","series","season"])
+    l.add_argument("--limit", "-n", type=int)
+
+    # isolate
+    i = sub.add_parser("isolate", help="Isolate speech from cached source")
+    i.add_argument("source")
+    i.add_argument("--force", "-f", action="store_true")
+
+    # cache
+    ca = sub.add_parser("cache", help="Manage cache")
+    ca.add_argument("cache_action", choices=["list","clean","remove","info"])
+    ca.add_argument("source", nargs="?")
+
+    # info
+    sub.add_parser("info", help="Show version, cache location, model status")
+
+    # sources
+    src = sub.add_parser("sources", help="Manage media server connections")
+    src.add_argument("sources_cmd", choices=["list","add","remove"])
+    src.add_argument("src_type", nargs="?", choices=["spotify","jellyfin","plex","youtube","podcast"])
+    src.add_argument("--name", "-n")
+    src.add_argument("--url", "-u")
+    src.add_argument("--key", "-k")
+    src.add_argument("--id", dest="id", help="Spotify client ID")
+    src.add_argument("--secret", help="Spotify client secret")
+    src.add_argument("--token")
+    src.add_argument("--user")
+    src.add_argument("--password", "--pass")
+
+    args = parser.parse_args()
+
+    global VERBOSE
+    VERBOSE = getattr(args, 'verbose', False)
+
+    try:
+        if args.command == "fetch":     cmd_fetch(args)
+        elif args.command == "clip":    cmd_clip(args)
+        elif args.command == "list":    cmd_list(args)
+        elif args.command == "isolate": cmd_isolate(args)
+        elif args.command == "cache":   cmd_cache(args)
+        elif args.command == "info":    cmd_info(args)
+        elif args.command == "sources": cmd_sources(args)
+        else:                           parser.print_help()
+    except KeyboardInterrupt:
+        print()
+        print_warning("Interrupted — cleaning up temp files...")
+        # Clean any orphaned temp files from this process
+        for p in Path(tempfile.gettempdir()).glob(f"tmp*.raw.tmp.wav"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        print_info("Done.")
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
