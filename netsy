@@ -1,0 +1,869 @@
+#!/usr/bin/env python3
+"""
+netsy — LAN Discovery Tool  v1.2.0
+Ping-scan the local subnet and list live hosts with hostname, IP, MAC, and vendor.
+
+Architecture:
+    auto-detect local IP + subnet (macOS / Linux / Windows / BSD)
+        → nmap -sn ping scan (quick or thorough)
+        → optional multi-pass merge for intermittent hosts
+        → parse host reports
+        → rich table output (sorted by IP)
+
+Dependencies:
+    nmap on PATH
+    pip install rich
+
+Usage:
+    netsy                         Scan the auto-detected local subnet
+    netsy 192.168.1.0/24          Scan a specific subnet
+    netsy scan --thorough --passes 3
+    netsy find my-device --watch  Hunt for a host by name, IP, or MAC
+    netsy probe 192.168.1.42      Deep-check one host
+    netsy doctor                  Check nmap and network detection
+"""
+
+import argparse
+import ipaddress
+import json
+import os
+import platform
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from typing import Optional
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+__version__ = "1.2.0"
+
+console = Console()
+err_console = Console(stderr=True)
+
+_IP_PROBE_TARGETS = ("8.8.8.8", "1.1.1.1", "208.67.222.222")
+
+
+@dataclass
+class ScanOptions:
+    subnet: Optional[str] = None
+    use_sudo: bool = False
+    thorough: bool = False
+    passes: int = 1
+    find_query: Optional[str] = None
+    watch: bool = False
+    interval: int = 10
+    as_json: bool = False
+
+
+def get_local_ip() -> str:
+    last_error: Optional[OSError] = None
+    for target in _IP_PROBE_TARGETS:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect((target, 80))
+            return probe.getsockname()[0]
+        except OSError as exc:
+            last_error = exc
+        finally:
+            probe.close()
+    raise OSError(f"Could not determine local IP address: {last_error}")
+
+
+def _mask_to_prefix(mask: str) -> int:
+    if mask.lower().startswith("0x"):
+        return bin(int(mask, 16)).count("1")
+    return sum(bin(int(octet)).count("1") for octet in mask.split("."))
+
+
+def _subnet_from_cidr(cidr: str) -> str:
+    return str(ipaddress.ip_interface(cidr).network)
+
+
+def _fallback_subnet(local_ip: str) -> str:
+    return str(ipaddress.ip_network(f"{local_ip}/24", strict=False))
+
+
+def _parse_ifconfig_subnet(stdout: str, local_ip: str) -> Optional[str]:
+    for line in stdout.splitlines():
+        if local_ip not in line:
+            continue
+        match = re.search(
+            rf"inet\s+{re.escape(local_ip)}(?:\s+)?(?:netmask\s+)?(0x[0-9a-fA-F]+|\d+\.\d+\.\d+\.\d+)?",
+            line,
+        )
+        if not match:
+            match = re.search(
+                rf"inet\s+{re.escape(local_ip)}.*?netmask\s+(0x[0-9a-fA-F]+|\d+\.\d+\.\d+\.\d+)",
+                line,
+            )
+        if match and match.group(1):
+            prefix = _mask_to_prefix(match.group(1))
+            return str(ipaddress.ip_network(f"{local_ip}/{prefix}", strict=False))
+    return None
+
+
+def get_default_subnet_ifconfig(local_ip: str) -> str:
+    ifconfig = shutil.which("ifconfig")
+    if not ifconfig:
+        return _fallback_subnet(local_ip)
+
+    try:
+        result = subprocess.run(
+            [ifconfig],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return _fallback_subnet(local_ip)
+
+    return _parse_ifconfig_subnet(result.stdout, local_ip) or _fallback_subnet(local_ip)
+
+
+def get_default_subnet_linux(local_ip: str) -> str:
+    if shutil.which("ip"):
+        try:
+            result = subprocess.run(
+                ["ip", "-o", "-f", "inet", "addr", "show"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                cidr = next(
+                    (
+                        part
+                        for part in parts
+                        if "/" in part and re.match(r"\d+\.\d+\.\d+\.\d+/\d+", part)
+                    ),
+                    None,
+                )
+                if cidr and cidr.split("/")[0] == local_ip:
+                    return _subnet_from_cidr(cidr)
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    return get_default_subnet_ifconfig(local_ip)
+
+
+def get_default_subnet_windows(local_ip: str) -> str:
+    powershell = shutil.which("powershell") or shutil.which("pwsh")
+    if powershell:
+        try:
+            ps = (
+                f"$if = Get-NetIPAddress -AddressFamily IPv4 -IPAddress '{local_ip}' "
+                "-ErrorAction SilentlyContinue | Select-Object -First 1; "
+                "if ($if) { $if.PrefixLength }"
+            )
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-Command", ps],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            prefix = result.stdout.strip()
+            if result.returncode == 0 and prefix.isdigit():
+                return str(ipaddress.ip_network(f"{local_ip}/{int(prefix)}", strict=False))
+        except (subprocess.SubprocessError, ValueError):
+            pass
+
+    try:
+        result = subprocess.run(
+            ["ipconfig"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return _fallback_subnet(local_ip)
+
+    lines = result.stdout.splitlines()
+    for index, line in enumerate(lines):
+        if local_ip in line and "IPv4" in line:
+            for follow in lines[index + 1 : index + 8]:
+                mask_match = re.search(r"Subnet Mask.*:\s*(\d+\.\d+\.\d+\.\d+)", follow, re.IGNORECASE)
+                if mask_match:
+                    prefix = _mask_to_prefix(mask_match.group(1))
+                    return str(ipaddress.ip_network(f"{local_ip}/{prefix}", strict=False))
+
+    return _fallback_subnet(local_ip)
+
+
+def get_default_subnet() -> str:
+    local_ip = get_local_ip()
+    system = platform.system()
+
+    if system == "Windows":
+        return get_default_subnet_windows(local_ip)
+    if system == "Darwin":
+        return get_default_subnet_ifconfig(local_ip)
+    if system == "Linux":
+        return get_default_subnet_linux(local_ip)
+
+    return get_default_subnet_ifconfig(local_ip)
+
+
+def parse_subnet(subnet: Optional[str]) -> str:
+    target = subnet or get_default_subnet()
+    try:
+        return str(ipaddress.ip_network(target, strict=False))
+    except ValueError:
+        console.print(f"[red]Invalid subnet:[/red] {target}")
+        sys.exit(1)
+
+
+def nmap_install_hint() -> str:
+    system = platform.system()
+    if system == "Darwin":
+        return "brew install nmap"
+    if system == "Windows":
+        return "winget install Insecure.Nmap  |  choco install nmap"
+    return "apt install nmap  |  dnf install nmap"
+
+
+def require_nmap() -> str:
+    nmap = shutil.which("nmap")
+    if not nmap:
+        console.print("[red]Error:[/red] nmap is not installed or not in PATH.")
+        console.print(f"[dim]Install: {nmap_install_hint()}[/dim]")
+        sys.exit(1)
+    return nmap
+
+
+def is_windows_admin() -> bool:
+    if platform.system() != "Windows":
+        return False
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        return False
+
+
+def elevation_available() -> bool:
+    return platform.system() != "Windows" and shutil.which("sudo") is not None
+
+
+def elevation_hint() -> str:
+    if platform.system() == "Windows":
+        return "Run netsy from an elevated (Administrator) shell for MAC/vendor data."
+    return "Re-run with [bold]--sudo[/bold] for MAC/vendor data."
+
+
+def is_elevated(use_sudo: bool) -> bool:
+    if use_sudo and elevation_available():
+        return True
+    if platform.system() == "Windows":
+        return is_windows_admin()
+    try:
+        return os.geteuid() == 0
+    except AttributeError:
+        return False
+
+
+def build_nmap_command(
+    nmap: str,
+    target: str,
+    *,
+    thorough: bool,
+    use_sudo: bool,
+) -> list[str]:
+    command = [nmap, "-sn", "--reason"]
+    if thorough:
+        probes = [
+            "-T3",
+            "--max-retries",
+            "3",
+            "--host-timeout",
+            "30s",
+            "-PE",
+            "-PP",
+            "-PS80,443",
+            "-PA80",
+        ]
+        if is_elevated(use_sudo):
+            probes.append("-PU40125")
+        command.extend(probes)
+
+    command.append(target)
+
+    if use_sudo:
+        if platform.system() == "Windows":
+            err_console.print(
+                "[yellow]Note:[/yellow] --sudo is ignored on Windows. "
+                "Run from an Administrator shell for MAC/vendor data."
+            )
+        elif elevation_available():
+            command = ["sudo", *command]
+        else:
+            err_console.print("[yellow]Note:[/yellow] sudo not found; running without elevation.")
+
+    return command
+
+
+def run_nmap(nmap: str, target: str, *, thorough: bool, use_sudo: bool) -> subprocess.CompletedProcess[str]:
+    command = build_nmap_command(nmap, target, thorough=thorough, use_sudo=use_sudo)
+    try:
+        return subprocess.run(command, capture_output=True, text=True, check=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        console.print("[red]Error:[/red] nmap timed out.")
+        sys.exit(1)
+    except subprocess.CalledProcessError as exc:
+        console.print(f"[red]nmap failed[/red] (exit {exc.returncode})")
+        if exc.stderr.strip():
+            console.print(exc.stderr.strip())
+        sys.exit(exc.returncode or 1)
+    except FileNotFoundError:
+        console.print("[red]Error:[/red] nmap or sudo was not found.")
+        sys.exit(1)
+
+
+def parse_nmap_output(stdout: str) -> list[dict[str, str]]:
+    hosts: list[dict[str, str]] = []
+    current: Optional[dict[str, str]] = None
+    host_down = False
+
+    for raw_line in stdout.splitlines():
+        line = raw_line.strip()
+
+        if "Host seems down" in line:
+            host_down = True
+            continue
+
+        match = re.match(r"Nmap scan report for (.+) \((\d+\.\d+\.\d+\.\d+)\)", line)
+        if match:
+            if current:
+                hosts.append(current)
+            current = {"hostname": match.group(1), "ip": match.group(2), "status": "up"}
+            host_down = False
+            continue
+
+        match = re.match(r"Nmap scan report for (\d+\.\d+\.\d+\.\d+)", line)
+        if match:
+            if current:
+                hosts.append(current)
+            current = {"hostname": "", "ip": match.group(1), "status": "up"}
+            host_down = False
+            continue
+
+        if current and "Host is up" in line:
+            reason_match = re.search(r"Host is up \((.+)\)\.?", line)
+            if reason_match:
+                current["reason"] = reason_match.group(1)
+
+        match = re.match(r"MAC Address: ([0-9A-Fa-f:.-]+) \((.*)\)", line)
+        if match and current:
+            current["mac"] = match.group(1).replace("-", ":")
+            current["vendor"] = match.group(2)
+
+    if current:
+        hosts.append(current)
+    elif host_down:
+        hosts.append({"hostname": "", "ip": "", "status": "down"})
+
+    hosts = [host for host in hosts if host.get("ip")]
+    hosts.sort(key=lambda host: ipaddress.ip_address(host["ip"]))
+    return hosts
+
+
+def merge_host_passes(pass_results: list[list[dict[str, str]]]) -> list[dict[str, str]]:
+    merged: dict[str, dict[str, str]] = {}
+    total_passes = len(pass_results)
+
+    for hosts in pass_results:
+        for host in hosts:
+            ip = host["ip"]
+            if ip not in merged:
+                merged[ip] = {
+                    **host,
+                    "passes_seen": "0",
+                    "pass_total": str(total_passes),
+                }
+            merged[ip]["passes_seen"] = str(int(merged[ip]["passes_seen"]) + 1)
+            for key in ("hostname", "mac", "vendor", "reason"):
+                if host.get(key) and not merged[ip].get(key):
+                    merged[ip][key] = host[key]
+
+    results = list(merged.values())
+    results.sort(key=lambda host: ipaddress.ip_address(host["ip"]))
+    return results
+
+
+def host_matches_query(host: dict[str, str], query: str) -> bool:
+    needle = query.casefold()
+
+    ip = host.get("ip", "")
+    if ip and (ip == query or ip.casefold() == needle):
+        return True
+
+    hostname = host.get("hostname", "")
+    if hostname and needle in hostname.casefold():
+        return True
+
+    mac = host.get("mac", "").replace(":", "").replace("-", "")
+    query_mac = query.replace(":", "").replace("-", "")
+    if mac and query_mac and query_mac.casefold() in mac.casefold():
+        return True
+
+    vendor = host.get("vendor", "")
+    if vendor and needle in vendor.casefold():
+        return True
+
+    return False
+
+
+def filter_hosts(hosts: list[dict[str, str]], query: Optional[str]) -> list[dict[str, str]]:
+    if not query:
+        return hosts
+    return [host for host in hosts if host_matches_query(host, query)]
+
+
+def should_hint_for_mac_data(use_sudo: bool, hosts: list[dict[str, str]]) -> bool:
+    if use_sudo or not hosts or any(host.get("mac") for host in hosts):
+        return False
+
+    system = platform.system()
+    if system == "Darwin":
+        return True
+    if system == "Windows":
+        return not is_windows_admin()
+    return False
+
+
+def run_scan_pass(
+    target: str,
+    *,
+    thorough: bool,
+    use_sudo: bool,
+) -> list[dict[str, str]]:
+    nmap = require_nmap()
+    result = run_nmap(nmap, target, thorough=thorough, use_sudo=use_sudo)
+    return parse_nmap_output(result.stdout)
+
+
+def scan_network(target: str, options: ScanOptions) -> list[dict[str, str]]:
+    pass_results: list[list[dict[str, str]]] = []
+
+    for pass_number in range(1, options.passes + 1):
+        if options.passes > 1 and not options.as_json:
+            err_console.print(f"[dim]Pass {pass_number}/{options.passes}...[/dim]")
+        hosts = run_scan_pass(target, thorough=options.thorough, use_sudo=options.use_sudo)
+        pass_results.append(hosts)
+        if options.passes > 1 and not options.as_json:
+            err_console.print(f"[dim]  found {len(hosts)} host(s)[/dim]")
+
+    merged = merge_host_passes(pass_results) if options.passes > 1 else pass_results[-1]
+
+    if options.passes > 1 and not options.as_json and merged:
+        intermittent = sum(1 for host in merged if host.get("passes_seen") != host.get("pass_total"))
+        if intermittent:
+            err_console.print(
+                f"[yellow]Note:[/yellow] {intermittent} host(s) appeared in only some passes. "
+                "This is normal for sleeping devices, Wi-Fi clients, and ICMP-filtering gear."
+            )
+
+    if should_hint_for_mac_data(options.use_sudo, merged):
+        err_console.print(f"[yellow]Tip:[/yellow] {elevation_hint()}")
+
+    return merged
+
+
+def not_found_hints(query: str) -> None:
+    console.print(f"\n[red]No match[/red] for [bold]{query}[/bold].")
+    console.print("[dim]Why results vary between runs:[/dim]")
+    console.print("  • Devices sleep or roam (phones, laptops, IoT)")
+    console.print("  • Some hosts block ICMP but answer ARP/TCP probes")
+    console.print("  • Wi-Fi clients may be on a different VLAN or band")
+    console.print("\n[dim]Try:[/dim]")
+    console.print("  netsy find HOST --watch --sudo")
+    console.print("  netsy probe IP_OR_HOSTNAME --sudo")
+    console.print("  netsy scan --thorough --passes 3 --sudo")
+
+
+def print_table(
+    hosts: list[dict[str, str]],
+    target: str,
+    *,
+    show_stability: bool = False,
+    find_query: Optional[str] = None,
+) -> None:
+    title = f"Subnet: {target}"
+    if find_query:
+        title = f"Matches for '{find_query}' on {target}"
+
+    table = Table(title=title, show_header=True, header_style="bold")
+    table.add_column("Hostname", style="cyan", no_wrap=True)
+    table.add_column("IP Address", style="green")
+    table.add_column("MAC Address")
+    table.add_column("Vendor", style="dim")
+    if show_stability:
+        table.add_column("Seen", style="dim")
+
+    for host in hosts:
+        seen = ""
+        if show_stability:
+            seen = f"{host.get('passes_seen', '1')}/{host.get('pass_total', '1')}"
+
+        table.add_row(
+            host.get("hostname") or "—",
+            host.get("ip", ""),
+            host.get("mac", ""),
+            host.get("vendor", ""),
+            seen,
+        )
+
+    console.print(table)
+    console.print(f"\n[dim]{len(hosts)} host(s) shown[/dim]")
+
+
+def print_probe_result(host: dict[str, str], target: str, as_json: bool) -> int:
+    if as_json:
+        print(json.dumps({"target": target, "host": host}, indent=2))
+        return 0 if host.get("status") != "down" else 1
+
+    if host.get("status") == "down":
+        console.print(f"[red]Down:[/red] {target} did not answer discovery probes.")
+        if host.get("reason"):
+            console.print(f"[dim]{host['reason']}[/dim]")
+        not_found_hints(target)
+        return 1
+
+    console.print(f"[green]Up:[/green] {host.get('hostname') or '—'} ({host.get('ip', target)})")
+    if host.get("mac"):
+        console.print(f"  MAC:    {host['mac']}")
+    if host.get("vendor"):
+        console.print(f"  Vendor: {host['vendor']}")
+    if host.get("reason"):
+        console.print(f"  Reason: {host['reason']}")
+    return 0
+
+
+def print_json(hosts: list[dict[str, str]], target: str, find_query: Optional[str] = None) -> None:
+    payload = {
+        "target": target,
+        "find": find_query,
+        "hosts": hosts,
+        "count": len(hosts),
+    }
+    print(json.dumps(payload, indent=2))
+
+
+def do_scan(options: ScanOptions) -> int:
+    target = parse_subnet(options.subnet)
+    attempt = 0
+
+    while True:
+        attempt += 1
+        if not options.as_json and not options.watch:
+            mode = "thorough" if options.thorough else "quick"
+            err_console.print(f"[dim]Scanning {target} ({mode}, {options.passes} pass(es))...[/dim]")
+        elif options.watch and not options.as_json:
+            err_console.print(f"[dim]Attempt {attempt}: scanning {target}...[/dim]")
+
+        hosts = scan_network(target, options)
+        matches = filter_hosts(hosts, options.find_query)
+
+        if options.find_query:
+            if matches:
+                if options.as_json:
+                    print_json(matches, target, options.find_query)
+                else:
+                    print_table(
+                        matches,
+                        target,
+                        show_stability=options.passes > 1,
+                        find_query=options.find_query,
+                    )
+                return 0
+
+            if options.watch:
+                err_console.print(
+                    f"[yellow]No match yet.[/yellow] Retrying in {options.interval}s "
+                    "(Ctrl+C to stop)..."
+                )
+                try:
+                    time.sleep(options.interval)
+                except KeyboardInterrupt:
+                    err_console.print("\n[dim]Stopped.[/dim]")
+                    return 130
+                continue
+
+            if not options.as_json:
+                not_found_hints(options.find_query)
+            else:
+                print_json([], target, options.find_query)
+            return 1
+
+        if options.as_json:
+            print_json(hosts, target)
+        else:
+            print_table(hosts, target, show_stability=options.passes > 1)
+        return 0
+
+
+def do_find(
+    query: str,
+    *,
+    subnet: Optional[str],
+    use_sudo: bool,
+    watch: bool,
+    interval: int,
+    passes: int,
+    as_json: bool,
+) -> int:
+    options = ScanOptions(
+        subnet=subnet,
+        use_sudo=use_sudo,
+        thorough=True,
+        passes=max(1, passes),
+        find_query=query,
+        watch=watch,
+        interval=interval,
+        as_json=as_json,
+    )
+    return do_scan(options)
+
+
+def do_probe(target: str, *, use_sudo: bool, as_json: bool) -> int:
+    if not options_target_is_ip(target):
+        resolved = resolve_hostname(target)
+        if resolved:
+            err_console.print(f"[dim]Resolved {target} → {resolved}[/dim]")
+            target = resolved
+
+    if not as_json:
+        err_console.print(f"[dim]Probing {target}...[/dim]")
+
+    hosts = run_scan_pass(target, thorough=True, use_sudo=use_sudo)
+    if hosts:
+        return print_probe_result(hosts[0], target, as_json)
+
+    return print_probe_result({"status": "down", "ip": target, "hostname": ""}, target, as_json)
+
+
+def options_target_is_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def resolve_hostname(hostname: str) -> Optional[str]:
+    try:
+        return socket.gethostbyname(hostname)
+    except OSError:
+        return None
+
+
+def do_doctor() -> None:
+    console.print(Panel("[bold]netsy Doctor[/bold] — environment check", border_style="cyan"))
+
+    system = platform.system()
+    console.print("\n[bold]System[/bold]")
+    console.print(f"  Platform: {system} ({platform.release()})")
+    console.print(f"  Python:   {sys.version.split()[0]}")
+    console.print(f"  netsy:  v{__version__}")
+
+    console.print("\n[bold]Prerequisites[/bold]")
+    nmap = shutil.which("nmap")
+    status = "[green]✓[/green]" if nmap else "[red]✗[/red]"
+    version = ""
+    if nmap:
+        try:
+            proc = subprocess.run(
+                [nmap, "--version"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            version = f" — {proc.stdout.splitlines()[0]}"
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            version = ""
+    console.print(f"  {status} nmap{version}")
+
+    if system == "Windows":
+        admin = "[green]yes[/green]" if is_windows_admin() else "[yellow]no[/yellow]"
+        console.print(f"  Admin:    {admin}")
+    elif elevation_available():
+        console.print("  [green]✓[/green] sudo")
+
+    console.print("\n[bold]Network[/bold]")
+    try:
+        local_ip = get_local_ip()
+        subnet = get_default_subnet()
+        console.print(f"  [green]✓[/green] Local IP: {local_ip}")
+        console.print(f"  [green]✓[/green] Subnet:   {subnet}")
+    except Exception as exc:
+        console.print(f"  [red]✗[/red] Could not detect network: {exc}")
+
+    console.print("\n[bold]Discovery tips[/bold]")
+    console.print("  [dim]• Quick scans can miss sleeping or ICMP-filtering hosts[/dim]")
+    console.print("  [dim]• Use scan --thorough --passes 3 to reduce variance[/dim]")
+    console.print("  [dim]• find already runs thorough 3-pass scans; add --watch to wait[/dim]")
+
+    console.print("\n[bold]Issues[/bold]")
+    issues = 0
+    if not nmap:
+        console.print(f"  [yellow]![/yellow] Install nmap: {nmap_install_hint()}")
+        issues += 1
+    if system == "Windows" and not is_windows_admin():
+        console.print("  [yellow]![/yellow] Not running as Administrator — MAC/vendor discovery may be limited.")
+        issues += 1
+    elif system == "Darwin" and not elevation_available():
+        console.print("  [yellow]![/yellow] sudo not found — MAC/vendor discovery will be limited.")
+        issues += 1
+
+    if issues == 0:
+        console.print("  [green]No issues detected[/green]")
+    else:
+        console.print(f"  [dim]{issues} issue(s) found[/dim]")
+
+
+def add_scan_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("subnet", nargs="?", help="Subnet CIDR (default: auto-detect)")
+    parser.add_argument(
+        "--sudo",
+        action="store_true",
+        help="Run nmap with sudo for MAC/vendor discovery (macOS/Linux)",
+    )
+    parser.add_argument(
+        "--thorough",
+        action="store_true",
+        help="Slower scan with more probe types and retries",
+    )
+    parser.add_argument(
+        "--passes",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Repeat the scan and merge results (default: 1)",
+    )
+    parser.add_argument(
+        "--find",
+        metavar="QUERY",
+        help="Filter to hosts matching IP, hostname, MAC, or vendor",
+    )
+    parser.add_argument(
+        "--watch",
+        action="store_true",
+        help="With --find, keep scanning until a match appears",
+    )
+    parser.add_argument(
+        "--interval",
+        type=int,
+        default=10,
+        metavar="SEC",
+        help="Seconds between watch attempts (default: 10)",
+    )
+    parser.add_argument("--json", action="store_true", help="Emit JSON instead of a table")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="netsy",
+        description=f"netsy v{__version__} — LAN Discovery Tool",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  netsy                              Scan auto-detected subnet
+  netsy 10.0.0.0/24                  Scan a specific subnet
+  netsy scan --thorough --passes 3   More reliable discovery
+  netsy find my-phone --watch        Wait for a device to appear
+  netsy probe 192.168.1.42 --sudo    Deep-check one host
+  netsy doctor                       Check prerequisites
+
+Why results vary:
+  Sleeping devices, Wi-Fi roaming, and ICMP filtering can make quick scans differ
+  run-to-run. Use --thorough --passes 3, or find --watch for a specific host.
+""",
+    )
+    parser.add_argument("-v", "--version", action="version", version=f"netsy {__version__}")
+
+    sub = parser.add_subparsers(dest="command")
+
+    scan_p = sub.add_parser("scan", help="Ping-scan a subnet for live hosts")
+    add_scan_arguments(scan_p)
+
+    find_p = sub.add_parser("find", help="Hunt for a host by name, IP, or MAC")
+    find_p.add_argument("query", help="IP, hostname fragment, MAC, or vendor")
+    find_p.add_argument("subnet", nargs="?", help="Subnet CIDR (default: auto-detect)")
+    find_p.add_argument("--sudo", action="store_true")
+    find_p.add_argument("--watch", action="store_true", help="Keep scanning until found")
+    find_p.add_argument("--interval", type=int, default=10, metavar="SEC")
+    find_p.add_argument("--passes", type=int, default=3, metavar="N")
+    find_p.add_argument("--json", action="store_true")
+
+    probe_p = sub.add_parser("probe", help="Deep-check a single host")
+    probe_p.add_argument("target", help="IP address or hostname")
+    probe_p.add_argument("--sudo", action="store_true")
+    probe_p.add_argument("--json", action="store_true")
+
+    sub.add_parser("doctor", help="Check nmap and network auto-detection")
+
+    return parser
+
+
+def scan_options_from_args(args: argparse.Namespace) -> ScanOptions:
+    return ScanOptions(
+        subnet=getattr(args, "subnet", None),
+        use_sudo=getattr(args, "sudo", False),
+        thorough=getattr(args, "thorough", False),
+        passes=max(1, getattr(args, "passes", 1)),
+        find_query=getattr(args, "find", None),
+        watch=getattr(args, "watch", False),
+        interval=max(1, getattr(args, "interval", 10)),
+        as_json=getattr(args, "json", False),
+    )
+
+
+def main() -> None:
+    known_commands = ("scan", "find", "probe", "doctor", "-h", "--help", "-v", "--version")
+    if len(sys.argv) == 1:
+        sys.argv.append("scan")
+    elif sys.argv[1] not in known_commands:
+        sys.argv.insert(1, "scan")
+
+    args = build_parser().parse_args()
+
+    if args.command == "doctor":
+        do_doctor()
+        return
+
+    if args.command == "find":
+        sys.exit(
+            do_find(
+                args.query,
+                subnet=args.subnet,
+                use_sudo=args.sudo,
+                watch=args.watch,
+                interval=max(1, args.interval),
+                passes=max(1, args.passes),
+                as_json=args.json,
+            )
+        )
+
+    if args.command == "probe":
+        sys.exit(do_probe(args.target, use_sudo=args.sudo, as_json=args.json))
+
+    if args.command == "scan":
+        sys.exit(do_scan(scan_options_from_args(args)))
+
+    build_parser().print_help()
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
