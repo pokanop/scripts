@@ -1,0 +1,671 @@
+#!/usr/bin/env python3
+"""
+scripts — Toolkit installer & lifecycle manager  v1.0.0
+Install, update, and diagnose the pokanop/scripts CLI toolkit.
+
+Usage:
+    scripts install [tools...]      Install tools and Python deps (all if none given)
+    scripts update [tools...]       Pull latest + refresh deps and wrappers
+    scripts uninstall [tools...]    Remove install (all if none given)
+    scripts doctor                  Check install, PATH, Python, and system deps
+    scripts list                    Show available tools and install status
+    scripts path                    Print install paths (for shell scripts)
+
+Environment:
+    SCRIPTS_HOME    Override install directory
+    SCRIPTS_BIN     Override wrapper/bin directory
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+__version__ = "1.0.0"
+
+REPO_URL = "https://github.com/pokanop/scripts.git"
+MARKER_NAME = ".scripts-install.json"
+PATH_BEGIN = "# >>> scripts >>>"
+PATH_END = "# <<< scripts <<<"
+
+# Meta tool is always installed; other tools are optional CLI utilities.
+TOOL_NAMES = ("medcat", "keyferry", "voxtract", "netsy", "pluck", "aikit")
+
+TOOLS: dict[str, dict] = {
+    "medcat": {
+        "description": "Media stack ingest tool",
+        "requirements": "requirements/medcat.txt",
+        "system": [
+            ("ffmpeg", False, "audio/video metadata and transcoding"),
+            ("yt-dlp", False, "YouTube search and download (also installed via pip)"),
+        ],
+    },
+    "keyferry": {
+        "description": "1Password ⇄ Bitwarden credential ferry",
+        "requirements": "requirements/keyferry.txt",
+        "system": [
+            ("op", True, "1Password CLI — https://1password.com/downloads/command-line"),
+            ("bw", True, "Bitwarden CLI — npm i -g @bitwarden/cli"),
+        ],
+    },
+    "voxtract": {
+        "description": "Voice extract tool (YouTube, Spotify, Demucs isolation)",
+        "requirements": "requirements/voxtract.txt",
+        "system": [
+            ("ffmpeg", True, "audio format conversion"),
+            ("yt-dlp", False, "YouTube/podcast download (also installed via pip)"),
+        ],
+    },
+    "netsy": {
+        "description": "LAN discovery tool",
+        "requirements": "requirements/netsy.txt",
+        "system": [
+            ("nmap", True, "network scan — brew/apt/winget install nmap"),
+        ],
+    },
+    "pluck": {
+        "description": "Config key-path tool (YAML, JSON, TOML, .env)",
+        "requirements": "requirements/pluck.txt",
+        "system": [],
+    },
+    "aikit": {
+        "description": "AI coding agent CLI installer & manager",
+        "requirements": "requirements/aikit.txt",
+        "system": [],
+    },
+}
+
+
+def default_install_dir() -> Path:
+    if env := os.environ.get("SCRIPTS_HOME"):
+        return Path(env).expanduser().resolve()
+    if platform.system() == "Windows":
+        return (Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "scripts").resolve()
+    xdg_data = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg_data).expanduser() if xdg_data else Path.home() / ".local" / "share"
+    return (base / "scripts").resolve()
+
+
+def default_bin_dir() -> Path:
+    if env := os.environ.get("SCRIPTS_BIN"):
+        return Path(env).expanduser().resolve()
+    if platform.system() == "Windows":
+        return (Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local")) / "bin").resolve()
+    xdg_bin = os.environ.get("XDG_BIN_HOME")
+    if xdg_bin:
+        return Path(xdg_bin).expanduser().resolve()
+    return (Path.home() / ".local" / "bin").resolve()
+
+
+def marker_path(install_dir: Path) -> Path:
+    return install_dir / MARKER_NAME
+
+
+def marker_search_dirs(install_dir: Optional[Path] = None) -> list[Path]:
+    if install_dir is not None:
+        return [install_dir]
+    script_parent = Path(__file__).resolve().parent
+    dirs = [script_parent]
+    default = default_install_dir()
+    if default != script_parent:
+        dirs.append(default)
+    return dirs
+
+
+def read_marker(install_dir: Optional[Path] = None) -> Optional[dict]:
+    for base in marker_search_dirs(install_dir):
+        path = marker_path(base)
+        if not path.exists():
+            continue
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return None
+    return None
+
+
+def resolve_install_dir(explicit: Optional[str] = None) -> Path:
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    marker = read_marker()
+    if marker and marker.get("install_dir"):
+        return Path(marker["install_dir"]).resolve()
+    script_parent = Path(__file__).resolve().parent
+    if (script_parent / "requirements").is_dir():
+        return script_parent
+    return default_install_dir()
+
+
+def resolve_bin_dir(explicit: Optional[str] = None, install_dir: Optional[Path] = None) -> Path:
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    marker = read_marker(install_dir)
+    if marker and marker.get("bin_dir"):
+        return Path(marker["bin_dir"]).resolve()
+    return default_bin_dir()
+
+
+def write_marker(install_dir: Path, bin_dir: Path, tools: list[str]) -> None:
+    payload = {
+        "version": 1,
+        "install_dir": str(install_dir),
+        "bin_dir": str(bin_dir),
+        "tools": sorted(set(tools)),
+        "installed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    marker_path(install_dir).write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def venv_python(install_dir: Path) -> Path:
+    if platform.system() == "Windows":
+        return install_dir / "venv" / "Scripts" / "python.exe"
+    return install_dir / "venv" / "bin" / "python"
+
+
+def venv_pip(install_dir: Path) -> list[str]:
+    py = venv_python(install_dir)
+    return [str(py), "-m", "pip"]
+
+
+def ensure_venv(install_dir: Path) -> Path:
+    py = venv_python(install_dir)
+    if py.exists():
+        return py
+    install_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run([sys.executable, "-m", "venv", str(install_dir / "venv")], check=True)
+    subprocess.run(venv_pip(install_dir) + ["install", "--upgrade", "pip"], check=True)
+    return venv_python(install_dir)
+
+
+def validate_tools(names: list[str]) -> list[str]:
+    unknown = [n for n in names if n not in TOOLS]
+    if unknown:
+        raise SystemExit(f"Unknown tool(s): {', '.join(unknown)}. Run: scripts list")
+    return names
+
+
+def pip_install_requirements(install_dir: Path, tools: list[str], upgrade: bool = False) -> None:
+    ensure_venv(install_dir)
+    pip = venv_pip(install_dir)
+    seen: set[str] = set()
+    req_files: list[Path] = []
+    for tool in tools:
+        rel = TOOLS[tool]["requirements"]
+        path = install_dir / rel
+        if not path.exists():
+            raise SystemExit(f"Missing requirements file: {path}")
+        key = str(path.resolve())
+        if key not in seen:
+            seen.add(key)
+            req_files.append(path)
+
+    for req in req_files:
+        cmd = pip + ["install"]
+        if upgrade:
+            cmd.append("--upgrade")
+        cmd += ["-r", str(req)]
+        print(f"→ pip install -r {req.relative_to(install_dir)}")
+        subprocess.run(cmd, cwd=install_dir, check=True)
+
+
+def wrapper_content(tool: str, install_dir: Path, bin_dir: Path) -> str:
+    script = install_dir / tool
+    py = venv_python(install_dir)
+    if platform.system() == "Windows":
+        return (
+            f'@echo off\r\n'
+            f'"{py}" "{script}" %*\r\n'
+        )
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'exec "{py}" "{script}" "$@"\n'
+    )
+
+
+def wrapper_dest(bin_dir: Path, tool: str) -> Path:
+    return bin_dir / (tool + (".cmd" if platform.system() == "Windows" else ""))
+
+
+def install_wrappers(install_dir: Path, bin_dir: Path, tools: list[str]) -> None:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    wrapper_tools = ["scripts", *tools]
+    for tool in wrapper_tools:
+        script = install_dir / tool
+        if not script.exists():
+            print(f"⚠ Skipping wrapper for missing script: {tool}", file=sys.stderr)
+            continue
+        dest = wrapper_dest(bin_dir, tool)
+        dest.write_text(wrapper_content(tool, install_dir, bin_dir))
+        if platform.system() != "Windows":
+            dest.chmod(dest.stat().st_mode | 0o111)
+        print(f"→ {dest}")
+
+
+def remove_wrappers(bin_dir: Path, tools: list[str], *, include_scripts: bool = False) -> list[str]:
+    removed: list[str] = []
+    names = (["scripts"] if include_scripts else []) + list(tools)
+    for tool in names:
+        dest = wrapper_dest(bin_dir, tool)
+        if dest.exists():
+            dest.unlink()
+            removed.append(tool)
+            print(f"→ Removed {dest}")
+    return removed
+
+
+def shell_rc_files() -> list[Path]:
+    home = Path.home()
+    if platform.system() == "Windows":
+        return []
+    shells = {
+        "zsh": home / ".zshrc",
+        "bash": home / ".bashrc",
+    }
+    shell = Path(os.environ.get("SHELL", "")).name
+    files: list[Path] = []
+    if shell in shells:
+        files.append(shells[shell])
+    for path in shells.values():
+        if path not in files:
+            files.append(path)
+    return files
+
+
+def path_export_line(bin_dir: Path) -> str:
+    if platform.system() == "Windows":
+        return str(bin_dir)
+    return f'export PATH="{bin_dir}:$PATH"'
+
+
+def ensure_path_in_shell(bin_dir: Path) -> None:
+    if platform.system() == "Windows":
+        _ensure_path_windows(bin_dir)
+        return
+
+    line = path_export_line(bin_dir)
+    block = f"{PATH_BEGIN}\n{line}\n{PATH_END}\n"
+    updated = False
+    for rc in shell_rc_files():
+        if not rc.parent.exists():
+            continue
+        text = rc.read_text() if rc.exists() else ""
+        if PATH_BEGIN in text and PATH_END in text:
+            before, rest = text.split(PATH_BEGIN, 1)
+            _, after = rest.split(PATH_END, 1)
+            text = before + block + after
+        elif str(bin_dir) not in text:
+            text = text.rstrip() + ("\n\n" if text else "") + block
+        else:
+            continue
+        rc.write_text(text)
+        print(f"→ Updated PATH in {rc}")
+        updated = True
+    if not updated:
+        print(f"ℹ Add to PATH: {line}")
+
+
+def _read_windows_path() -> str:
+    import winreg  # type: ignore[import-untyped]
+
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ) as key:
+        try:
+            current, _ = winreg.QueryValueEx(key, "Path")
+            return current or ""
+        except OSError:
+            return ""
+
+
+def _write_windows_path(value: str) -> None:
+    import winreg  # type: ignore[import-untyped]
+
+    with winreg.OpenKey(
+        winreg.HKEY_CURRENT_USER,
+        r"Environment",
+        0,
+        winreg.KEY_SET_VALUE,
+    ) as key:
+        winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, value)
+
+
+def _ensure_path_windows(bin_dir: Path) -> None:
+    bin_str = str(bin_dir)
+    parts = [p for p in _read_windows_path().split(";") if p]
+    if bin_str not in parts:
+        parts.insert(0, bin_str)
+        _write_windows_path(";".join(parts))
+        print(f"→ Added {bin_str} to user PATH")
+    else:
+        print(f"ℹ PATH already contains {bin_str}")
+
+
+def remove_path_from_shell(bin_dir: Path) -> None:
+    if platform.system() == "Windows":
+        _remove_path_windows(bin_dir)
+        return
+
+    for rc in shell_rc_files():
+        if not rc.exists():
+            continue
+        text = rc.read_text()
+        if PATH_BEGIN not in text or PATH_END not in text:
+            continue
+        before, rest = text.split(PATH_BEGIN, 1)
+        _, after = rest.split(PATH_END, 1)
+        text = before.rstrip() + "\n"
+        if after.strip():
+            text += after.lstrip("\n")
+        if not text.endswith("\n"):
+            text += "\n"
+        rc.write_text(text)
+        print(f"→ Removed PATH block from {rc}")
+
+
+def _remove_path_windows(bin_dir: Path) -> None:
+    bin_str = str(bin_dir).lower()
+    parts = [p for p in _read_windows_path().split(";") if p and p.lower() != bin_str]
+    _write_windows_path(";".join(parts))
+    print(f"→ Removed {bin_dir} from user PATH")
+
+
+def is_git_clone(install_dir: Path) -> bool:
+    return (install_dir / ".git").is_dir()
+
+
+def delete_marker(install_dir: Path) -> None:
+    path = marker_path(install_dir)
+    if path.exists():
+        path.unlink()
+        print(f"→ Removed {path}")
+
+
+def git_pull(install_dir: Path) -> bool:
+    if not (install_dir / ".git").is_dir():
+        return False
+    print(f"→ git pull in {install_dir}")
+    subprocess.run(["git", "-C", str(install_dir), "pull", "--ff-only"], check=True)
+    return True
+
+
+def cmd_install(args: argparse.Namespace) -> None:
+    install_dir = resolve_install_dir(args.dir)
+    bin_dir = resolve_bin_dir(args.bin_dir, install_dir)
+    marker = read_marker(install_dir)
+    existing = list(marker.get("tools", [])) if marker else []
+
+    if args.tools:
+        new_tools = validate_tools(args.tools)
+        pip_tools = new_tools
+        all_tools = sorted(set(existing) | set(new_tools))
+    else:
+        pip_tools = list(TOOL_NAMES)
+        all_tools = list(TOOL_NAMES)
+
+    if not (install_dir / "requirements").is_dir():
+        raise SystemExit(
+            f"Install directory not found or incomplete: {install_dir}\n"
+            f"Run install.sh first, or clone {REPO_URL}"
+        )
+
+    print(f"Install dir: {install_dir}")
+    print(f"Bin dir:     {bin_dir}")
+    print(f"Installing:  {', '.join(pip_tools)}")
+    if all_tools != pip_tools:
+        print(f"Registered:  {', '.join(all_tools)}")
+    print()
+
+    ensure_venv(install_dir)
+    pip_install_requirements(install_dir, pip_tools, upgrade=args.upgrade)
+    install_wrappers(install_dir, bin_dir, all_tools)
+    write_marker(install_dir, bin_dir, all_tools)
+
+    if not args.no_path:
+        ensure_path_in_shell(bin_dir)
+
+    print()
+    print("✅ Install complete.")
+    if not args.no_path and platform.system() != "Windows":
+        print("   Restart your shell or run: source ~/.zshrc  (or ~/.bashrc)")
+
+
+def cmd_update(args: argparse.Namespace) -> None:
+    install_dir = resolve_install_dir(args.dir)
+    bin_dir = resolve_bin_dir(args.bin_dir, install_dir)
+    marker = read_marker(install_dir)
+    tools = validate_tools(args.tools if args.tools else (marker or {}).get("tools", list(TOOL_NAMES)))
+
+    print(f"Updating {install_dir} ...")
+    print()
+    pulled = git_pull(install_dir)
+    if not pulled:
+        print("ℹ Not a git checkout — skipping git pull")
+
+    ensure_venv(install_dir)
+    pip_install_requirements(install_dir, tools, upgrade=True)
+    install_wrappers(install_dir, bin_dir, tools)
+    write_marker(install_dir, bin_dir, tools)
+    print()
+    print("✅ Update complete.")
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    install_dir = resolve_install_dir(args.dir)
+    bin_dir = resolve_bin_dir(args.bin_dir, install_dir)
+    marker = read_marker(install_dir)
+
+    print(f"scripts doctor  v{__version__}")
+    print()
+    print(f"Install dir:  {install_dir} {'✅' if install_dir.is_dir() else '❌'}")
+    print(f"Bin dir:      {bin_dir} {'✅' if bin_dir.is_dir() else '❌'}")
+    print(f"Marker:       {marker_path(install_dir)} {'✅' if marker else '—'}")
+    print(f"Python:       {sys.version.split()[0]} ({sys.executable})")
+
+    vpy = venv_python(install_dir)
+    print(f"Venv Python:  {vpy} {'✅' if vpy.exists() else '❌'}")
+    print()
+
+    path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+    in_path = str(bin_dir) in path_dirs
+    print(f"PATH:         {'✅' if in_path else '⚠️ '} {bin_dir}")
+    print()
+
+    installed_tools = marker.get("tools", []) if marker else []
+    for name in TOOL_NAMES:
+        script = install_dir / name
+        wrapper = bin_dir / name
+        if platform.system() == "Windows":
+            wrapper = bin_dir / f"{name}.cmd"
+        status = "✅" if wrapper.exists() and script.exists() else "—"
+        if installed_tools and name not in installed_tools:
+            status = "·"
+        print(f"  {status} {name:<10} {TOOLS[name]['description']}")
+
+    print()
+    print("System dependencies:")
+    for name, tool in TOOLS.items():
+        if installed_tools and name not in installed_tools:
+            continue
+        for binary, required, hint in tool["system"]:
+            found = shutil.which(binary) is not None
+            label = "required" if required else "optional"
+            mark = "✅" if found else ("❌" if required else "⚠️ ")
+            print(f"  {mark} {binary:<8} ({label}, {name}) — {hint}")
+
+    print()
+
+
+def cmd_list(_: argparse.Namespace) -> None:
+    install_dir = resolve_install_dir()
+    marker = read_marker(install_dir)
+    installed = set(marker.get("tools", [])) if marker else set()
+
+    print("Available tools:\n")
+    for name in TOOL_NAMES:
+        flag = " [installed]" if name in installed else ""
+        print(f"  {name:<10} {TOOLS[name]['description']}{flag}")
+    print()
+    print("Install:    scripts install [tool ...]")
+    print("Update:     scripts update")
+    print("Uninstall:  scripts uninstall [tool ...]")
+    print("Doctor:     scripts doctor")
+
+
+def cmd_path(args: argparse.Namespace) -> None:
+    install_dir = resolve_install_dir(args.dir)
+    bin_dir = resolve_bin_dir(args.bin_dir, install_dir)
+    print(f"SCRIPTS_HOME={install_dir}")
+    print(f"SCRIPTS_BIN={bin_dir}")
+    print(f"VENV_PYTHON={venv_python(install_dir)}")
+
+
+def confirm(prompt: str) -> bool:
+    try:
+        answer = input(f"{prompt} [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer in ("y", "yes")
+
+
+def cmd_uninstall(args: argparse.Namespace) -> None:
+    install_dir = resolve_install_dir(args.dir)
+    bin_dir = resolve_bin_dir(args.bin_dir, install_dir)
+    marker = read_marker(install_dir)
+    registered = list(marker.get("tools", [])) if marker else []
+
+    if args.tools:
+        tools = validate_tools(args.tools)
+        remaining = sorted(set(registered) - set(tools))
+
+        print(f"Uninstalling: {', '.join(tools)}")
+        print(f"Install dir:  {install_dir}")
+        print(f"Bin dir:      {bin_dir}")
+        print()
+
+        remove_wrappers(bin_dir, tools)
+        if not remaining:
+            remove_wrappers(bin_dir, [], include_scripts=True)
+            if not args.keep_path:
+                remove_path_from_shell(bin_dir)
+            delete_marker(install_dir)
+        else:
+            write_marker(install_dir, bin_dir, remaining)
+
+        print()
+        print(f"✅ Uninstalled: {', '.join(tools)}")
+        if remaining:
+            print(f"   Remaining:   {', '.join(remaining)}")
+        return
+
+    # Full uninstall
+    targets = registered or list(TOOL_NAMES)
+    in_place = is_git_clone(install_dir)
+    remove_install_dir = (
+        not args.keep_dir
+        and not in_place
+        and install_dir.resolve() == default_install_dir().resolve()
+    )
+
+    print("This will remove:")
+    print(f"  Wrappers:    {bin_dir}/{{scripts,{','.join(targets)}}}")
+    if not args.keep_path:
+        print("  PATH block:  shell rc / Windows user PATH")
+    print(f"  Venv:        {install_dir / 'venv'}")
+    print(f"  Marker:      {marker_path(install_dir)}")
+    if remove_install_dir:
+        print(f"  Install dir: {install_dir} (entire directory)")
+    elif in_place:
+        print(f"  Install dir: kept (git clone at {install_dir})")
+    print()
+    print("Tool config in ~/.medcat, ~/.keyferry, etc. is not removed.")
+    print()
+
+    if not args.yes and not confirm("Uninstall scripts toolkit?"):
+        print("Cancelled.")
+        return
+
+    print()
+    remove_wrappers(bin_dir, targets, include_scripts=True)
+    if not args.keep_path:
+        remove_path_from_shell(bin_dir)
+
+    venv_dir = install_dir / "venv"
+    if venv_dir.exists():
+        shutil.rmtree(venv_dir)
+        print(f"→ Removed {venv_dir}")
+
+    delete_marker(install_dir)
+
+    if remove_install_dir and install_dir.exists():
+        shutil.rmtree(install_dir)
+        print(f"→ Removed {install_dir}")
+
+    print()
+    print("✅ Uninstall complete.")
+    if not args.keep_path and platform.system() != "Windows":
+        print("   Restart your shell or run: source ~/.zshrc  (or ~/.bashrc)")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="scripts",
+        description="Install, update, and diagnose the pokanop/scripts CLI toolkit.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  scripts install                 Install all tools\n"
+            "  scripts install medcat pluck    Install selected tools\n"
+            "  scripts update                  Pull latest and refresh deps\n"
+            "  scripts uninstall               Remove install\n"
+            "  scripts uninstall medcat        Remove one tool\n"
+            "  scripts doctor                  Check environment\n"
+        ),
+    )
+    parser.add_argument("-v", "--version", action="version", version=f"scripts {__version__}")
+
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--dir", help="Install directory (default: SCRIPTS_HOME or repo/marker)")
+    common.add_argument("--bin-dir", help="Wrapper directory (default: SCRIPTS_BIN or ~/.local/bin)")
+
+    install_p = sub.add_parser("install", parents=[common], help="Install tools and dependencies")
+    install_p.add_argument("tools", nargs="*", help="Tools to install (default: all)")
+    install_p.add_argument("--upgrade", action="store_true", help="Upgrade existing packages")
+    install_p.add_argument("--no-path", action="store_true", help="Do not modify shell PATH")
+    install_p.set_defaults(func=cmd_install)
+
+    update_p = sub.add_parser("update", parents=[common], help="Update install from git + refresh deps")
+    update_p.add_argument("tools", nargs="*", help="Tools to update (default: installed set)")
+    update_p.set_defaults(func=cmd_update)
+
+    uninstall_p = sub.add_parser("uninstall", parents=[common], help="Remove wrappers, venv, and install data")
+    uninstall_p.add_argument("tools", nargs="*", help="Tools to remove (default: full uninstall)")
+    uninstall_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
+    uninstall_p.add_argument("--keep-path", action="store_true", help="Do not remove shell PATH changes")
+    uninstall_p.add_argument("--keep-dir", action="store_true", help="Do not remove install directory")
+    uninstall_p.set_defaults(func=cmd_uninstall)
+
+    sub.add_parser("doctor", parents=[common], help="Check install and dependencies").set_defaults(func=cmd_doctor)
+    sub.add_parser("list", help="List available tools").set_defaults(func=cmd_list)
+    sub.add_parser("path", parents=[common], help="Print install paths").set_defaults(func=cmd_path)
+
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
