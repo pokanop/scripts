@@ -4,7 +4,7 @@ scripts — Toolkit installer & lifecycle manager  v1.0.0
 Install, update, and diagnose the pokanop/scripts CLI toolkit.
 
 Usage:
-    scripts install [tools...]      Install tools and Python deps (all if none given)
+    scripts install [tools...]      Install harness, or add tools (use 'all' for every tool)
     scripts update [tools...]       Pull latest + refresh deps and wrappers
     scripts uninstall [tools...]    Remove install (all if none given)
     scripts doctor                  Check install, PATH, Python, and system deps
@@ -216,6 +216,20 @@ def pip_install_requirements(install_dir: Path, tools: list[str], upgrade: bool 
         subprocess.run(cmd, cwd=install_dir, check=True)
 
 
+def pip_install_base(install_dir: Path, upgrade: bool = False) -> None:
+    base = install_dir / "requirements" / "base.txt"
+    if not base.exists():
+        return
+    ensure_venv(install_dir)
+    pip = venv_pip(install_dir)
+    cmd = pip + ["install"]
+    if upgrade:
+        cmd.append("--upgrade")
+    cmd += ["-r", str(base)]
+    print(f"→ pip install -r {base.relative_to(install_dir)}")
+    subprocess.run(cmd, cwd=install_dir, check=True)
+
+
 def wrapper_content(tool: str, install_dir: Path, bin_dir: Path) -> str:
     script = install_dir / tool
     py = venv_python(install_dir)
@@ -262,22 +276,51 @@ def remove_wrappers(bin_dir: Path, tools: list[str], *, include_scripts: bool = 
     return removed
 
 
-def shell_rc_files() -> list[Path]:
+def shell_rc_file() -> Optional[Path]:
+    """Return the rc file for the user's login shell."""
+    if platform.system() == "Windows":
+        return None
+    home = Path.home()
+    shell = Path(os.environ.get("SHELL", "")).name
+    if shell == "zsh":
+        return home / ".zshrc"
+    if shell == "bash":
+        if platform.system() == "Darwin":
+            profile = home / ".bash_profile"
+            bashrc = home / ".bashrc"
+            if profile.exists() or not bashrc.exists():
+                return profile
+        return home / ".bashrc"
+    if platform.system() == "Darwin":
+        if (home / ".zshrc").exists():
+            return home / ".zshrc"
+        return home / ".zshrc"
+    if (home / ".bashrc").exists():
+        return home / ".bashrc"
+    return home / ".bashrc"
+
+
+def shell_rc_search_files() -> list[Path]:
+    """Rc files that may contain a PATH block (for removal / migration)."""
     home = Path.home()
     if platform.system() == "Windows":
         return []
-    shells = {
-        "zsh": home / ".zshrc",
-        "bash": home / ".bashrc",
-    }
-    shell = Path(os.environ.get("SHELL", "")).name
+    candidates = [home / ".zshrc", home / ".bashrc", home / ".bash_profile"]
+    primary = shell_rc_file()
     files: list[Path] = []
-    if shell in shells:
-        files.append(shells[shell])
-    for path in shells.values():
+    if primary is not None:
+        files.append(primary)
+    for path in candidates:
         if path not in files:
             files.append(path)
     return files
+
+
+def shell_source_hint() -> str:
+    rc = shell_rc_file()
+    if rc is None:
+        return "restart your shell"
+    return f"source {rc}"
 
 
 def path_export_line(bin_dir: Path) -> str:
@@ -291,26 +334,29 @@ def ensure_path_in_shell(bin_dir: Path) -> None:
         _ensure_path_windows(bin_dir)
         return
 
+    rc = shell_rc_file()
+    if rc is None:
+        print(f"ℹ Add to PATH: {path_export_line(bin_dir)}")
+        return
+
     line = path_export_line(bin_dir)
     block = f"{PATH_BEGIN}\n{line}\n{PATH_END}\n"
-    updated = False
-    for rc in shell_rc_files():
-        if not rc.parent.exists():
-            continue
-        text = rc.read_text() if rc.exists() else ""
-        if PATH_BEGIN in text and PATH_END in text:
-            before, rest = text.split(PATH_BEGIN, 1)
-            _, after = rest.split(PATH_END, 1)
-            text = before + block + after
-        elif str(bin_dir) not in text:
-            text = text.rstrip() + ("\n\n" if text else "") + block
-        else:
-            continue
-        rc.write_text(text)
-        print(f"→ Updated PATH in {rc}")
-        updated = True
-    if not updated:
+    if not rc.parent.exists():
         print(f"ℹ Add to PATH: {line}")
+        return
+
+    text = rc.read_text() if rc.exists() else ""
+    if PATH_BEGIN in text and PATH_END in text:
+        before, rest = text.split(PATH_BEGIN, 1)
+        _, after = rest.split(PATH_END, 1)
+        text = before + block + after
+    elif str(bin_dir) not in text:
+        text = text.rstrip() + ("\n\n" if text else "") + block
+    else:
+        print(f"ℹ PATH already configured in {rc}")
+        return
+    rc.write_text(text)
+    print(f"→ Updated PATH in {rc}")
 
 
 def _read_windows_path() -> str:
@@ -352,7 +398,7 @@ def remove_path_from_shell(bin_dir: Path) -> None:
         _remove_path_windows(bin_dir)
         return
 
-    for rc in shell_rc_files():
+    for rc in shell_rc_search_files():
         if not rc.exists():
             continue
         text = rc.read_text()
@@ -391,8 +437,33 @@ def git_pull(install_dir: Path) -> bool:
     if not (install_dir / ".git").is_dir():
         return False
     print(f"→ git pull in {install_dir}")
-    subprocess.run(["git", "-C", str(install_dir), "pull", "--ff-only"], check=True)
-    return True
+    result = subprocess.run(
+        ["git", "-C", str(install_dir), "pull", "--ff-only"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return True
+
+    branch = subprocess.run(
+        ["git", "-C", str(install_dir), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip() or "main"
+
+    for remote in ("origin", "upstream"):
+        retry = subprocess.run(
+            ["git", "-C", str(install_dir), "pull", "--ff-only", remote, branch],
+            capture_output=True,
+            text=True,
+        )
+        if retry.returncode == 0:
+            return True
+
+    detail = (result.stderr or result.stdout).strip()
+    print(f"⚠ git pull skipped: {detail}", file=sys.stderr)
+    return False
 
 
 def cmd_install(args: argparse.Namespace) -> None:
@@ -402,12 +473,15 @@ def cmd_install(args: argparse.Namespace) -> None:
     existing = list(marker.get("tools", [])) if marker else []
 
     if args.tools:
-        new_tools = validate_tools(args.tools)
+        if len(args.tools) == 1 and args.tools[0] == "all":
+            new_tools = list(TOOL_NAMES)
+        else:
+            new_tools = validate_tools(args.tools)
         pip_tools = new_tools
         all_tools = sorted(set(existing) | set(new_tools))
     else:
-        pip_tools = list(TOOL_NAMES)
-        all_tools = list(TOOL_NAMES)
+        pip_tools = []
+        all_tools = list(existing)
 
     if not (install_dir / "requirements").is_dir():
         raise SystemExit(
@@ -417,13 +491,19 @@ def cmd_install(args: argparse.Namespace) -> None:
 
     print(f"Install dir: {install_dir}")
     print(f"Bin dir:     {bin_dir}")
-    print(f"Installing:  {', '.join(pip_tools)}")
-    if all_tools != pip_tools:
+    if pip_tools:
+        print(f"Installing:  {', '.join(pip_tools)}")
+    else:
+        print("Installing:  harness only (scripts CLI)")
+    if all_tools and set(all_tools) != set(pip_tools):
         print(f"Registered:  {', '.join(all_tools)}")
     print()
 
     ensure_venv(install_dir)
-    pip_install_requirements(install_dir, pip_tools, upgrade=args.upgrade)
+    if pip_tools:
+        pip_install_requirements(install_dir, pip_tools, upgrade=args.upgrade)
+    else:
+        pip_install_base(install_dir, upgrade=args.upgrade)
     install_wrappers(install_dir, bin_dir, all_tools)
     write_marker(install_dir, bin_dir, all_tools)
 
@@ -432,24 +512,35 @@ def cmd_install(args: argparse.Namespace) -> None:
 
     print()
     print("✅ Install complete.")
+    if not pip_tools:
+        print("   Add tools:  scripts install medcat pluck")
+        print("   Install all: scripts install all")
     if not args.no_path and platform.system() != "Windows":
-        print("   Restart your shell or run: source ~/.zshrc  (or ~/.bashrc)")
+        print(f"   Restart your shell or run: {shell_source_hint()}")
 
 
 def cmd_update(args: argparse.Namespace) -> None:
     install_dir = resolve_install_dir(args.dir)
     bin_dir = resolve_bin_dir(args.bin_dir, install_dir)
     marker = read_marker(install_dir)
-    tools = validate_tools(args.tools if args.tools else (marker or {}).get("tools", list(TOOL_NAMES)))
+    default_tools = (marker or {}).get("tools", [])
+    if args.tools:
+        tools = list(TOOL_NAMES) if args.tools == ["all"] else validate_tools(args.tools)
+    else:
+        tools = default_tools
 
     print(f"Updating {install_dir} ...")
     print()
-    pulled = git_pull(install_dir)
-    if not pulled:
+    if is_git_clone(install_dir):
+        git_pull(install_dir)
+    else:
         print("ℹ Not a git checkout — skipping git pull")
 
     ensure_venv(install_dir)
-    pip_install_requirements(install_dir, tools, upgrade=True)
+    if tools:
+        pip_install_requirements(install_dir, tools, upgrade=True)
+    else:
+        pip_install_base(install_dir, upgrade=True)
     install_wrappers(install_dir, bin_dir, tools)
     write_marker(install_dir, bin_dir, tools)
     print()
@@ -512,7 +603,7 @@ def cmd_list(_: argparse.Namespace) -> None:
         flag = " [installed]" if name in installed else ""
         print(f"  {name:<10} {TOOLS[name]['description']}{flag}")
     print()
-    print("Install:    scripts install [tool ...]")
+    print("Install:    scripts install [tool ...]   (or: scripts install all)")
     print("Update:     scripts update")
     print("Uninstall:  scripts uninstall [tool ...]")
     print("Doctor:     scripts doctor")
@@ -611,7 +702,7 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     print()
     print("✅ Uninstall complete.")
     if not args.keep_path and platform.system() != "Windows":
-        print("   Restart your shell or run: source ~/.zshrc  (or ~/.bashrc)")
+        print(f"   Restart your shell or run: {shell_source_hint()}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -621,8 +712,9 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  scripts install                 Install all tools\n"
-            "  scripts install medcat pluck    Install selected tools\n"
+            "  scripts install                 Install harness only\n"
+            "  scripts install medcat pluck    Add selected tools\n"
+            "  scripts install all             Install every tool\n"
             "  scripts update                  Pull latest and refresh deps\n"
             "  scripts uninstall               Remove install\n"
             "  scripts uninstall medcat        Remove one tool\n"
@@ -638,7 +730,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--bin-dir", help="Wrapper directory (default: SCRIPTS_BIN or ~/.local/bin)")
 
     install_p = sub.add_parser("install", parents=[common], help="Install tools and dependencies")
-    install_p.add_argument("tools", nargs="*", help="Tools to install (default: all)")
+    install_p.add_argument("tools", nargs="*", help="Tools to add (default: harness only; use 'all' for every tool)")
     install_p.add_argument("--upgrade", action="store_true", help="Upgrade existing packages")
     install_p.add_argument("--no-path", action="store_true", help="Do not modify shell PATH")
     install_p.set_defaults(func=cmd_install)

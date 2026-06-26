@@ -25,7 +25,7 @@ Usage: install.sh [options]
 
 Options:
   --update              Update an existing install (git pull + refresh deps)
-  --tools LIST          Comma-separated tools to install (default: all)
+  --tools LIST          Comma-separated tools to add (default: harness only; use 'all' for every tool)
   --dir PATH            Install directory (default: ~/.local/share/scripts)
   --bin-dir PATH        Wrapper directory (default: ~/.local/bin)
   --in-place            Install using this repo directory (for git clones)
@@ -37,6 +37,7 @@ Examples:
   git clone https://github.com/pokanop/scripts.git && cd scripts && ./install.sh --in-place
   ./install.sh --update
   ./install.sh --tools medcat,pluck
+  ./install.sh --tools all
 EOF
 }
 

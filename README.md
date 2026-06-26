@@ -49,11 +49,12 @@ scripts uninstall medcat pluck  # remove specific tools only
 
 For git clones, `scripts uninstall` removes wrappers and `venv/` but keeps the repo. A curl install to `~/.local/share/scripts` removes the entire install directory. Tool config in `~/.medcat/`, `~/.keyferry/`, etc. is left intact.
 
-The installer creates a shared venv, installs Python deps, and places wrappers in `~/.local/bin`. Install only what you need:
+The one-liner installs the `scripts` harness (venv, `scripts` CLI, PATH). Add tools afterward — only what you need:
 
 ```bash
-./install.sh --tools medcat,pluck
-scripts install voxtract netsy
+scripts install medcat pluck      # add selected tools
+scripts install all               # install every tool
+./install.sh --tools medcat,pluck # same, via installer flags
 ```
 
 **Manual / package-manager path:**
