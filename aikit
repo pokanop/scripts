@@ -1,0 +1,2205 @@
+#!/usr/bin/env python3
+"""
+aikit — AI Coding Agent CLI Installer & Manager  v1.3.1
+Install, update, authenticate, and manage 16 AI coding agent CLIs from one tool.
+
+Architecture:
+    Agent registry → platform-aware install → auth multiplexing → web dashboard
+
+Usage:
+    aikit setup                     First-run interactive wizard
+    aikit install [agents...]       Install agents (interactive multi-select if none)
+    aikit update [agents...]        Update installed agents (all if none)
+    aikit uninstall [agent...]      Remove agents
+    aikit list                      Show all agents and installation status
+    aikit auth [agent]              Configure authentication for an agent
+    aikit serve                     Start web dashboard (http://localhost:8765)
+    aikit doctor                    Diagnose environment and agents
+    aikit config get/set/list       Manage configuration
+
+Dependencies:
+    pip install rich requests flask readchar
+"""
+
+import argparse
+import json
+import os
+import platform
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import textwrap
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Optional, List
+
+try:
+    import readchar
+    HAS_READCHAR = True
+except ImportError:
+    HAS_READCHAR = False
+
+import requests
+from rich import print as rprint
+from rich.console import Console
+from rich.markup import escape as rich_escape
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.prompt import Confirm, Prompt
+from rich.table import Table
+from rich.text import Text
+
+__version__ = "1.3.1"
+
+console = Console()
+
+# =============================================================================
+# Configuration — zero hardcoded secrets, three-tier loading
+# =============================================================================
+
+CONFIG_DIR = Path(os.environ.get("AIKIT_CONFIG", Path.home() / ".aikit"))
+CONFIG_FILE = CONFIG_DIR / "config.json"
+SETUP_MARKER = CONFIG_DIR / ".setup-done"
+LOGS_DIR = CONFIG_DIR / "logs"
+
+DEFAULT_CONFIG = {
+    "version": 1,
+    "agents": {},
+    "settings": {
+        "web_port": 8765,
+        "web_host": "localhost",
+        "auto_update_check": True,
+    },
+}
+
+# =============================================================================
+# Agent Registry — 16 coding agents, platform-aware install commands
+# =============================================================================
+
+_CURRENT_PLATFORM = platform.system()  # "Linux", "Darwin", "Windows"
+
+AGENTS = {
+    "claude": {
+        "name": "Claude Code",
+        "bin": "claude",
+        "vendor": "Anthropic",
+        "homepage": "https://code.claude.com",
+        "icon": "🧠",
+        "install": {
+            "Linux": "curl -fsSL https://claude.ai/install.sh | bash",
+            "Darwin": "curl -fsSL https://claude.ai/install.sh | bash",
+            "Windows": 'powershell -c "irm https://claude.ai/install.ps1 | iex"',
+        },
+        "version_cmd": "claude --version",
+        "update_cmd": "claude update",
+        "uninstall_cmd": None,
+        "auth_type": "oauth_browser",
+        "auth_env_vars": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+        "auth_note": "Run 'claude' and follow browser login. Or set ANTHROPIC_API_KEY.",
+        "requires": ["curl"],
+        "tags": ["anthropic", "claude", "sonnet", "opus"],
+    },
+    "antigravity": {
+        "name": "Antigravity",
+        "bin": "agy",
+        "vendor": "Google",
+        "homepage": "https://antigravity.google",
+        "icon": "🛸",
+        "install": {
+            "Linux": "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+            "Darwin": "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+            "Windows": 'powershell -c "irm https://antigravity.google/cli/install.ps1 | iex"',
+        },
+        "version_cmd": "agy --version",
+        "update_cmd": "agy update",
+        "uninstall_cmd": None,
+        "auth_type": "oauth_browser",
+        "auth_env_vars": [],
+        "auth_note": "Run 'agy' and authenticate with your Google account in browser.",
+        "requires": ["curl"],
+        "tags": ["google", "antigravity", "gemini"],
+    },
+    "cursor": {
+        "name": "Cursor CLI",
+        "bin": "cursor",
+        "vendor": "Cursor",
+        "homepage": "https://cursor.com/cli",
+        "icon": "🖱️",
+        "install": {
+            "Linux": "curl https://cursor.com/install -fsS | bash",
+            "Darwin": "curl https://cursor.com/install -fsS | bash",
+            "Windows": 'powershell -c "irm https://cursor.com/install.ps1 | iex"',
+        },
+        "version_cmd": "cursor --version",
+        "update_cmd": None,
+        "uninstall_cmd": None,
+        "auth_type": "oauth_browser",
+        "auth_env_vars": [],
+        "auth_note": "Run 'cursor' and follow browser login with your Cursor account.",
+        "requires": ["curl"],
+        "tags": ["cursor", "ide", "composer"],
+    },
+    "hermes": {
+        "name": "Hermes Agent",
+        "bin": "hermes",
+        "vendor": "Nous Research",
+        "homepage": "https://hermes-agent.nousresearch.com",
+        "icon": "☤",
+        "install": {
+            "Linux": "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+            "Darwin": "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+            "Windows": 'powershell -c "iex (irm https://hermes-agent.nousresearch.com/install.ps1)"',
+        },
+        "version_cmd": "hermes --version",
+        "update_cmd": "hermes update",
+        "uninstall_cmd": None,
+        "auth_type": "oauth_portal",
+        "auth_env_vars": ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"],
+        "auth_note": "Run 'hermes setup --portal' for Nous Portal OAuth, or 'hermes model' for API keys.",
+        "requires": ["curl", "git"],
+        "tags": ["nous", "hermes", "self-improving", "multi-platform"],
+    },
+    "codex": {
+        "name": "Codex CLI",
+        "bin": "codex",
+        "vendor": "OpenAI",
+        "homepage": "https://github.com/openai/codex",
+        "icon": "📟",
+        "install": {
+            "Linux": 'curl -fsSL https://chatgpt.com/codex/install.sh | sh',
+            "Darwin": 'curl -fsSL https://chatgpt.com/codex/install.sh | sh',
+            "Windows": 'powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"',
+        },
+        "version_cmd": "codex --version",
+        "update_cmd": None,
+        "uninstall_cmd": None,
+        "auth_type": "oauth_browser",
+        "auth_env_vars": ["OPENAI_API_KEY"],
+        "auth_note": "Run 'codex' and sign in with ChatGPT. Or set OPENAI_API_KEY.",
+        "requires": ["curl"],
+        "tags": ["openai", "codex", "gpt", "chatgpt"],
+    },
+    "kilo": {
+        "name": "Kilo CLI",
+        "bin": "kilo",
+        "vendor": "Kilo Code",
+        "homepage": "https://kilo.ai/cli",
+        "icon": "⚡",
+        "install": {
+            "Linux": "npm install -g @kilocode/cli",
+            "Darwin": "npm install -g @kilocode/cli",
+            "Windows": "npm install -g @kilocode/cli",
+        },
+        "version_cmd": "kilo --version",
+        "update_cmd": "npm install -g @kilocode/cli@latest",
+        "uninstall_cmd": "npm uninstall -g @kilocode/cli",
+        "auth_type": "account_or_byok",
+        "auth_env_vars": [],
+        "auth_note": "Run 'kilo' and sign in with Kilo account, or bring your own API keys via settings.",
+        "requires": ["node", "npm"],
+        "tags": ["kilo", "opencode-fork", "byok", "500+ models"],
+    },
+    "opencode": {
+        "name": "OpenCode",
+        "bin": "opencode",
+        "vendor": "SST / AnomalyCo",
+        "homepage": "https://opencode.ai",
+        "icon": "🔓",
+        "install": {
+            "Linux": "npm i -g opencode-ai@latest",
+            "Darwin": "npm i -g opencode-ai@latest",
+            "Windows": "npm i -g opencode-ai@latest",
+        },
+        "version_cmd": "opencode --version",
+        "update_cmd": "npm i -g opencode-ai@latest",
+        "uninstall_cmd": "npm uninstall -g opencode-ai",
+        "auth_type": "provider_keys",
+        "auth_env_vars": ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+        "auth_note": "Run 'opencode auth list' to configure provider API keys.",
+        "requires": ["node", "npm"],
+        "tags": ["opencode", "open-source", "provider-agnostic", "tui"],
+    },
+    "qwen": {
+        "name": "Qwen Code",
+        "bin": "qwen",
+        "vendor": "QwenLM (Alibaba)",
+        "homepage": "https://qwen.ai/qwencode",
+        "icon": "🐉",
+        "install": {
+            "Linux": "npm install -g @qwen-code/qwen-code@latest",
+            "Darwin": "npm install -g @qwen-code/qwen-code@latest",
+            "Windows": "npm install -g @qwen-code/qwen-code@latest",
+        },
+        "version_cmd": "qwen --version",
+        "update_cmd": "npm install -g @qwen-code/qwen-code@latest",
+        "uninstall_cmd": "npm uninstall -g @qwen-code/qwen-code",
+        "auth_type": "api_key",
+        "auth_env_vars": ["BAILIAN_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY"],
+        "auth_note": "Run '/auth' inside qwen session to configure provider and API key.",
+        "requires": ["node", "npm"],
+        "tags": ["qwen", "alibaba", "open-source", "multi-protocol"],
+    },
+    "copilot": {
+        "name": "GitHub Copilot CLI",
+        "bin": "copilot",
+        "vendor": "GitHub",
+        "homepage": "https://github.com/github/copilot-cli",
+        "icon": "🐙",
+        "install": {
+            "Linux": "curl -fsSL https://gh.io/copilot-install | bash",
+            "Darwin": "curl -fsSL https://gh.io/copilot-install | bash",
+            "Windows": "winget install GitHub.Copilot",
+        },
+        "version_cmd": "copilot --version",
+        "update_cmd": "curl -fsSL https://gh.io/copilot-install | bash",
+        "uninstall_cmd": None,
+        "auth_type": "pat_or_oauth",
+        "auth_env_vars": ["GH_TOKEN", "GITHUB_TOKEN"],
+        "auth_note": "Set GH_TOKEN or GITHUB_TOKEN (fine-grained PAT with Copilot Requests permission). Or use '/login' in interactive mode.",
+        "requires": ["curl"],
+        "tags": ["github", "copilot", "microsoft", "claude-sonnet"],
+    },
+    "grok": {
+        "name": "Grok Build",
+        "bin": "grok",
+        "vendor": "xAI",
+        "homepage": "https://x.ai/cli",
+        "icon": "🚀",
+        "install": {
+            "Linux": "curl -fsSL https://x.ai/cli/install.sh | bash",
+            "Darwin": "curl -fsSL https://x.ai/cli/install.sh | bash",
+            "Windows": 'powershell -c "irm https://x.ai/cli/install.ps1 | iex"',
+        },
+        "version_cmd": "grok --version",
+        "update_cmd": None,
+        "uninstall_cmd": None,
+        "auth_type": "oauth_browser",
+        "auth_env_vars": ["XAI_API_KEY"],
+        "auth_note": "Run 'grok' and authenticate via browser. Or set XAI_API_KEY for headless use.",
+        "requires": ["curl"],
+        "tags": ["grok", "xai", "multi-agent"],
+    },
+    "aider": {
+        "name": "Aider",
+        "bin": "aider",
+        "vendor": "Aider AI",
+        "homepage": "https://aider.chat",
+        "icon": "🤝",
+        "install": {
+            "Linux": "pip install aider-chat --break-system-packages 2>/dev/null || pip install aider-chat || curl -LsSf https://aider.chat/install.sh | sh",
+            "Darwin": "pip install aider-chat --break-system-packages 2>/dev/null || pip install aider-chat || curl -LsSf https://aider.chat/install.sh | sh",
+            "Windows": "pip install aider-chat",
+        },
+        "version_cmd": "aider --version",
+        "update_cmd": "pip install --upgrade aider-chat --break-system-packages 2>/dev/null || pip install --upgrade aider-chat",
+        "uninstall_cmd": "pip uninstall -y aider-chat",
+        "auth_type": "api_key",
+        "auth_env_vars": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"],
+        "auth_note": "Set provider API keys via environment variables. Pass --api-key <provider>=<key> on invocation.",
+        "requires": ["python3", "pip"],
+        "tags": ["aider", "pair-programming", "python", "open-source"],
+    },
+    "kimi": {
+        "name": "Kimi Code",
+        "bin": "kimi-code",
+        "vendor": "Moonshot AI",
+        "homepage": "https://www.kimi.com/code",
+        "icon": "🌙",
+        "install": {
+            "Linux": "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
+            "Darwin": "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
+            "Windows": 'powershell -c "irm https://code.kimi.com/kimi-code/install.ps1 | iex"',
+        },
+        "version_cmd": "kimi-code --version",
+        "update_cmd": None,
+        "uninstall_cmd": None,
+        "auth_type": "subscription",
+        "auth_env_vars": ["MOONSHOT_API_KEY"],
+        "auth_note": "Requires Kimi membership subscription. Authenticate on first run.",
+        "requires": ["curl"],
+        "tags": ["kimi", "moonshot", "k2.7"],
+    },
+    "kiro": {
+        "name": "Kiro CLI",
+        "bin": "kiro",
+        "vendor": "Kiro",
+        "homepage": "https://kiro.dev/cli",
+        "icon": "🦅",
+        "install": {
+            "Linux": "curl -fsSL https://cli.kiro.dev/install | bash",
+            "Darwin": "curl -fsSL https://cli.kiro.dev/install | bash",
+            "Windows": 'powershell -c "irm https://cli.kiro.dev/install.ps1 | iex"',
+        },
+        "version_cmd": "kiro --version",
+        "update_cmd": None,
+        "uninstall_cmd": None,
+        "auth_type": "subscription",
+        "auth_env_vars": [],
+        "auth_note": "Included with Kiro pricing tiers. Authenticate on first run.",
+        "requires": ["curl"],
+        "tags": ["kiro", "claude", "context-management", "enterprise"],
+    },
+    "pi": {
+        "name": "Pi Coding Agent",
+        "bin": "pi",
+        "vendor": "Earendil Works",
+        "homepage": "https://pi.dev",
+        "icon": "π",
+        "install": {
+            "Linux": "npm install -g @earendil-works/pi-coding-agent",
+            "Darwin": "npm install -g @earendil-works/pi-coding-agent",
+            "Windows": "npm install -g @earendil-works/pi-coding-agent",
+        },
+        "version_cmd": "pi --version",
+        "update_cmd": "npm install -g @earendil-works/pi-coding-agent@latest",
+        "uninstall_cmd": "npm uninstall -g @earendil-works/pi-coding-agent",
+        "auth_type": "provider_keys",
+        "auth_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+        "auth_note": "15+ providers supported. Configure API keys then run 'pi'.",
+        "requires": ["node", "npm"],
+        "tags": ["pi", "minimal", "customizable", "extensions", "self-modifying"],
+    },
+    "openclaw": {
+        "name": "OpenClaw",
+        "bin": "openclaw",
+        "vendor": "OpenClaw",
+        "homepage": "https://openclaw.ai",
+        "icon": "🦞",
+        "install": {
+            "Linux": "curl -fsSL https://openclaw.ai/install.sh | bash",
+            "Darwin": "curl -fsSL https://openclaw.ai/install.sh | bash",
+            "Windows": 'powershell -c "irm https://openclaw.ai/install.ps1 | iex"',
+        },
+        "version_cmd": "openclaw --version",
+        "update_cmd": "openclaw update",
+        "uninstall_cmd": None,
+        "auth_type": "oauth_onboard",
+        "auth_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+        "auth_note": "Run 'openclaw onboard' for guided setup and auth.",
+        "requires": ["curl"],
+        "tags": ["openclaw", "personal-ai", "multi-platform", "hackable"],
+    },
+    "blackbox": {
+        "name": "Blackbox AI",
+        "bin": "blackbox",
+        "vendor": "Blackbox AI",
+        "homepage": "https://www.blackbox.ai",
+        "icon": "⬛",
+        "install": {
+            "Linux": "npm install -g @blackboxai/cli",
+            "Darwin": "npm install -g @blackboxai/cli",
+            "Windows": "npm install -g @blackboxai/cli",
+        },
+        "version_cmd": "blackbox --version",
+        "update_cmd": "npm install -g @blackboxai/cli@latest",
+        "uninstall_cmd": "npm uninstall -g @blackboxai/cli",
+        "auth_type": "api_key",
+        "auth_env_vars": ["BLACKBOX_API_KEY"],
+        "auth_note": "Get API key from https://app.blackbox.ai/dashboard then run 'blackbox configure'.",
+        "requires": ["node", "npm"],
+        "tags": ["blackbox", "multi-model", "judge", "chairman"],
+    },
+}
+
+
+# =============================================================================
+# Config helpers
+# =============================================================================
+
+def _deep_merge(base, override):
+    result = dict(base)
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
+def _config_set_nested(config, key_path, value):
+    parts = key_path.split(".")
+    node = config
+    for part in parts[:-1]:
+        if part not in node or not isinstance(node[part], dict):
+            node[part] = {}
+        node = node[part]
+    if isinstance(value, str):
+        if value.lower() in ("true", "yes"):
+            value = True
+        elif value.lower() in ("false", "no"):
+            value = False
+        elif value.lower() in ("null", "none"):
+            value = None
+        else:
+            try:
+                value = int(value)
+            except ValueError:
+                try:
+                    value = float(value)
+                except ValueError:
+                    pass
+    node[parts[-1]] = value
+
+
+def _config_get_nested(config, key_path):
+    node = config
+    for part in key_path.split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
+
+
+def _config_from_env():
+    overrides = {}
+    prefix = "AIKIT_"
+    for key, val in os.environ.items():
+        if not key.startswith(prefix):
+            continue
+        path = key[len(prefix):].lower().replace("__", ".")
+        _config_set_nested(overrides, path, val)
+    return overrides
+
+
+def load_config():
+    config = dict(DEFAULT_CONFIG)
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE) as f:
+                saved = json.load(f)
+            config = _deep_merge(config, saved)
+        except (json.JSONDecodeError, OSError):
+            pass
+    env_overrides = _config_from_env()
+    if env_overrides:
+        config = _deep_merge(config, env_overrides)
+    return config
+
+
+def save_config(config):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    CONFIG_FILE.chmod(0o600)
+
+
+def _needs_setup():
+    return not SETUP_MARKER.exists()
+
+
+# =============================================================================
+# Subprocess helpers
+# =============================================================================
+
+def run(cmd, timeout=300, shell=True, capture=True):
+    """Run a shell command. Returns (exit_code, stdout, stderr)."""
+    try:
+        result = subprocess.run(
+            cmd,
+            shell=shell,
+            capture_output=capture,
+            text=True,
+            timeout=timeout,
+        )
+        return result.returncode, result.stdout.strip(), result.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return -1, "", f"Command timed out after {timeout}s: {cmd}"
+    except Exception as e:
+        return -1, "", str(e)
+
+
+def which(binary):
+    """Check if a command is on PATH."""
+    return shutil.which(binary) is not None
+
+
+def detect_agent_bin(agent_key):
+    """Check if an agent's binary is available on PATH."""
+    agent = AGENTS.get(agent_key)
+    if not agent:
+        return False
+    return which(agent["bin"])
+
+
+def detect_agent_version(agent_key):
+    """Try to get an agent's installed version."""
+    agent = AGENTS.get(agent_key)
+    if not agent:
+        return None
+    cmd = agent.get("version_cmd")
+    if not cmd or not detect_agent_bin(agent_key):
+        return None
+    exit_code, stdout, _ = run(cmd, timeout=10)
+    if exit_code == 0 and stdout:
+        return stdout.split("\n")[0].strip()
+    return None
+
+
+def check_prerequisites(agent_key):
+    """Check if required tools are available for an agent install."""
+    agent = AGENTS.get(agent_key)
+    if not agent:
+        return []
+    return [r for r in agent.get("requires", []) if not which(r.replace("3", "")) and not which(r)]
+
+
+# =============================================================================
+# Rich UI helpers
+# =============================================================================
+
+_NO_COLOR = bool(os.environ.get("NO_COLOR"))
+
+def _use_color():
+    return sys.stdout.isatty() and not _NO_COLOR
+
+
+def print_panel(title, content, style="bold cyan"):
+    console.print(Panel(content, title=title, border_style=style))
+
+
+def print_success(text):
+    console.print(f"  ✅ {text}", style="bold green")
+
+
+def print_error(text):
+    console.print(f"  ❌ {text}", style="bold red")
+
+
+def print_warning(text):
+    console.print(f"  ⚠️  {text}", style="bold yellow")
+
+
+def print_info(text):
+    console.print(f"  ℹ️  {text}", style="dim")
+
+
+def print_step(step, total, text):
+    console.print(f"  [{step}/{total}] {text}", style="bold cyan")
+
+
+def print_agent_icon(agent_key):
+    agent = AGENTS.get(agent_key, {})
+    return agent.get("icon", "🤖")
+
+
+# =============================================================================
+# Rich UI helpers (line input — used by setup, auth, and non-TTY fallback)
+# =============================================================================
+
+def _prompt(text_str, default="", style="bold cyan"):
+    """Prompt the user for input, safely handling brackets in default values.
+    KeyboardInterrupt propagates up — NEVER caught here."""
+    prompt = Text()
+    prompt.append(f"  {text_str}", style=style)
+    if default:
+        prompt.append(f" [{default}]", style="dim")
+    prompt.append(": ", style=style)
+    try:
+        val = console.input(prompt).strip()
+    except EOFError:
+        return default
+    return val or default
+
+
+def _prompt_yes_no(text_str, default=True):
+    default_str = "Y/n" if default else "y/N"
+    resp = _prompt(f"{text_str} ({default_str})", "")
+    if not resp:
+        return default
+    return resp.lower().startswith("y")
+
+
+# =============================================================================
+# Raw terminal keypress reader — uses readchar library for cross-platform support
+# Falls back to line input if no TTY or readchar not available
+# =============================================================================
+
+def _read_key():
+    """Read a single keypress from stdin. Returns human-readable string.
+    Uses readchar for reliable cross-platform terminal input.
+    Returns: 'up','down','left','right','space','enter','tab','esc',
+             'backspace', 'delete', or the actual character pressed.
+    Returns None if stdin is not a TTY."""
+    if not sys.stdin.isatty():
+        return None
+    
+    if not HAS_READCHAR:
+        return None
+    
+    try:
+        k = readchar.readkey()
+    except KeyboardInterrupt:
+        raise
+    
+    if k == readchar.key.UP:
+        return 'up'
+    elif k == readchar.key.DOWN:
+        return 'down'
+    elif k == readchar.key.LEFT:
+        return 'left'
+    elif k == readchar.key.RIGHT:
+        return 'right'
+    elif k == readchar.key.ENTER:
+        return 'enter'
+    elif k == readchar.key.SPACE:
+        return 'space'
+    elif k == readchar.key.TAB:
+        return 'tab'
+    elif k == readchar.key.ESC:
+        return 'esc'
+    elif k == readchar.key.BACKSPACE:
+        return 'backspace'
+    elif k == readchar.key.DELETE:
+        return 'delete'
+    elif k == readchar.key.CTRL_C:
+        raise KeyboardInterrupt()
+    elif isinstance(k, str):
+        return k
+    return None
+
+
+# =============================================================================
+# ANSI rendering helpers (bypass Rich for raw terminal mode compatibility)
+# =============================================================================
+
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_RED = "\033[31m"
+_GREEN = "\033[32m"
+_YELLOW = "\033[33m"
+_BLUE = "\033[34m"
+_CYAN = "\033[36m"
+_WHITE = "\033[37m"
+_BG_BLUE = "\033[44m"
+_BG_DEFAULT = "\033[49m"
+
+def _ansi(text, *codes):
+    """Wrap text in ANSI codes, stripping them if NO_COLOR or not a TTY."""
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        # Strip any existing ANSI codes too
+        return re.sub(r'\033\[[0-9;]*m', '', text)
+    return "".join(codes) + text + _RESET
+
+
+# =============================================================================
+# Interactive picker — raw terminal rendering, NO Rich
+# =============================================================================
+
+def interactive_agent_picker(title="Select agents", preselect_installed=False):
+    """Arrow-key-navigable multi-select agent picker.
+    
+    Uses readchar for keyboard input and direct ANSI escape codes for rendering.
+    This avoids Rich's terminal state interference that breaks raw mode.
+    
+    Controls:
+      ↑/↓ or j/k — move cursor
+      Space        — toggle selection
+      Enter        — confirm and return selected
+      a            — select all
+      n            — deselect all
+      q/Esc        — cancel (return empty list)
+      Numbers 0-9  — jump to that item
+    """
+    agent_keys = list(AGENTS.keys())
+    n = len(agent_keys)
+    installed = {k for k in agent_keys if detect_agent_bin(k)}
+    
+    # Initialize selection
+    if preselect_installed:
+        selected = installed.copy()
+    else:
+        selected = set()
+    
+    cursor_pos = 0
+    
+    # Height for clearing — track how many lines we last rendered
+    last_height = 0
+    
+    while True:
+        # Build the menu as plain text lines (no Rich markup, just ANSI)
+        out_lines = []
+        
+        # Title
+        out_lines.append(_ansi(f"\n{title}", _BOLD, _CYAN))
+        out_lines.append(_ansi("  \u2191\u2193/jk = navigate  |  Space = toggle  |  Enter = confirm  |  a = all  |  n = none  |  q = cancel", _DIM))
+        out_lines.append("")
+        
+        for i in range(n):
+            agent = AGENTS[agent_keys[i]]
+            key = agent_keys[i]
+            is_cursor = (i == cursor_pos)
+            
+            # Build each line
+            num = f" {i+1:>2} "
+            
+            if is_cursor:
+                line = _ansi("\u2502" + num, _BG_BLUE, _BOLD, _WHITE)
+            else:
+                line = " " + _ansi(num, _DIM)
+            
+            if key in selected:
+                line += _ansi("[X]", _BOLD, _GREEN)
+            else:
+                line += _ansi("[ ]", _DIM)
+            
+            line += f" {agent['icon']} {agent['name']:<20}"
+            
+            if key in installed:
+                line += _ansi(" (installed)", _DIM)
+            
+            out_lines.append(line)
+        
+        out_lines.append("")
+        out_lines.append(f"  Selected: {len(selected)}/{n}  " + 
+                        (", ".join(sorted(selected)) if selected else "(none)"))
+        out_lines.append(_ansi(f"  Cursor: #{cursor_pos+1} {AGENTS[agent_keys[cursor_pos]]['name']}", _DIM))
+        
+        # Clear previous render by moving cursor up
+        if last_height > 0:
+            sys.stdout.write(f"\033[{last_height}A")
+        
+        # Write the new frame
+        output = "\n".join(out_lines)
+        sys.stdout.write(output + "\n")
+        sys.stdout.flush()
+        last_height = len(out_lines) + 1
+        
+        # Read input
+        ch = _read_key()
+        
+        if ch is None:
+            # Non-TTY or no readchar — degrade to line input  
+            print()
+            choice = _prompt("Action (enter=done, number=toggle, a=all, n=none, q=cancel)", "")
+            if choice == "":
+                return sorted(selected)
+            elif choice.lower() in ("q", "quit"):
+                return []
+            elif choice.lower() == "a":
+                selected = set(agent_keys)
+            elif choice.lower() == "n":
+                selected = set()
+            else:
+                try:
+                    idx = int(choice) - 1
+                    if 0 <= idx < n:
+                        key = agent_keys[idx]
+                        if key in selected:
+                            selected.discard(key)
+                        else:
+                            selected.add(key)
+                except ValueError:
+                    pass
+        elif ch in ('up', 'k'):
+            cursor_pos = max(0, cursor_pos - 1)
+        elif ch in ('down', 'j'):
+            cursor_pos = min(n - 1, cursor_pos + 1)
+        elif ch == 'space':
+            key = agent_keys[cursor_pos]
+            if key in selected:
+                selected.discard(key)
+            else:
+                selected.add(key)
+        elif ch == 'enter':
+            return sorted(selected)
+        elif ch in ('q', 'esc'):
+            return []
+        elif ch == 'a':
+            selected = set(agent_keys)
+        elif ch == 'n':
+            selected = set()
+        elif ch and ch.isdigit():
+            idx = int(ch) - 1
+            if 0 <= idx < n:
+                cursor_pos = idx
+
+
+def print_agent_table(agent_keys=None):
+    """Print a Rich table of agents and their status.
+    Auto-discovers install status, versions, and auth state from the real system."""
+    if agent_keys is None:
+        agent_keys = list(AGENTS.keys())
+
+    # Run full discovery to ensure fresh state
+    discover_and_persist()
+
+    config = load_config()
+
+    table = Table(title="AI Coding Agents", header_style="bold cyan")
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Agent", style="bold")
+    table.add_column("Vendor")
+    table.add_column("Status")
+    table.add_column("Version")
+    table.add_column("Auth")
+
+    for i, key in enumerate(agent_keys, 1):
+        agent = AGENTS[key]
+        agent_cfg = config.get("agents", {}).get(key, {})
+        installed = agent_cfg.get("installed", False) or detect_agent_bin(key)
+        version = agent_cfg.get("version") or detect_agent_version(key) or "—"
+        # Keep version short for table display — one line max
+        if isinstance(version, str) and len(version) > 40:
+            version = version[:37].rstrip() + "…"
+        auth_done = agent_cfg.get("auth_configured", False)
+        
+        if installed:
+            status = "[bold green]✓ installed[/bold green]"
+        else:
+            status = "[dim]not installed[/dim]"
+            version = "—"
+
+        if installed and auth_done:
+            auth_status = "[green]configured[/green]"
+        elif installed:
+            auth_status = "[yellow]needs auth[/yellow]"
+        else:
+            auth_status = "[dim]—[/dim]"
+
+        table.add_row(
+            str(i),
+            f"{agent['icon']} {agent['name']}",
+            agent["vendor"],
+            status,
+            version,
+            auth_status,
+        )
+
+    console.print(table)
+
+
+# =============================================================================
+# Install / Update / Uninstall
+# =============================================================================
+
+def do_install_safe(agent_keys, yes=False):
+    """Install agents with full KeyboardInterrupt handling."""
+    try:
+        do_install(agent_keys, yes)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⏹ Install interrupted.[/yellow]")
+        sys.exit(130)
+
+
+def do_install(agent_keys, yes=False):
+    """Install one or more agents."""
+    if not agent_keys:
+        try:
+            agent_keys = interactive_agent_picker("Select agents to install")
+        except KeyboardInterrupt:
+            console.print("\n[yellow]⏹ Cancelled.[/yellow]")
+            return
+    if not agent_keys:
+        print_warning("No agents selected.")
+        return
+
+    # Check prerequisites first
+    all_missing = set()
+    for key in agent_keys:
+        missing = check_prerequisites(key)
+        all_missing.update(missing)
+
+    if all_missing:
+        missing_str = ", ".join(sorted(all_missing))
+        print_warning(f"Missing prerequisites detected: {missing_str}")
+        if _use_color() and sys.stdin.isatty():
+            try:
+                if not _prompt_yes_no("Continue anyway?", False):
+                    return
+            except KeyboardInterrupt:
+                console.print("\n[yellow]⏹ Cancelled.[/yellow]")
+                return
+
+    config = load_config()
+    installed = []
+    failed = []
+
+    for i, key in enumerate(agent_keys, 1):
+        agent = AGENTS[key]
+        icon = agent["icon"]
+        cmd = agent["install"].get(_CURRENT_PLATFORM)
+
+        if not cmd:
+            print_error(f"No install command for {agent['name']} on {_CURRENT_PLATFORM}")
+            failed.append(key)
+            continue
+
+        if detect_agent_bin(key) and not yes:
+            print_info(f"{icon} {agent['name']} already installed — skipping")
+            config["agents"][key] = {
+                "installed": True,
+                "install_date": config["agents"].get(key, {}).get("install_date", time.strftime("%Y-%m-%d")),
+                "version": detect_agent_version(key),
+                "auth_configured": config["agents"].get(key, {}).get("auth_configured", False),
+            }
+            installed.append(key)
+            continue
+
+        print_step(i, len(agent_keys), f"Installing {icon} {agent['name']} — {agent['vendor']}")
+        print_info(f"  Command: [dim]{cmd}[/dim]")
+
+        if _use_color() and sys.stdin.isatty():
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                task = progress.add_task(f"Installing {agent['name']}...", total=None)
+                exit_code, stdout, stderr = run(cmd, timeout=600)
+                progress.update(task, completed=True)
+        else:
+            exit_code, stdout, stderr = run(cmd, timeout=600)
+
+        if exit_code == 0 and detect_agent_bin(key):
+            version = detect_agent_version(key)
+            print_success(f"{icon} {agent['name']} installed successfully! [dim]({version})[/dim]")
+
+            config["agents"][key] = {
+                "installed": True,
+                "install_date": time.strftime("%Y-%m-%d"),
+                "version": version,
+                "auth_configured": False,
+            }
+            installed.append(key)
+        else:
+            print_error(f"{icon} {agent['name']} installation failed")
+            if stderr:
+                print_info(f"  Error: {stderr[:200]}")
+            if stdout:
+                print_info(f"  Output: {stdout[:200]}")
+            failed.append(key)
+
+    save_config(config)
+
+    if installed:
+        console.print(f"\n[bold green]✅ Installed:[/bold green] {', '.join(installed)}")
+    if failed:
+        console.print(f"[bold red]❌ Failed:[/bold red] {', '.join(failed)}")
+
+    # Auth nudge
+    needs_auth = [k for k in installed if AGENTS[k].get("auth_type")]
+    if needs_auth:
+        console.print(f"\n[bold yellow]🔑 Some agents need authentication:[/bold yellow] {', '.join(needs_auth)}")
+        console.print("  Run [bold]aikit auth <agent>[/bold] for guided setup.")
+
+
+def do_update(agent_keys=None):
+    """Update installed agents."""
+    try:
+        _do_update_impl(agent_keys)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⏹ Update interrupted.[/yellow]")
+        sys.exit(130)
+
+
+def _do_update_impl(agent_keys):
+    config = load_config()
+
+    if agent_keys is None:
+        agent_keys = [k for k in AGENTS if detect_agent_bin(k)]
+        if not agent_keys:
+            print_warning("No agents installed. Run 'aikit install' first.")
+            return
+
+    console.print(f"[bold cyan]🔄 Updating {len(agent_keys)} agent(s)...[/bold cyan]\n")
+
+    updated = []
+    failed = []
+
+    for i, key in enumerate(agent_keys, 1):
+        agent = AGENTS[key]
+        icon = agent["icon"]
+
+        if not detect_agent_bin(key):
+            print_info(f"{icon} {agent['name']} — not installed, skipping")
+            continue
+
+        update_cmd = agent.get("update_cmd")
+        if not update_cmd:
+            print_info(f"{icon} {agent['name']} — no update command available")
+            continue
+
+        print_step(i, len(agent_keys), f"Updating {icon} {agent['name']}")
+        exit_code, stdout, stderr = run(update_cmd, timeout=300)
+
+        if exit_code == 0:
+            new_version = detect_agent_version(key)
+            print_success(f"{icon} {agent['name']} updated [dim]({new_version})[/dim]")
+            config["agents"][key] = {
+                **config["agents"].get(key, {}),
+                "installed": True,
+                "version": new_version,
+            }
+            updated.append(key)
+        else:
+            print_error(f"{icon} {agent['name']} update failed: {stderr[:100]}")
+            failed.append(key)
+
+    save_config(config)
+
+    if updated:
+        console.print(f"\n[bold green]✅ Updated:[/bold green] {', '.join(updated)}")
+    if failed:
+        console.print(f"[bold red]❌ Failed:[/bold red] {', '.join(failed)}")
+
+
+def do_uninstall(agent_keys, yes=False):
+    """Uninstall agents."""
+    try:
+        _do_uninstall_impl(agent_keys, yes)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⏹ Uninstall interrupted.[/yellow]")
+        sys.exit(130)
+
+
+def _do_uninstall_impl(agent_keys, yes):
+    if not agent_keys:
+        installed = [k for k in AGENTS if detect_agent_bin(k)]
+        if not installed:
+            print_warning("No agents installed.")
+            return
+        try:
+            agent_keys = interactive_agent_picker("Select agents to uninstall", preselect_installed=True)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]⏹ Cancelled.[/yellow]")
+            return
+
+    if not agent_keys:
+        return
+
+    config = load_config()
+
+    for i, key in enumerate(agent_keys, 1):
+        agent = AGENTS[key]
+        icon = agent["icon"]
+
+        if not detect_agent_bin(key):
+            print_info(f"{icon} {agent['name']} — not installed")
+            continue
+
+        uninstall_cmd = agent.get("uninstall_cmd")
+        if uninstall_cmd:
+            print_step(i, len(agent_keys), f"Uninstalling {icon} {agent['name']}")
+            exit_code, stdout, stderr = run(uninstall_cmd, timeout=120)
+            if exit_code == 0:
+                print_success(f"{icon} {agent['name']} uninstalled")
+            else:
+                print_warning(f"{icon} {agent['name']} uninstall may be incomplete: {stderr[:100]}")
+        else:
+            print_info(f"{icon} {agent['name']} has no automated uninstall — remove manually")
+            print_info(f"  Typically: rm $(which {agent['bin']})")
+
+        config["agents"].pop(key, None)
+
+    save_config(config)
+    console.print(f"\n[bold green]✅ Uninstalled:[/bold green] {', '.join(agent_keys)}")
+
+
+# =============================================================================
+# Auth — auto-discovery + manual setup
+# =============================================================================
+
+def _real_home():
+    """Resolve the real user home, stripping Hermes profile overrides."""
+    h = Path(os.environ.get("HOME", "/root")).resolve()
+    parts = h.parts
+    if ".hermes" in parts:
+        idx = parts.index(".hermes")
+        return Path(*parts[:idx]) if idx > 0 else Path("/")
+    return h
+
+
+_REAL_HOME = _real_home()
+
+
+def discover_auth(agent_key):
+    """Auto-detect whether an agent is authenticated by checking filesystem,
+    environment variables, and credential files.
+    Returns dict: {auth_configured: bool, method: str, source: str}
+    """
+    agent = AGENTS.get(agent_key)
+    if not agent:
+        return {"auth_configured": False, "method": "unknown", "source": ""}
+    
+    auth_type = agent.get("auth_type", "")
+    env_vars = agent.get("auth_env_vars", [])
+    
+    # 1. Check environment variables (current process — most reliable)
+    for var in env_vars:
+        if os.environ.get(var):
+            return {"auth_configured": True, "method": "env_var", "source": f"${var}"}
+    
+    # 2. Check agent-specific credential files (use real home, not Hermes-overridden home)
+    home = _REAL_HOME
+    
+    # Claude Code: ~/.claude.json has oauthAccount, ~/.claude/.credentials.json has OAuth tokens
+    if agent_key == "claude":
+        # Primary: ~/.claude.json (contains oauthAccount, userID, hasCompletedOnboarding)
+        claude_json = home / ".claude.json"
+        if claude_json.exists() and claude_json.stat().st_size > 0:
+            try:
+                d = json.loads(claude_json.read_text())
+                if d.get("oauthAccount") or d.get("hasCompletedOnboarding") or d.get("userID"):
+                    return {"auth_configured": True, "method": "config_file", "source": str(claude_json)}
+            except (json.JSONDecodeError, OSError):
+                pass
+        # Secondary: ~/.claude/.credentials.json (raw OAuth tokens)
+        for cred_path in [home / ".claude" / ".credentials.json", home / ".claude" / "credentials.json"]:
+            if cred_path.exists() and cred_path.stat().st_size > 0:
+                try:
+                    creds = json.loads(cred_path.read_text())
+                    if creds:
+                        for v in creds.values():
+                            if isinstance(v, dict) and any(k in v for k in ("accessToken", "refreshToken")):
+                                return {"auth_configured": True, "method": "cred_file", "source": str(cred_path)}
+                except (json.JSONDecodeError, OSError):
+                    pass
+    
+    # Cursor CLI: ~/.cursor/cli-config.json has authInfo block
+    if agent_key == "cursor":
+        cfg_path = home / ".cursor" / "cli-config.json"
+        if cfg_path.exists():
+            try:
+                cfg = json.loads(cfg_path.read_text())
+                ai = cfg.get("authInfo", {})
+                if ai.get("email") or ai.get("userId"):
+                    return {"auth_configured": True, "method": "config_file", "source": str(cfg_path)}
+            except (json.JSONDecodeError, OSError):
+                pass
+    
+    # Hermes: ~/.hermes/.env or profile .env (API keys)
+    if agent_key == "hermes":
+        for env_path in [
+            home / ".hermes" / ".env",
+            home / ".hermes" / "profiles" / "coder" / ".env",
+        ]:
+            if env_path.exists():
+                try:
+                    content = env_path.read_text()
+                    if 'ANTHROPIC_API_KEY=' in content or 'OPENROUTER_API_KEY=' in content:
+                        return {"auth_configured": True, "method": "env_file", "source": str(env_path)}
+                except OSError:
+                    pass
+    
+    # Codex: ~/.codex/auth.json
+    if agent_key == "codex":
+        auth_file = home / ".codex" / "auth.json"
+        if auth_file.exists() and auth_file.stat().st_size > 0:
+            return {"auth_configured": True, "method": "cred_file", "source": str(auth_file)}
+    
+    # Kilo CLI: ~/.config/kilo/opencode.json(jsonc), ~/.kilo/config.json, opencode config
+    if agent_key == "kilo":
+        for cfg_path in [
+            home / ".config" / "kilo" / "opencode.json",
+            home / ".config" / "kilo" / "opencode.jsonc",
+            home / ".kilo" / "config.json",
+            home / ".config" / "opencode" / "opencode.json",
+            home / ".config" / "opencode" / "opencode.jsonc",
+        ]:
+            if cfg_path.exists():
+                try:
+                    cfg_text = cfg_path.read_text()
+                    if any(pat in cfg_text for pat in ("apiKey", "api_key", "provider", "ANTHROPIC_API_KEY", "OPENROUTER")):
+                        return {"auth_configured": True, "method": "config_file", "source": str(cfg_path)}
+                except OSError:
+                    pass
+        # Kilo also stores auth at the project level — check current dir too
+        for proj_path in [Path.cwd() / "opencode.json", Path.cwd() / "opencode.jsonc",
+                          Path.cwd() / ".opencode" / "opencode.json"]:
+            if proj_path.exists():
+                try:
+                    cfg_text = proj_path.read_text()
+                    if any(pat in cfg_text for pat in ("apiKey", "api_key", "provider")):
+                        return {"auth_configured": True, "method": "project_config", "source": str(proj_path)}
+                except OSError:
+                    pass
+    
+    # OpenCode: ~/.config/opencode/opencode.json or ~/.opencode/config.json
+    if agent_key == "opencode":
+        for cfg_path in [
+            home / ".config" / "opencode" / "opencode.json",
+            home / ".config" / "opencode" / "opencode.jsonc",
+            home / ".opencode" / "config.json",
+        ]:
+            if cfg_path.exists():
+                try:
+                    cfg_text = cfg_path.read_text()
+                    if any(pat in cfg_text for pat in ("apiKey", "api_key", "provider", "OPENROUTER", "ANTHROPIC")):
+                        return {"auth_configured": True, "method": "config_file", "source": str(cfg_path)}
+                except OSError:
+                    pass
+    
+    # GitHub Copilot: gh CLI auth or GITHUB_TOKEN/GH_TOKEN
+    if agent_key == "copilot":
+        gh_hosts = home / ".config" / "gh" / "hosts.yml"
+        if gh_hosts.exists():
+            content = gh_hosts.read_text()
+            if "token:" in content:
+                return {"auth_configured": True, "method": "gh_cli", "source": str(gh_hosts)}
+    
+    # Grok Build: ~/.grok/config.toml (xAI) + browser OAuth token
+    if agent_key == "grok":
+        cfg_path = home / ".grok" / "config.toml"
+        if cfg_path.exists():
+            try:
+                content = cfg_path.read_text()
+                if content.strip():
+                    return {"auth_configured": True, "method": "config_file", "source": str(cfg_path)}
+            except OSError:
+                pass
+    
+    # Antigravity: Google OAuth — check ~/.agy/ or gcloud credentials
+    if agent_key == "antigravity":
+        for agy_path in [home / ".agy", home / ".antigravity", home / ".config" / "antigravity"]:
+            if agy_path.exists():
+                try:
+                    files = list(agy_path.glob("*"))
+                    if files:
+                        return {"auth_configured": True, "method": "config_dir", "source": str(agy_path)}
+                except OSError:
+                    pass
+        # Also check gcloud
+        for tok in [home / ".config" / "gcloud" / "application_default_credentials.json"]:
+            if tok.exists() and tok.stat().st_size > 0:
+                return {"auth_configured": True, "method": "gcloud_creds", "source": str(tok)}
+    
+    # Pi Coding Agent: ~/.pi or ~/.config/pi
+    if agent_key == "pi":
+        for pi_path in [
+            home / ".pi",
+            home / ".config" / "pi",
+            home / ".earendil",
+        ]:
+            if pi_path.is_dir():
+                try:
+                    files = list(pi_path.glob("*"))
+                    if files:
+                        return {"auth_configured": True, "method": "config_dir", "source": str(pi_path)}
+                except OSError:
+                    pass
+    
+    # Aider: Python tool with API keys via env vars already covered above
+    
+    # Blackbox: npm tool — ~/.blackboxai or npm config
+    if agent_key == "blackbox":
+        bb_path = home / ".blackboxai"
+        if bb_path.is_dir():
+            return {"auth_configured": True, "method": "config_dir", "source": str(bb_path)}
+        bb_config = home / ".blackboxcli"
+        if bb_config.is_dir():
+            return {"auth_configured": True, "method": "config_dir", "source": str(bb_config)}
+    
+    # Qwen: ~/.qwen or ~/.config/qwen
+    if agent_key == "qwen":
+        for qp in [home / ".qwen", home / ".config" / "qwen"]:
+            if qp.is_dir():
+                return {"auth_configured": True, "method": "config_dir", "source": str(qp)}
+    
+    # Kimi Code: ~/.kimi or ~/.kimi-code
+    if agent_key == "kimi":
+        for kp in [home / ".kimi", home / ".kimi-code", home / ".config" / "kimi"]:
+            if kp.is_dir() or (kp.exists() and kp.stat().st_size > 0):
+                return {"auth_configured": True, "method": "config_path", "source": str(kp)}
+    
+    # Kiro: ~/.kiro
+    if agent_key == "kiro":
+        for kp in [home / ".kiro", home / ".config" / "kiro"]:
+            if kp.is_dir():
+                return {"auth_configured": True, "method": "config_dir", "source": str(kp)}
+    
+    # OpenClaw: ~/.openclaw or ~/.claw
+    if agent_key == "openclaw":
+        for cp in [home / ".openclaw", home / ".claw", home / ".config" / "openclaw"]:
+            if cp.is_dir() or (cp.exists() and cp.stat().st_size > 0):
+                return {"auth_configured": True, "method": "config_path", "source": str(cp)}
+    
+    # For agents with auth_env_vars, check shell profile files
+    if env_vars and not auth_type == "oauth_browser":
+        for profile in [home / ".bashrc", home / ".zshrc", home / ".profile"]:
+            if profile.exists():
+                try:
+                    content = profile.read_text()
+                    for var in env_vars:
+                        if f"{var}=" in content or f"export {var}" in content:
+                            return {"auth_configured": True, "method": "shell_profile", "source": str(profile)}
+                except OSError:
+                    pass
+    
+    # 3. OAuth-based agents are hard to auto-detect — trust config file if previously marked
+    config = load_config()
+    agent_cfg = config.get("agents", {}).get(agent_key, {})
+    if agent_cfg.get("auth_configured"):
+        return {"auth_configured": True, "method": "previously_confirmed", "source": "~/.aikit/config.json"}
+    
+    return {"auth_configured": False, "method": "", "source": ""}
+
+
+def discover_and_persist():
+    """Run full system discovery: detect installed agents, versions, and auth state.
+    Persists all findings to config. Called automatically by doctor, list, and install."""
+    config = load_config()
+    agents_cfg = config.get("agents", {})
+    changed = False
+    
+    for key in AGENTS:
+        current = agents_cfg.get(key, {})
+        installed = detect_agent_bin(key)
+        version = detect_agent_version(key) if installed else None
+        auth_result = discover_auth(key)
+        
+        new_entry = {
+            "installed": installed,
+            "version": version,
+            "auth_configured": auth_result.get("auth_configured", False),
+            "auth_method": auth_result.get("method", ""),
+            "auth_source": auth_result.get("source", ""),
+            "install_date": current.get("install_date", ""),
+            "auth_date": current.get("auth_date", ""),
+        }
+        
+        # Merge: keep existing dates if we had them, merge auth info
+        merged = {**current, **new_entry}
+        # Preserve previous install_date if we had one and bin is still there
+        if not installed:
+            merged["install_date"] = ""
+            merged["version"] = None
+        if current.get("install_date") and installed:
+            merged["install_date"] = current["install_date"]
+        if current.get("auth_date") and auth_result.get("auth_configured"):
+            merged["auth_date"] = current["auth_date"]
+        
+        if merged != current:
+            agents_cfg[key] = merged
+            changed = True
+    
+    if changed:
+        config["agents"] = agents_cfg
+        save_config(config)
+
+
+def do_auth(agent_key):
+    """Guide user through auth for an agent."""
+    try:
+        _do_auth_impl(agent_key)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⏹ Auth setup cancelled.[/yellow]")
+        sys.exit(130)
+
+
+def _do_auth_impl(agent_key):
+    agent = AGENTS.get(agent_key)
+    if not agent:
+        print_error(f"Unknown agent: {agent_key}")
+        return
+
+    icon = agent["icon"]
+
+    if not detect_agent_bin(agent_key):
+        print_error(f"{icon} {agent['name']} is not installed. Run 'aikit install {agent_key}' first.")
+        return
+
+    auth_type = agent.get("auth_type", "unknown")
+    auth_note = agent.get("auth_note", "")
+    env_vars = agent.get("auth_env_vars", [])
+    
+    # Check if already authenticated
+    existing = discover_auth(agent_key)
+    if existing["auth_configured"]:
+        console.print(f"\n[bold cyan]🔑 {icon} {agent['name']}[/bold cyan]")
+        print_success(f"Already authenticated! [dim](source: {existing['source']})[/dim]")
+        # Ensure config is updated
+        config = load_config()
+        config["agents"][agent_key] = {
+            **config["agents"].get(agent_key, {}),
+            "auth_configured": True,
+            "auth_date": config["agents"].get(agent_key, {}).get("auth_date", time.strftime("%Y-%m-%d")),
+            "auth_method": existing["method"],
+            "auth_source": existing["source"],
+        }
+        save_config(config)
+        return
+
+    console.print(f"\n[bold cyan]🔑 Authentication Setup: {icon} {agent['name']}[/bold cyan]")
+    console.print(f"  Auth type: [bold]{auth_type}[/bold]")
+    console.print(f"  Homepage:  {agent['homepage']}")
+
+    if auth_note:
+        console.print(f"\n  [bold yellow]📝 {auth_note}[/bold yellow]")
+
+    if auth_type == "oauth_browser":
+        console.print(f"\n  [dim]This agent uses OAuth. Run '{agent['bin']}' and complete the browser login.[/dim]")
+        if _use_color() and sys.stdin.isatty():
+            try:
+                if _prompt_yes_no(f"Launch '{agent['bin']}' now to authenticate?", True):
+                    os.system(agent["bin"])
+            except KeyboardInterrupt:
+                raise
+
+    elif auth_type in ("api_key", "provider_keys", "pat_or_oauth", "oauth_portal", "account_or_byok", "oauth_onboard"):
+        if env_vars:
+            console.print(f"\n  [bold]Environment variables to set:[/bold]")
+            for var in env_vars:
+                current = os.environ.get(var, "")
+                if current:
+                    masked = current[:4] + "***" + current[-4:] if len(current) > 8 else "***"
+                    console.print(f"    {var} = [green]{masked}[/green] (already set)")
+                else:
+                    console.print(f"    {var} = [dim](not set)[/dim]")
+                    if _use_color() and sys.stdin.isatty():
+                        val = _prompt(f"  Enter value for {var} (or Enter to skip)", "")
+                        if val:
+                            _save_env_var(var, val)
+                            console.print(f"    [green]✓ Saved {var}[/green]")
+
+    elif auth_type == "subscription":
+        console.print(f"\n  [dim]This agent requires a paid subscription. Visit {agent['homepage']} to subscribe.[/dim]")
+
+    # Mark as auth-attempted with real discovery
+    discover_and_persist()
+    config = load_config()
+    config["agents"][agent_key] = {
+        **config["agents"].get(agent_key, {}),
+        "auth_configured": True,
+        "auth_date": time.strftime("%Y-%m-%d"),
+    }
+    save_config(config)
+
+    print_success(f"{icon} {agent['name']} auth setup complete!")
+
+
+def _save_env_var(var, value):
+    """Save an env var to shell profile and current session."""
+    os.environ[var] = value
+
+    # Save to persistent locations
+    for profile in [
+        os.path.expanduser("~/.bashrc"),
+        os.path.expanduser("~/.zshrc"),
+        os.path.expanduser("~/.profile"),
+    ]:
+        if os.path.exists(profile):
+            try:
+                content = Path(profile).read_text()
+                if f"export {var}=" not in content:
+                    with open(profile, "a") as f:
+                        f.write(f"\n# aikit — {var}\nexport {var}={shlex.quote(value)}\n")
+            except OSError:
+                pass
+
+    # Also save to aikit config
+    config = load_config()
+    config.setdefault("env_vars", {})[var] = True
+    save_config(config)
+
+
+# =============================================================================
+# Doctor
+# =============================================================================
+
+def do_doctor():
+    """Diagnose environment and agent health.
+    Auto-discovers and persists all agent states to config."""
+    # Run full discovery first — ensure config reflects reality
+    discover_and_persist()
+    
+    console.print(Panel("[bold]🩺 aikit Doctor[/bold] — diagnosing environment and agents", border_style="cyan"))
+
+    # System
+    console.print("\n[bold]System[/bold]")
+    print_info(f"Platform: {_CURRENT_PLATFORM} ({platform.release()})")
+    print_info(f"Python:   {sys.version.split()[0]}")
+    print_info(f"Shell:    {os.environ.get('SHELL', 'unknown')}")
+    print_info(f"aikit:    v{__version__}")
+
+    # Prerequisites
+    console.print("\n[bold]Prerequisites[/bold]")
+    for tool in ["curl", "git", "node", "npm", "python3", "pip"]:
+        status = "[green]✓[/green]" if which(tool) else "[red]✗[/red]"
+        version = ""
+        if which(tool):
+            _, stdout, _ = run(f"{tool} --version 2>&1", timeout=5)
+            version = f" — {stdout.split(chr(10))[0][:60]}" if stdout else ""
+        console.print(f"  {status} {tool}{version}")
+
+    # Agents
+    total = len(AGENTS)
+    console.print(f"\n[bold]Agents ({total} total)[/bold]")
+    installed_count = 0
+    auth_count = 0
+    config = load_config()
+
+    for key in AGENTS:
+        agent = AGENTS[key]
+        agent_cfg = config.get("agents", {}).get(key, {})
+        installed = agent_cfg.get("installed", False) or detect_agent_bin(key)
+        version = agent_cfg.get("version") or detect_agent_version(key) if installed else None
+        auth = agent_cfg.get("auth_configured", False)
+
+        if installed:
+            installed_count += 1
+            if auth:
+                auth_count += 1
+            status = "[green]✓[/green]"
+            vstr = f" — {version}" if version else ""
+            astr = " [green]auth✓[/green]" if auth else " [yellow]needs auth[/yellow]"
+            console.print(f"  {status} {agent['icon']} {agent['name']}{vstr}{astr}")
+        else:
+            console.print(f"  [dim]  {agent['icon']} {agent['name']} — not installed[/dim]")
+
+    console.print(f"\n[bold]Summary:[/bold] {installed_count}/{total} installed, {auth_count} authenticated")
+
+    # Issues
+    console.print("\n[bold]Issues[/bold]")
+    issues = 0
+
+    if not which("curl"):
+        print_warning("curl not found — required for most install scripts")
+        issues += 1
+    if not which("node") or not which("npm"):
+        print_warning("Node.js/npm not found — required for npm-based agents")
+        issues += 1
+    if not which("git"):
+        print_warning("git not found — required by some agents")
+        issues += 1
+
+    if issues == 0:
+        print_success("No issues detected")
+    else:
+        print_info(f"  {issues} issue(s) found. Install missing prerequisites first.")
+
+
+# =============================================================================
+# Config management
+# =============================================================================
+
+def do_config_list():
+    """Show current config (with secrets masked)."""
+    config = load_config()
+
+    def mask_secrets(obj):
+        if isinstance(obj, dict):
+            return {
+                k: ("***" if k in ("api_key", "apikey", "key", "token", "secret") and isinstance(v, str) and v
+                    else mask_secrets(v) if isinstance(v, (dict, list)) else v)
+                for k, v in obj.items()
+            }
+        return obj
+
+    safe = mask_secrets(config)
+    console.print_json(json.dumps(safe))
+
+
+def do_config_get(key_path):
+    config = load_config()
+    val = _config_get_nested(config, key_path)
+    if val is None:
+        print_warning(f"No config key: {key_path}")
+    else:
+        console.print(json.dumps(val, indent=2))
+
+
+def do_config_set(key_path, value):
+    config = load_config()
+    _config_set_nested(config, key_path, value)
+    save_config(config)
+    print_success(f"Set {key_path} = {value}")
+
+
+# =============================================================================
+# Setup wizard
+# =============================================================================
+
+def do_setup():
+    """Interactive first-run wizard with graceful KeyboardInterrupt handling."""
+    console.print(Panel.fit(
+        f"[bold]🤖 Welcome to aikit v{__version__}![/bold]\n\n"
+        f"aikit installs and manages {len(AGENTS)} AI coding agent CLIs.\n"
+        "Let's get you set up in a few steps.\n\n"
+        "[dim]Press Ctrl-C at any time to cancel.[/dim]",
+        border_style="cyan"
+    ))
+
+    try:
+        # Step 1: Prerequisites
+        console.print("\n[bold cyan]Step 1: Prerequisites[/bold cyan]")
+        missing_prereqs = []
+        for tool in ["curl", "node", "npm", "git", "python3", "pip"]:
+            if which(tool):
+                print_success(f"{tool} — found")
+            else:
+                print_warning(f"{tool} — missing")
+                missing_prereqs.append(tool)
+
+        if missing_prereqs:
+            console.print(f"\n[yellow]Install missing tools: {', '.join(missing_prereqs)}[/yellow]")
+            console.print("[dim]Then re-run 'aikit setup'.[/dim]")
+
+        # Step 2: Multi-select agents
+        console.print("\n[bold cyan]Step 2: Choose agents to install[/bold cyan]")
+        selected = interactive_agent_picker("Select AI coding agents to install — use Space to toggle, Enter to confirm")
+
+        if not selected:
+            console.print("\n[yellow]No agents selected. You can install later with 'aikit install'.[/yellow]")
+
+        if selected:
+            console.print(f"\n[bold]Selected ({len(selected)}):[/bold] {', '.join(selected)}")
+            do_install(selected)
+
+        # Step 3: Auth
+        if selected:
+            console.print("\n[bold cyan]Step 3: Authentication[/bold cyan]")
+            for key in selected:
+                if AGENTS[key].get("auth_env_vars"):
+                    console.print(f"\n{AGENTS[key]['icon']} {AGENTS[key]['name']}:")
+                    _do_auth_impl(key)
+
+        SETUP_MARKER.touch()
+        console.print(Panel("[bold green]✅ Setup complete![/bold green]\nRun 'aikit list' to see your agents.", border_style="green"))
+
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⏹ Setup cancelled.[/yellow]")
+        try:
+            if _prompt_yes_no("Save partial config?", True):
+                SETUP_MARKER.touch()
+        except (KeyboardInterrupt, EOFError):
+            pass
+        sys.exit(130)
+
+
+# =============================================================================
+# Web Dashboard (Flask)
+# =============================================================================
+
+def create_flask_app():
+    """Create the Flask web dashboard app."""
+    try:
+        from flask import Flask, jsonify, request
+    except ImportError:
+        console.print("[bold red]Flask is not installed. Run: pip install flask[/bold red]")
+        sys.exit(1)
+    import threading
+
+    app = Flask(__name__)
+
+    # ---- API Routes ----
+
+    @app.route("/api/agents")
+    def api_agents():
+        discover_and_persist()
+        config = load_config()
+        result = []
+        for key in sorted(AGENTS.keys()):
+            agent = AGENTS[key]
+            agent_cfg = config.get("agents", {}).get(key, {})
+            installed = agent_cfg.get("installed", False) or detect_agent_bin(key)
+            version = agent_cfg.get("version") or detect_agent_version(key) if installed else None
+            result.append({
+                "key": key,
+                "name": agent["name"],
+                "vendor": agent["vendor"],
+                "icon": agent["icon"],
+                "homepage": agent["homepage"],
+                "installed": installed,
+                "version": version,
+                "auth_configured": agent_cfg.get("auth_configured", False),
+                "auth_type": agent.get("auth_type", "unknown"),
+                "bin": agent["bin"],
+                "tags": agent.get("tags", []),
+            })
+        return jsonify(result)
+
+    @app.route("/api/agents/<agent_key>", methods=["GET"])
+    def api_agent_detail(agent_key):
+        if agent_key not in AGENTS:
+            return jsonify({"error": "Unknown agent"}), 404
+        agent = AGENTS[agent_key]
+        installed = detect_agent_bin(agent_key)
+        version = detect_agent_version(agent_key) if installed else None
+        config = load_config()
+        agent_cfg = config.get("agents", {}).get(agent_key, {})
+        return jsonify({
+            "key": agent_key,
+            "name": agent["name"],
+            "vendor": agent["vendor"],
+            "icon": agent["icon"],
+            "homepage": agent["homepage"],
+            "install_cmd": agent["install"].get(_CURRENT_PLATFORM, ""),
+            "installed": installed,
+            "version": version,
+            "auth_configured": agent_cfg.get("auth_configured", False),
+            "auth_type": agent.get("auth_type", "unknown"),
+            "auth_env_vars": agent.get("auth_env_vars", []),
+            "auth_note": agent.get("auth_note", ""),
+            "bin": agent["bin"],
+            "tags": agent.get("tags", []),
+            "requires": agent.get("requires", []),
+        })
+
+    @app.route("/api/install/<agent_key>", methods=["POST"])
+    def api_install(agent_key):
+        if agent_key not in AGENTS:
+            return jsonify({"error": "Unknown agent"}), 404
+        agent = AGENTS[agent_key]
+        cmd = agent["install"].get(_CURRENT_PLATFORM, "")
+        if not cmd:
+            return jsonify({"error": f"No install command for {_CURRENT_PLATFORM}"}), 400
+
+        exit_code, stdout, stderr = run(cmd, timeout=600)
+        success = exit_code == 0 and detect_agent_bin(agent_key)
+
+        if success:
+            config = load_config()
+            config["agents"][agent_key] = {
+                "installed": True,
+                "install_date": time.strftime("%Y-%m-%d"),
+                "version": detect_agent_version(agent_key),
+                "auth_configured": False,
+            }
+            save_config(config)
+
+        return jsonify({
+            "success": success,
+            "exit_code": exit_code,
+            "stdout": stdout[:500] if stdout else "",
+            "stderr": stderr[:500] if stderr else "",
+        })
+
+    @app.route("/api/update/<agent_key>", methods=["POST"])
+    def api_update(agent_key):
+        if agent_key not in AGENTS:
+            return jsonify({"error": "Unknown agent"}), 404
+        agent = AGENTS[agent_key]
+        update_cmd = agent.get("update_cmd")
+        if not update_cmd:
+            return jsonify({"error": "No update command"}), 400
+
+        exit_code, stdout, stderr = run(update_cmd, timeout=300)
+        success = exit_code == 0
+        if success:
+            config = load_config()
+            config["agents"][agent_key] = {
+                **config["agents"].get(agent_key, {}),
+                "version": detect_agent_version(agent_key),
+            }
+            save_config(config)
+
+        return jsonify({
+            "success": success,
+            "exit_code": exit_code,
+            "stdout": stdout[:500] if stdout else "",
+            "stderr": stderr[:500] if stderr else "",
+        })
+
+    @app.route("/api/doctor")
+    def api_doctor():
+        issues = []
+        if not which("curl"):
+            issues.append("curl not found")
+        if not which("node") or not which("npm"):
+            issues.append("Node.js/npm not found")
+        if not which("git"):
+            issues.append("git not found")
+
+        prereqs = {}
+        for tool in ["curl", "git", "node", "npm", "python3", "pip"]:
+            prereqs[tool] = which(tool)
+
+        return jsonify({
+            "platform": _CURRENT_PLATFORM,
+            "python_version": sys.version.split()[0],
+            "prerequisites": prereqs,
+            "issues": issues,
+            "installed_count": sum(1 for k in AGENTS if detect_agent_bin(k)),
+            "total_agents": len(AGENTS),
+        })
+
+    @app.route("/api/config", methods=["GET", "POST"])
+    def api_config():
+        if request.method == "POST":
+            try:
+                new_config = request.get_json()
+                save_config(new_config)
+                return jsonify({"ok": True})
+            except Exception as e:
+                return jsonify({"error": str(e)}), 400
+
+        config = load_config()
+        def mask(obj):
+            if isinstance(obj, dict):
+                return {k: ("***" if k in ("api_key", "apikey", "key", "token") and v else mask(v))
+                        for k, v in obj.items()}
+            return obj
+        return jsonify(mask(config))
+
+    # ---- Static HTML ----
+
+    @app.route("/")
+    def index():
+        agent_rows = ""
+        for key in AGENTS:
+            a = AGENTS[key]
+            installed = detect_agent_bin(key)
+            status_cls = "installed" if installed else "not-installed"
+            status_text = "✓ Installed" if installed else "Not Installed"
+            agent_rows += f"""
+            <tr class="{status_cls}" data-agent="{key}">
+                <td>{a['icon']}</td>
+                <td><strong>{a['name']}</strong></td>
+                <td>{a['vendor']}</td>
+                <td><span class="badge {status_cls}">{status_text}</span></td>
+                <td>
+                    <button class="btn btn-install" onclick="installAgent('{key}')" {"disabled" if installed else ""}>Install</button>
+                    <button class="btn btn-update" onclick="updateAgent('{key}')" {"disabled" if not installed else ""}>Update</button>
+                </td>
+            </tr>"""
+
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>aikit v{__version__} — AI Coding Agent Manager</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }}
+        .container {{ max-width: 1200px; margin: 0 auto; }}
+        h1 {{ color: #58a6ff; margin-bottom: 10px; font-size: 28px; }}
+        .subtitle {{ color: #8b949e; margin-bottom: 30px; }}
+        .stats {{ display: flex; gap: 20px; margin-bottom: 30px; }}
+        .stat {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px 24px; text-align: center; min-width: 120px; }}
+        .stat-value {{ font-size: 32px; font-weight: bold; color: #58a6ff; }}
+        .stat-label {{ color: #8b949e; font-size: 14px; margin-top: 4px; }}
+        table {{ width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }}
+        th {{ background: #21262d; padding: 12px 16px; text-align: left; font-weight: 600; color: #58a6ff; border-bottom: 1px solid #30363d; }}
+        td {{ padding: 12px 16px; border-bottom: 1px solid #21262d; }}
+        tr:hover {{ background: #1c2128; }}
+        .badge {{ display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }}
+        .badge.installed {{ background: #1a3a2a; color: #3fb950; }}
+        .badge.not-installed {{ background: #21262d; color: #8b949e; }}
+        .btn {{ padding: 6px 14px; border: 1px solid #30363d; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; background: #21262d; color: #c9d1d9; transition: all 0.2s; }}
+        .btn:hover:not(:disabled) {{ background: #30363d; }}
+        .btn:disabled {{ opacity: 0.4; cursor: not-allowed; }}
+        .btn-install:not(:disabled) {{ background: #1a3a2a; border-color: #3fb950; color: #3fb950; }}
+        .btn-install:not(:disabled):hover {{ background: #2a5a3a; }}
+        .log {{ background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-top: 20px; font-family: 'Menlo', 'Consolas', monospace; font-size: 13px; max-height: 300px; overflow-y: auto; white-space: pre-wrap; }}
+        .log .success {{ color: #3fb950; }}
+        .log .error {{ color: #f85149; }}
+        .actions {{ margin-bottom: 20px; display: flex; gap: 10px; }}
+        .refresh-btn {{ background: #21262d; border: 1px solid #30363d; color: #58a6ff; padding: 8px 18px; border-radius: 6px; cursor: pointer; font-size: 14px; }}
+        .refresh-btn:hover {{ background: #30363d; }}
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>🤖 aikit v{__version__}</h1>
+    <p class="subtitle">AI Coding Agent CLI Installer &amp; Manager — {len(AGENTS)} agents available</p>
+
+    <div class="stats">
+        <div class="stat"><div class="stat-value" id="installedCount">—</div><div class="stat-label">Installed</div></div>
+        <div class="stat"><div class="stat-value" id="totalCount">{len(AGENTS)}</div><div class="stat-label">Total Agents</div></div>
+        <div class="stat"><div class="stat-value">{_CURRENT_PLATFORM}</div><div class="stat-label">Platform</div></div>
+    </div>
+
+    <div class="actions">
+        <button class="refresh-btn" onclick="location.reload()">🔄 Refresh Status</button>
+        <button class="refresh-btn" onclick="fetchDoctor()">🩺 Run Doctor</button>
+    </div>
+
+    <table>
+        <thead>
+            <tr><th></th><th>Agent</th><th>Vendor</th><th>Status</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="agentTable">
+            {agent_rows}
+        </tbody>
+    </table>
+
+    <div class="log" id="log">Ready. Click Install or Update to begin.</div>
+</div>
+
+<script>
+function log(msg, cls) {{
+    const el = document.getElementById('log');
+    const span = cls ? `<span class="${{cls}}">${{msg}}</span>` : msg;
+    el.innerHTML = span + '\\n' + el.innerHTML;
+}}
+
+async function installAgent(key) {{
+    log(`📦 Installing ${{key}}...`);
+    try {{
+        const resp = await fetch(`/api/install/${{key}}`, {{ method: 'POST' }});
+        const data = await resp.json();
+        if (data.success) {{
+            log(`✅ ${{key}} installed successfully!`, 'success');
+            location.reload();
+        }} else {{
+            log(`❌ ${{key}} install failed (exit ${{data.exit_code}}): ${{data.stderr || data.stdout || 'unknown'}}`, 'error');
+        }}
+    }} catch(e) {{
+        log(`❌ Error: ${{e.message}}`, 'error');
+    }}
+}}
+
+async function updateAgent(key) {{
+    log(`🔄 Updating ${{key}}...`);
+    try {{
+        const resp = await fetch(`/api/update/${{key}}`, {{ method: 'POST' }});
+        const data = await resp.json();
+        if (data.success) {{
+            log(`✅ ${{key}} updated!`, 'success');
+            location.reload();
+        }} else {{
+            log(`❌ ${{key}} update failed: ${{data.stderr || data.stdout}}`, 'error');
+        }}
+    }} catch(e) {{
+        log(`❌ Error: ${{e.message}}`, 'error');
+    }}
+}}
+
+async function fetchDoctor() {{
+    log('🩺 Running diagnostics...');
+    try {{
+        const resp = await fetch('/api/doctor');
+        const data = await resp.json();
+        log(`Platform: ${{data.platform}}, Python: ${{data.python_version}}, Installed: ${{data.installed_count}}/${{data.total_agents}}`);
+        if (data.issues.length) {{
+            log(`Issues: ${{data.issues.join(', ')}}`, 'error');
+        }} else {{
+            log('✅ No issues found', 'success');
+        }}
+    }} catch(e) {{
+        log(`❌ Error: ${{e.message}}`, 'error');
+    }}
+}}
+
+// Load installed count on page load
+fetch('/api/agents').then(r => r.json()).then(agents => {{
+    const count = agents.filter(a => a.installed).length;
+    document.getElementById('installedCount').textContent = count;
+}});
+</script>
+</body>
+</html>"""
+
+    return app
+
+
+_serve_process = None
+
+def do_serve(host=None, port=None, detach=False, stop=False):
+    """Start/stop the web dashboard."""
+    global _serve_process
+
+    config = load_config()
+    settings = config.get("settings", {})
+    host = host or settings.get("web_host", "localhost")
+    port = port or settings.get("web_port", 8765)
+
+    # Stop existing server
+    if stop:
+        pid_file = CONFIG_DIR / "server.pid"
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                os.kill(pid, signal.SIGTERM)
+                pid_file.unlink()
+                print_success("Server stopped")
+            except (ProcessLookupError, ValueError):
+                pid_file.unlink()
+                print_info("Server was not running")
+        return
+
+    app = create_flask_app()
+
+    if detach:
+        # Fork and detach
+        pid = os.fork()
+        if pid > 0:
+            # Parent
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            (CONFIG_DIR / "server.pid").write_text(str(pid))
+            print_success(f"Server started in background (PID {pid})")
+            print_info(f"Dashboard: http://{host}:{port}")
+            return
+        # Child: detach from terminal
+        os.setsid()
+
+    print_panel("🌐 aikit Dashboard", f"Starting on http://{host}:{port}\nPress Ctrl-C to stop")
+
+    try:
+        app.run(host=host, port=port, debug=False, use_reloader=False)
+    except KeyboardInterrupt:
+        print_info("Server stopped")
+        sys.exit(0)
+
+
+# =============================================================================
+# CLI Main
+# =============================================================================
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="aikit",
+        description=f"🤖 aikit v{__version__} — AI Coding Agent CLI Installer & Manager",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent(f"""\
+            Examples:
+              aikit setup              First-run interactive wizard
+              aikit install            Multi-select agent picker (Space=toggle, Enter=done)
+              aikit install claude codex cursor   Install specific agents
+              aikit list               Show all {len(AGENTS)} agents and status
+              aikit auth claude        Configure Claude auth
+              aikit serve              Start web dashboard
+              aikit doctor             Diagnose environment
+        """),
+    )
+
+    sub = parser.add_subparsers(dest="command", help="Command")
+
+    # install
+    install_p = sub.add_parser("install", help="Install AI coding agents")
+    install_p.add_argument("agents", nargs="*", help="Agent keys to install (none = interactive picker)")
+    install_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmations")
+
+    # update
+    update_p = sub.add_parser("update", help="Update installed agents")
+    update_p.add_argument("agents", nargs="*", help="Agent keys to update (none = all installed)")
+
+    # uninstall
+    uninstall_p = sub.add_parser("uninstall", help="Remove agents")
+    uninstall_p.add_argument("agents", nargs="*", help="Agent keys to uninstall (none = interactive picker)")
+    uninstall_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmations")
+
+    # list
+    sub.add_parser("list", help="Show all agents and installation status")
+
+    # auth
+    auth_p = sub.add_parser("auth", help="Configure authentication for an agent")
+    auth_p.add_argument("agent", nargs="?", help="Agent key to authenticate")
+
+    # serve
+    serve_p = sub.add_parser("serve", help="Start web dashboard")
+    serve_p.add_argument("--host", help="Bind host (default: localhost)")
+    serve_p.add_argument("--port", type=int, help="Bind port (default: 8765)")
+    serve_p.add_argument("--detach", action="store_true", help="Run in background")
+    serve_p.add_argument("--stop", action="store_true", help="Stop detached server")
+
+    # doctor
+    sub.add_parser("doctor", help="Diagnose environment and agents")
+
+    # setup
+    sub.add_parser("setup", help="Interactive first-run wizard")
+
+    # config
+    config_p = sub.add_parser("config", help="Manage configuration")
+    config_sub = config_p.add_subparsers(dest="config_action")
+
+    config_list = config_sub.add_parser("list", help="Show all config (secrets masked)")
+    config_get = config_sub.add_parser("get", help="Get a config value")
+    config_get.add_argument("config_key", metavar="key", help="Dot-path key (e.g. settings.web_port)")
+    config_set = config_sub.add_parser("set", help="Set a config value")
+    config_set.add_argument("config_key", metavar="key", help="Dot-path key")
+    config_set.add_argument("value", help="Value to set")
+
+    # version
+    parser.add_argument("-v", "--version", action="version", version=f"aikit {__version__}")
+
+    return parser
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    # Handle config sub-commands
+    if args.command == "config":
+        if args.config_action == "list":
+            do_config_list()
+        elif args.config_action == "get":
+            do_config_get(args.config_key)
+        elif args.config_action == "set":
+            do_config_set(args.config_key, args.value)
+        else:
+            do_config_list()
+        return
+
+    # First-run: auto-discover and persist, then warn if no agents
+    if not args.command and _needs_setup():
+        discover_and_persist()
+        config = load_config()
+        installed_count = sum(1 for k in AGENTS if config.get("agents", {}).get(k, {}).get("installed", False))
+        authenticated_count = sum(1 for k in AGENTS if config.get("agents", {}).get(k, {}).get("auth_configured", False))
+        
+        console.print(Panel(
+            "[bold]👋 Welcome to aikit![/bold]\n\n"
+            "aikit has auto-discovered your system state:\n"
+            f"  [green]• {installed_count}/{len(AGENTS)} agents installed[/green]\n"
+            f"  [green]• {authenticated_count} agents authenticated[/green]\n\n"
+            "Run: [bold]aikit setup[/bold] for guided setup\n"
+            "  or [bold]aikit list[/bold] to see the full table\n"
+            "  or [bold]aikit doctor[/bold] to diagnose everything",
+            border_style="cyan"
+        ))
+        SETUP_MARKER.touch()
+        return
+
+    # Dispatch with KeyboardInterrupt safety
+    try:
+        if args.command == "install":
+            do_install(args.agents, yes=args.yes)
+        elif args.command == "update":
+            do_update(args.agents or None)
+        elif args.command == "uninstall":
+            do_uninstall(args.agents, yes=args.yes)
+        elif args.command == "list":
+            print_agent_table()
+        elif args.command == "auth":
+            if not args.agent:
+                agent_keys = [k for k in AGENTS if detect_agent_bin(k)]
+                if not agent_keys:
+                    print_warning("No agents installed. Run 'aikit install' first.")
+                    return
+                try:
+                    agent_keys = interactive_agent_picker("Select agent to authenticate", preselect_installed=True)
+                except KeyboardInterrupt:
+                    console.print("\n[yellow]⏹ Cancelled.[/yellow]")
+                    return
+                if agent_keys:
+                    for key in agent_keys:
+                        do_auth(key)
+                else:
+                    print_warning("No agent selected.")
+            else:
+                do_auth(args.agent)
+        elif args.command == "serve":
+            do_serve(
+                host=args.host,
+                port=args.port,
+                detach=args.detach,
+                stop=args.stop,
+            )
+        elif args.command == "doctor":
+            do_doctor()
+        elif args.command == "setup":
+            do_setup()
+        elif not args.command:
+            # Default: show banner + help
+            console.print(Panel(
+                f"[bold]🤖 aikit v{__version__}[/bold]\n"
+                f"AI Coding Agent CLI Installer & Manager\n"
+                f"[dim]{len(AGENTS)} agents • {_CURRENT_PLATFORM} • ~/.aikit/config.json[/dim]",
+                border_style="cyan"
+            ))
+            print_agent_table()
+            console.print(f"\n[dim]Commands: install | update | uninstall | list | auth | serve | doctor | setup | config[/dim]")
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⏹ Interrupted.[/yellow]")
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
