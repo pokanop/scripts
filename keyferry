@@ -1,0 +1,2010 @@
+#!/usr/bin/env python3
+"""
+keyferry — 1Password ⇄ Bitwarden/Vaultwarden credential ferry  v1.0.0
+Intelligently migrate and sync passwords between 1Password and Bitwarden/Vaultwarden,
+with vault→collection mapping, content-aware deduplication, and timestamp-aware delta syncing.
+
+Architecture:
+    source adapter (1pux file | op live | bw live)
+        → normalized item model + content signature
+        → vault/state mapping resolver (private vs shared)
+        → dedup / delta engine (update when source is newer; --overwrite forces all)
+        → sink adapter (bw serve fast-path | op item create)
+
+Usage:
+    keyferry doctor                 Check op/bw CLIs, auth, versions
+    keyferry status                 Show both sides: vaults, collections, counts
+    keyferry plan                   Dry-run: what would be created / skipped (no writes)
+    keyferry plan --from X --to Y   Dry-run preview (no writes)
+    keyferry sync --from X --to Y   Ferry credentials (X/Y = 1password | bitwarden | file.1pux)
+    keyferry map                    Interactively edit the vault→collection mapping
+    keyferry config get/set/list    Manage configuration
+
+Dependencies:
+    pip install rich requests readchar      (op + bw CLIs installed separately)
+"""
+
+import argparse
+import atexit
+import concurrent.futures
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+import zipfile
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Optional, List, Dict, Any
+
+try:
+    import readchar
+    HAS_READCHAR = True
+except ImportError:
+    HAS_READCHAR = False
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, MofNCompleteColumn, TimeElapsedColumn
+from rich.table import Table
+from rich.text import Text
+
+__version__ = "1.0.0"
+
+console = Console()
+
+# =============================================================================
+# Configuration — three-tier loading: defaults → ~/.keyferry/config.json → env
+# =============================================================================
+
+CONFIG_DIR = Path(os.environ.get("KEYFERRY_CONFIG", Path.home() / ".keyferry"))
+CONFIG_FILE = CONFIG_DIR / "config.json"
+LOGS_DIR = CONFIG_DIR / "logs"
+
+DEFAULT_CONFIG = {
+    "version": 1,
+    "settings": {
+        "serve_port": 8087,            # local port for the bw serve fast-path
+        "concurrency": 8,              # parallel writes against bw serve
+        "match_keys": ["title", "username", "uri"],   # dedup signature components
+        # Bitwarden has no tags/labels. 1Password tags are dropped by default
+        # (never turned into folders). "field" preserves them as a custom field.
+        "tags": "drop",                # "drop" | "field"
+    },
+    "mapping": {
+        # 1Password vault names treated as personal (→ Bitwarden "My Vault")
+        "private_vaults": ["Private", "Personal"],
+        # where private items land: "personal" or "collection:<name>"
+        "private_destination": "personal",
+        # what to do with items archived in 1Password:
+        #   "native"  → import to normal destination, then natively archive (recommended)
+        #   "active"  → import to normal destination, leave active (don't archive)
+        #   "skip"    → don't import archived items
+        #   "collection:<name>" → divert all archived items into one collection (no native archive)
+        "archived_policy": "native",
+        # explicit 1P-vault → BW-collection name overrides (default: same name)
+        "vault_to_collection": {},
+        # target organization (name or id); resolved live if unset
+        "organization": None,
+    },
+}
+
+# 1Password .1pux category UUIDs → human category
+ONEPUX_CATEGORIES = {
+    "001": "Login", "002": "CreditCard", "003": "SecureNote", "004": "Identity",
+    "005": "Password", "006": "Document", "100": "SoftwareLicense", "101": "BankAccount",
+    "102": "Database", "103": "DriverLicense", "104": "OutdoorLicense", "105": "Membership",
+    "106": "Passport", "107": "Rewards", "108": "SSN", "109": "Router", "110": "Server",
+    "111": "Email", "112": "APICredential", "113": "MedicalRecord", "114": "SSHKey",
+    "115": "WirelessRouter",
+}
+
+# Normalized category → Bitwarden item type (1=login,2=note,3=card,4=identity,5=sshkey)
+BW_TYPE = {"login": 1, "note": 2, "card": 3, "identity": 4, "sshkey": 5}
+
+# How each source category folds into a normalized category
+CATEGORY_FOLD = {
+    "Login": "login", "Password": "login",
+    "CreditCard": "card", "BankAccount": "card",
+    "Identity": "identity", "Passport": "identity", "SSN": "identity",
+    "DriverLicense": "identity", "Membership": "identity",
+    "SSHKey": "sshkey",
+    # everything else → secure note
+}
+
+BW_FIELD_MAX = 10000   # Bitwarden refuses any encrypted field value beyond this
+
+# =============================================================================
+# Output helpers — emoji + color, NO_COLOR aware (mirrors the house style)
+# =============================================================================
+
+EMOJI = "🛳️"
+
+
+def _use_color():
+    return sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def print_panel(title, content, style="bold cyan"):
+    console.print(Panel(content, title=title, border_style=style))
+
+
+def print_success(text):
+    console.print(f"  ✅ {text}", style="bold green")
+
+
+def print_error(text):
+    console.print(f"  ❌ {text}", style="bold red")
+
+
+def print_warning(text):
+    console.print(f"  ⚠️  {text}", style="bold yellow")
+
+
+def print_info(text):
+    console.print(f"  ℹ️  {text}", style="dim")
+
+
+def print_step(step, total, text):
+    console.print(f"  [{step}/{total}] {text}", style="bold cyan")
+
+
+def banner():
+    return f"{EMOJI} [bold cyan]keyferry[/bold cyan] [dim]v{__version__}[/dim] — 1Password ⇄ Bitwarden ferry"
+
+
+# ANSI codes for the raw-mode interactive picker (Rich interferes with raw input)
+_RESET, _BOLD, _DIM = "\033[0m", "\033[1m", "\033[2m"
+_GREEN, _CYAN, _WHITE = "\033[32m", "\033[36m", "\033[37m"
+_BG_BLUE = "\033[44m"
+
+
+def _ansi(text, *codes):
+    if not _use_color():
+        return re.sub(r"\033\[[0-9;]*m", "", text)
+    return "".join(codes) + text + _RESET
+
+
+def _read_key():
+    """Single keypress → 'up'/'down'/'space'/'enter'/'esc'/'q'/char. None if not a TTY."""
+    if not sys.stdin.isatty() or not HAS_READCHAR:
+        return None
+    k = readchar.readkey()
+    mapping = {
+        readchar.key.UP: "up", readchar.key.DOWN: "down",
+        readchar.key.ENTER: "enter", readchar.key.SPACE: "space",
+        readchar.key.ESC: "esc", readchar.key.CTRL_C: "ctrl_c",
+    }
+    if k in mapping:
+        if mapping[k] == "ctrl_c":
+            raise KeyboardInterrupt()
+        return mapping[k]
+    return k if isinstance(k, str) else None
+
+
+def _prompt(text_str, default="", style="bold cyan"):
+    prompt = Text()
+    prompt.append(f"  {text_str}", style=style)
+    if default:
+        prompt.append(f" [{default}]", style="dim")
+    prompt.append(": ", style=style)
+    try:
+        val = console.input(prompt).strip()
+    except EOFError:
+        return default
+    return val or default
+
+
+def _prompt_yes_no(text_str, default=True):
+    resp = _prompt(f"{text_str} ({'Y/n' if default else 'y/N'})", "")
+    if not resp:
+        return default
+    return resp.lower().startswith("y")
+
+
+# =============================================================================
+# Config — load / save / nested get-set (three-tier)
+# =============================================================================
+
+def _deep_merge(base, over):
+    out = dict(base)
+    for k, v in over.items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def load_config():
+    config = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
+    if CONFIG_FILE.exists():
+        try:
+            config = _deep_merge(config, json.loads(CONFIG_FILE.read_text()))
+        except (json.JSONDecodeError, OSError):
+            print_warning(f"Could not read {CONFIG_FILE}; using defaults")
+    return config
+
+
+def save_config(config):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    CONFIG_FILE.chmod(0o600)
+
+
+def _config_set_nested(config, key_path, value):
+    parts = key_path.split(".")
+    node = config
+    for part in parts[:-1]:
+        node = node.setdefault(part, {})
+    if isinstance(value, str):
+        low = value.lower()
+        if low in ("true", "yes"):
+            value = True
+        elif low in ("false", "no"):
+            value = False
+        elif low in ("null", "none"):
+            value = None
+        else:
+            try:
+                value = int(value)
+            except ValueError:
+                pass
+    node[parts[-1]] = value
+
+
+def _config_get_nested(config, key_path):
+    node = config
+    for part in key_path.split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
+
+
+# =============================================================================
+# Process helpers
+# =============================================================================
+
+def run(cmd, timeout=300, input_text=None):
+    """Run a command (list form). Returns (exit_code, stdout, stderr)."""
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout, input=input_text,
+        )
+        return result.returncode, result.stdout.strip(), result.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return -1, "", f"timed out after {timeout}s"
+    except FileNotFoundError:
+        return -127, "", f"command not found: {cmd[0]}"
+    except Exception as e:  # noqa: BLE001
+        return -1, "", str(e)
+
+
+def which(binary):
+    return shutil.which(binary) is not None
+
+
+class KeyferryError(Exception):
+    """User-facing error with a clean message."""
+
+
+# =============================================================================
+# 1Password client (op CLI) — live read + write
+# =============================================================================
+
+class OpClient:
+    def __init__(self, account=None):
+        self.account = account
+
+    def _base(self):
+        cmd = ["op"]
+        if self.account:
+            cmd += ["--account", self.account]
+        return cmd
+
+    def available(self):
+        return which("op")
+
+    def version(self):
+        code, out, _ = run(["op", "--version"], timeout=10)
+        return out if code == 0 else None
+
+    def accounts(self):
+        """Locally configured accounts — reads cached config, no biometric prompt."""
+        code, out, _ = run(["op", "account", "list", "--format", "json"], timeout=10)
+        if code != 0:
+            return []
+        try:
+            return json.loads(out or "[]")
+        except json.JSONDecodeError:
+            return []
+
+    def configured(self):
+        """True if op has a usable account configured (no unlock prompt triggered)."""
+        accts = self.accounts()
+        if not accts:
+            return None
+        if self.account:
+            for a in accts:
+                if self.account in (a.get("shorthand"), a.get("url"), a.get("account_uuid"), a.get("email")):
+                    return a
+            return None
+        return accts[0]
+
+    def vaults(self):
+        code, out, err = run(self._base() + ["vault", "list", "--format", "json"], timeout=30)
+        if code != 0:
+            raise KeyferryError(f"op vault list failed: {err}")
+        return json.loads(out)
+
+    def list_items(self, vault_id, include_archive=False):
+        cmd = self._base() + ["item", "list", "--vault", vault_id, "--format", "json"]
+        if include_archive:
+            cmd.append("--include-archive")
+        code, out, err = run(cmd, timeout=120)
+        if code != 0:
+            raise KeyferryError(f"op item list failed for vault {vault_id}: {err}")
+        return json.loads(out or "[]")
+
+    def get_items_full(self, vault_id, item_ids):
+        """Batch-fetch full item details by piping ids into `op item get -`."""
+        if not item_ids:
+            return []
+        payload = "\n".join(json.dumps({"id": i}) for i in item_ids)
+        cmd = self._base() + ["item", "get", "-", "--vault", vault_id, "--format", "json"]
+        code, out, err = run(cmd, timeout=600, input_text=payload)
+        if code != 0:
+            raise KeyferryError(f"op item get failed: {err}")
+        data = json.loads(out or "[]")
+        return data if isinstance(data, list) else [data]
+
+    def ensure_vault(self, name):
+        for v in self.vaults():
+            if v["name"] == name:
+                return v["id"]
+        code, out, err = run(self._base() + ["vault", "create", name, "--format", "json"], timeout=30)
+        if code != 0:
+            raise KeyferryError(f"could not create vault {name!r}: {err}")
+        return json.loads(out)["id"]
+
+    def create_item(self, vault_id, op_item_json):
+        cmd = self._base() + ["item", "create", "--vault", vault_id, "-", "--format", "json"]
+        code, out, err = run(cmd, timeout=60, input_text=json.dumps(op_item_json))
+        if code != 0:
+            return None, err
+        try:
+            return json.loads(out), None
+        except json.JSONDecodeError:
+            return None, "unparseable op response"
+
+
+# =============================================================================
+# Bitwarden client (bw CLI + bw serve fast-path)
+# =============================================================================
+
+class BwClient:
+    def __init__(self, port=8087, concurrency=8):
+        self.port = port
+        self.concurrency = concurrency
+        self._proc = None
+        self._base_url = f"http://localhost:{port}"
+        self._session = requests.Session() if HAS_REQUESTS else None
+
+    # ---- CLI ----
+    def available(self):
+        return which("bw")
+
+    def version(self):
+        code, out, _ = run(["bw", "--version"], timeout=10)
+        return out if code == 0 else None
+
+    def status(self):
+        code, out, _ = run(["bw", "status"], timeout=15)
+        if code != 0:
+            return None
+        try:
+            return json.loads(out)
+        except json.JSONDecodeError:
+            return None
+
+    def cli_sync(self):
+        run(["bw", "sync"], timeout=120)
+
+    # ---- serve lifecycle ----
+    def start_serve(self):
+        if not HAS_REQUESTS:
+            raise KeyferryError("the 'requests' package is required (pip install requests)")
+        self.stop_serve()
+        self._proc = subprocess.Popen(
+            ["bw", "serve", "--port", str(self.port)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        atexit.register(self.stop_serve)
+        # wait for readiness
+        for _ in range(40):
+            try:
+                r = self._session.get(f"{self._base_url}/status", timeout=2)
+                if r.ok and r.json().get("data", {}).get("template", {}).get("status") == "unlocked":
+                    return
+                if r.ok:
+                    st = r.json().get("data", {}).get("template", {}).get("status")
+                    if st and st != "unlocked":
+                        raise KeyferryError(f"Bitwarden vault is '{st}'. Run: bw unlock")
+            except KeyferryError:
+                raise
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(0.5)
+        raise KeyferryError("bw serve did not become ready (is the vault unlocked? run: bw unlock)")
+
+    def stop_serve(self):
+        if self._proc and self._proc.poll() is None:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+        self._proc = None
+
+    @contextmanager
+    def serve(self):
+        self.start_serve()
+        try:
+            yield self
+        finally:
+            self.stop_serve()
+
+    # ---- serve requests ----
+    def _get(self, path, params=None):
+        r = self._session.get(f"{self._base_url}{path}", params=params, timeout=60)
+        return r.json()
+
+    def _post(self, path, body=None):
+        r = self._session.post(f"{self._base_url}{path}", json=body, timeout=120)
+        return self._parse_response(r)
+
+    def _put(self, path, body=None):
+        r = self._session.put(f"{self._base_url}{path}", json=body, timeout=120)
+        return self._parse_response(r)
+
+    def _delete(self, path):
+        r = self._session.delete(f"{self._base_url}{path}", timeout=60)
+        return self._parse_response(r)
+
+    @staticmethod
+    def _parse_response(r):
+        try:
+            return r.json()
+        except ValueError:
+            snippet = (r.text or "").strip()[:200]
+            raise KeyferryError(
+                f"Bitwarden API returned non-JSON (HTTP {r.status_code}): {snippet or '(empty)'}"
+            )
+
+    def serve_sync(self):
+        self._post("/sync")
+
+    def list_items(self):
+        return self._get("/list/object/items").get("data", {}).get("data", [])
+
+    def list_org_collections(self, org_id):
+        return self._get("/list/object/org-collections",
+                         {"organizationid": org_id}).get("data", {}).get("data", [])
+
+    def create_item(self, item_json):
+        resp = self._post("/object/item", item_json)
+        if resp.get("success"):
+            return resp.get("data", {}).get("id"), None
+        return None, resp.get("message", "unknown error")
+
+    def get_item(self, item_id):
+        resp = self._get(f"/object/item/{item_id}")
+        return resp.get("data") if resp.get("success") else None
+
+    def edit_item(self, item_id, item_json):
+        resp = self._put(f"/object/item/{item_id}", item_json)
+        return resp.get("success"), resp.get("message")
+
+    # ---- CLI-only operations (run with serve stopped to avoid cache races) ----
+    def cli_list_items(self, include_archived=False):
+        code, out, err = run(["bw", "list", "items"], timeout=120)
+        if code != 0:
+            raise KeyferryError(f"bw list items failed: {err}")
+        items = json.loads(out or "[]")
+        if include_archived:
+            code, out, _ = run(["bw", "list", "items", "--archived"], timeout=120)
+            if code == 0:
+                items += json.loads(out or "[]")
+        return items
+
+    def cli_archive_item(self, item_id):
+        code, _out, err = run(["bw", "archive", "item", item_id], timeout=30)
+        return code == 0, err
+
+    def cli_list_folders(self):
+        code, out, _ = run(["bw", "list", "folders"], timeout=30)
+        return json.loads(out or "[]") if code == 0 else []
+
+    def cli_delete_folder(self, folder_id):
+        # Deleting a folder only unassigns its items (they move to "No Folder").
+        code, _out, err = run(["bw", "delete", "folder", folder_id], timeout=30)
+        return code == 0, err
+
+    def cli_list_organizations(self):
+        code, out, _ = run(["bw", "list", "organizations"], timeout=30)
+        return json.loads(out or "[]") if code == 0 else []
+
+    def cli_list_org_collections(self, org_id):
+        code, out, _ = run(["bw", "list", "org-collections", "--organizationid", org_id], timeout=30)
+        return json.loads(out or "[]") if code == 0 else []
+
+    def cli_create_collection(self, org_id, name):
+        body = {"organizationId": org_id, "name": name, "externalId": None, "groups": []}
+        enc = subprocess.run(["bw", "encode"], input=json.dumps(body),
+                             capture_output=True, text=True).stdout.strip()
+        code, out, err = run(["bw", "create", "org-collection", "--organizationid", org_id, enc], timeout=30)
+        if code != 0:
+            raise KeyferryError(f"could not create collection {name!r}: {err}")
+        return json.loads(out)["id"]
+
+    def cli_create_attachment(self, item_id, file_path):
+        code, out, err = run(["bw", "create", "attachment", "--itemid", item_id, "--file", file_path], timeout=120)
+        return code == 0, (err or out)
+
+    def parallel(self, fn, items, description="Working"):
+        """Run fn(item) across items via a thread pool with a progress bar."""
+        results = []
+        with Progress(
+            SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+            BarColumn(), MofNCompleteColumn(), TaskProgressColumn(), TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task(description, total=len(items))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.concurrency) as pool:
+                futures = {pool.submit(fn, it): it for it in items}
+                for fut in concurrent.futures.as_completed(futures):
+                    results.append(fut.result())
+                    progress.advance(task)
+        return results
+
+
+# =============================================================================
+# Normalized item model + content signature (dedup)
+# =============================================================================
+
+def _norm(s):
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def _uri_host(uri):
+    """Reduce a URI to its bare host (drop scheme, port, path, query, www.)."""
+    if not uri:
+        return ""
+    u = re.sub(r"^[a-z]+://", "", _norm(uri))
+    host = re.split(r"[/?#]", u, maxsplit=1)[0]
+    host = host.split("@")[-1].split(":")[0]
+    return re.sub(r"^www\.", "", host)
+
+
+_BW_URI_FIELD_NAMES = frozenset({"url", "website", "uri", "site"})
+
+
+def _is_uri_field_name(name):
+    """True for url-like field labels, including section-prefixed names ('Contact: website')."""
+    n = _norm(name)
+    if n in _BW_URI_FIELD_NAMES:
+        return True
+    return n.rsplit(":", 1)[-1].strip() in _BW_URI_FIELD_NAMES
+
+
+def _uris_from_bw_fields(fields):
+    """Recover URIs stored as custom fields (symmetric with item_to_bw note exports)."""
+    uris = []
+    for f in fields or []:
+        if not _is_uri_field_name(f.get("name")):
+            continue
+        val = f.get("value")
+        if val and val not in uris:
+            uris.append(str(val))
+    return uris
+
+
+def _effective_uris(it):
+    """URIs from overview/login plus url-like custom fields — used for identity matching."""
+    uris = list(it.uris or [])
+    for val in _uris_from_bw_fields(it.fields):
+        if val not in uris:
+            uris.append(val)
+    return uris
+
+
+def _parse_ts(value):
+    """Parse a unix epoch or ISO-8601 string to UTC epoch seconds."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        try:
+            from datetime import datetime
+            return datetime.fromisoformat(s).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+class Item:
+    """Source-agnostic credential. Sinks know how to render it for op or bw."""
+
+    def __init__(self):
+        self.title = ""
+        self.category = "note"     # login|note|card|identity|sshkey
+        self.source_category = ""  # original 1P/bw category name
+        self.vault = ""            # source vault name
+        self.state = "active"      # active|archived
+        self.favorite = False
+        self.username = None
+        self.password = None
+        self.totp = None
+        self.uris = []
+        self.notes = ""
+        self.fields = []           # [{name, value, hidden}]
+        self.card = None           # dict
+        self.identity = None       # dict
+        self.attachments = []      # [{name, path}]
+        self.tags = []             # 1Password tags/labels (Bitwarden has no tag concept)
+        self.modified_at = None    # source last-modified epoch (UTC); used for delta sync
+
+    def primary_uri(self):
+        eff = _effective_uris(self)
+        return eff[0] if eff else ""
+
+    def public_fingerprint(self):
+        """Hash of non-secret sync content — comparable across source and destination."""
+        parts = [self.category, _norm(self.title), _norm(self.username), _norm(self.totp)]
+        parts.extend(sorted(_uri_host(u) for u in _effective_uris(self) if u))
+        parts.append(_norm(self.notes))
+        parts.append("1" if self.favorite else "0")
+        for f in sorted(self.fields, key=lambda x: _norm(x.get("name"))):
+            if _is_uri_field_name(f.get("name")):
+                continue  # represented via it.uris
+            if f.get("hidden"):
+                continue
+            parts.append(_norm(f.get("name")))
+            parts.append(_norm(str(f.get("value") or "")))
+        if isinstance(self.card, dict):
+            parts.append(json.dumps(self.card, sort_keys=True, separators=(",", ":")))
+        if isinstance(self.identity, dict):
+            parts.append(json.dumps(self.identity, sort_keys=True, separators=(",", ":")))
+        return hashlib.sha256("|".join(parts).encode()).hexdigest()
+
+    def signature(self, match_keys):
+        parts = []
+        if "title" in match_keys:
+            parts.append(_norm(self.title))
+        if "username" in match_keys:
+            parts.append(_norm(self.username))
+        if "uri" in match_keys:
+            # Match on host only — OAuth/SAML login URLs carry huge transient
+            # query strings that differ every time, so full-URL matching misses.
+            # Also consider url-like custom fields (e.g. identity "website").
+            eff = _effective_uris(self)
+            parts.append(_uri_host(eff[0] if eff else ""))
+        if "category" in match_keys:
+            parts.append(self.category)
+        return hashlib.sha1("|".join(parts).encode()).hexdigest()
+
+
+# =============================================================================
+# Source: 1Password .1pux export file
+# =============================================================================
+
+def _field_string(val):
+    if not isinstance(val, dict):
+        return None
+    for k in ("string", "concealed", "url", "email", "phone", "date", "monthYear", "menu"):
+        if isinstance(val.get(k), str):
+            return val[k]
+        if val.get(k) is not None and not isinstance(val.get(k), dict):
+            return str(val[k])
+    return None
+
+
+def read_1pux(path):
+    """Yield (account_name, [Item]) reading a .1pux archive."""
+    with zipfile.ZipFile(path) as z:
+        data = json.loads(z.read("export.data"))
+        disk_files = {n.split("/", 1)[1] for n in z.namelist() if n.startswith("files/") and "/" in n}
+    docid_to_name = {}
+    for fn in disk_files:
+        docid = fn.split("__")[0].split(".")[0]
+        docid_to_name[docid] = fn
+
+    items = []
+    for acct in data.get("accounts", []):
+        for vault in acct.get("vaults", []):
+            vname = vault.get("attrs", {}).get("name", "")
+            for raw in vault.get("items", []):
+                it = _item_from_1pux(raw, vname, docid_to_name, path)
+                if it:
+                    items.append(it)
+    return items
+
+
+def _item_from_1pux(raw, vname, docid_to_name, pux_path):
+    cat_code = raw.get("categoryUuid") or raw.get("category")
+    source_cat = ONEPUX_CATEGORIES.get(cat_code, cat_code or "Login")
+    det = raw.get("details", {}) or {}
+    ov = raw.get("overview", {}) or {}
+
+    it = Item()
+    it.title = ov.get("title") or "(untitled)"
+    it.source_category = source_cat
+    it.category = CATEGORY_FOLD.get(source_cat, "note")
+    it.vault = vname
+    it.state = raw.get("state", "active")
+    it.modified_at = _parse_ts(raw.get("updatedAt"))
+    it.favorite = bool(raw.get("favIndex"))
+    it.tags = ov.get("tags") or raw.get("tags") or []
+    it.notes = det.get("notesPlain") or ""
+
+    # urls
+    for u in ov.get("urls", []) or []:
+        if u.get("url"):
+            it.uris.append(u["url"])
+    if ov.get("url") and ov["url"] not in it.uris:
+        it.uris.append(ov["url"])
+
+    # login fields
+    for lf in det.get("loginFields", []) or []:
+        des = lf.get("designation")
+        val = lf.get("value")
+        if val in (None, "", "✓"):
+            continue
+        if des == "username" and it.username is None:
+            it.username = val
+        elif des == "password" and it.password is None:
+            it.password = val
+        else:
+            name = lf.get("name") or des or "field"
+            it.fields.append({"name": name, "value": val,
+                              "hidden": (lf.get("type") == "P" or des == "password")})
+
+    # section fields (custom fields, totp, file attachments)
+    for sec in det.get("sections", []) or []:
+        sec_title = sec.get("title") or ""
+        for f in sec.get("fields", []) or []:
+            val = f.get("value", {})
+            if not isinstance(val, dict):
+                continue
+            if "totp" in val and val["totp"]:
+                it.totp = val["totp"]
+                continue
+            if isinstance(val.get("file"), dict) and val["file"].get("documentId"):
+                fname = val["file"].get("fileName") or val["file"]["documentId"]
+                it.attachments.append({"name": fname,
+                                       "docid": val["file"]["documentId"], "pux": str(pux_path)})
+                continue
+            sval = _field_string(val)
+            if sval in (None, ""):
+                continue
+            label = f.get("title") or "field"
+            if sec_title:
+                label = f"{sec_title}: {label}"
+            concealed = "concealed" in val
+            it.fields.append({"name": label, "value": sval, "hidden": concealed})
+
+    # document-category attachment
+    da = det.get("documentAttributes")
+    if da and da.get("documentId"):
+        it.attachments.append({"name": da.get("fileName") or da["documentId"],
+                               "docid": da["documentId"], "pux": str(pux_path)})
+    return it
+
+
+def extract_1pux_attachment(pux_path, docid, out_dir):
+    """Extract a file by document id from a .1pux to out_dir; return its path."""
+    with zipfile.ZipFile(pux_path) as z:
+        for n in z.namelist():
+            if n.startswith("files/") and n.split("/", 1)[1].split("__")[0].split(".")[0] == docid:
+                target = Path(out_dir) / Path(n).name
+                target.write_bytes(z.read(n))
+                return str(target)
+    return None
+
+
+# =============================================================================
+# Source: 1Password live (op CLI)
+# =============================================================================
+
+def read_op_live(op: "OpClient", progress_cb=None):
+    items = []
+    vaults = op.vaults()
+    for v in vaults:
+        active_ids = [i["id"] for i in op.list_items(v["id"], include_archive=False)]
+        all_ids = [i["id"] for i in op.list_items(v["id"], include_archive=True)]
+        active_set = set(active_ids)
+        full = op.get_items_full(v["id"], all_ids)
+        for raw in full:
+            it = _item_from_op(raw, v["name"])
+            it.state = "active" if raw.get("id") in active_set else "archived"
+            items.append(it)
+        if progress_cb:
+            progress_cb(v["name"], len(full))
+    return items
+
+
+OP_CAT_FOLD = {
+    "LOGIN": "login", "PASSWORD": "login", "API_CREDENTIAL": "note",
+    "CREDIT_CARD": "card", "BANK_ACCOUNT": "card",
+    "IDENTITY": "identity", "PASSPORT": "identity", "DRIVER_LICENSE": "identity",
+    "SOCIAL_SECURITY_NUMBER": "identity", "MEMBERSHIP": "identity",
+    "SSH_KEY": "sshkey", "SECURE_NOTE": "note",
+}
+
+
+def _item_from_op(raw, vault_name):
+    it = Item()
+    it.title = raw.get("title") or "(untitled)"
+    it.source_category = raw.get("category", "")
+    it.category = OP_CAT_FOLD.get(raw.get("category", ""), "note")
+    it.vault = vault_name
+    it.modified_at = _parse_ts(raw.get("updated_at"))
+    it.favorite = bool(raw.get("favorite"))
+    it.tags = raw.get("tags") or []
+    for u in raw.get("urls", []) or []:
+        if u.get("href"):
+            it.uris.append(u["href"])
+    for f in raw.get("fields", []) or []:
+        purpose = f.get("purpose")
+        ftype = f.get("type")
+        val = f.get("value")
+        if purpose == "USERNAME":
+            it.username = val
+        elif purpose == "PASSWORD":
+            it.password = val
+        elif purpose == "NOTES":
+            it.notes = val or ""
+        elif ftype == "OTP" and val:
+            it.totp = val
+        elif val not in (None, ""):
+            label = f.get("label") or f.get("id") or "field"
+            sec = (f.get("section") or {}).get("id")
+            if sec and sec != "add more":
+                label = f"{sec}: {label}"
+            it.fields.append({"name": label, "value": val, "hidden": ftype == "CONCEALED"})
+    for fattr in raw.get("files", []) or []:
+        it.attachments.append({"name": fattr.get("name"), "op_ref": fattr.get("id"),
+                               "op_item": raw.get("id"), "op_vault": vault_name})
+    return it
+
+
+# =============================================================================
+# Source: Bitwarden live (bw CLI) → for the reverse (export) direction
+# =============================================================================
+
+BW_TYPE_FOLD = {1: "login", 2: "note", 3: "card", 4: "identity", 5: "sshkey"}
+
+
+def _item_from_bw(raw, collections_by_id=None):
+    it = Item()
+    it.title = raw.get("name") or "(untitled)"
+    it.category = BW_TYPE_FOLD.get(raw.get("type"), "note")
+    it.source_category = it.category
+    it.favorite = bool(raw.get("favorite"))
+    it.modified_at = _parse_ts(raw.get("revisionDate"))
+    it.notes = raw.get("notes") or ""
+    if collections_by_id is not None:
+        if raw.get("organizationId"):
+            cids = raw.get("collectionIds") or []
+            it.vault = collections_by_id.get(cids[0], "Shared") if cids else "Shared"
+        else:
+            it.vault = "Private"
+    login = raw.get("login") or {}
+    it.username = login.get("username")
+    it.password = login.get("password")
+    it.totp = login.get("totp")
+    for u in login.get("uris", []) or []:
+        if u.get("uri"):
+            it.uris.append(u["uri"])
+    for val in _uris_from_bw_fields(raw.get("fields")):
+        if val not in it.uris:
+            it.uris.append(val)
+    for f in raw.get("fields", []) or []:
+        it.fields.append({"name": f.get("name") or "field", "value": f.get("value") or "",
+                          "hidden": f.get("type") == 1})
+    if raw.get("card"):
+        it.card = raw["card"]
+    if raw.get("identity"):
+        it.identity = raw["identity"]
+    return it
+
+
+def read_bw_live(bw_items, collections_by_id):
+    return [_item_from_bw(raw, collections_by_id) for raw in bw_items]
+
+
+# =============================================================================
+# Rendering: normalized Item → Bitwarden item JSON
+# =============================================================================
+
+def item_to_bw(it: Item, org_id=None, collection_ids=None, deferred_attachments=None, tags_mode="drop"):
+    """Build a bw item JSON. Oversized field values are diverted to attachments.
+
+    Bitwarden has no tags/labels concept, so 1Password tags are dropped by default
+    (we never create folders for them). tags_mode="field" preserves them as a field.
+    """
+    fields = []
+    notes = it.notes or ""
+    if tags_mode == "field" and it.tags:
+        fields.append({"name": "1Password Tags", "value": ", ".join(it.tags), "type": 0})
+
+    def add_field(name, value, hidden):
+        nonlocal notes
+        if value is None:
+            return
+        value = str(value)
+        if len(value) > BW_FIELD_MAX:
+            # too large for any bw field → ship as a text attachment
+            if deferred_attachments is not None:
+                safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name)[:60] or "field"
+                deferred_attachments.append({"name": f"{safe}.txt", "text": value})
+                notes += f"\n[{name}: stored as attachment {safe}.txt]"
+                return
+            value = value[:BW_FIELD_MAX]
+        fields.append({"name": name, "value": value, "type": 1 if hidden else 0})
+
+    for f in it.fields:
+        add_field(f["name"], f["value"], f.get("hidden"))
+
+    if len(notes) > BW_FIELD_MAX:
+        if deferred_attachments is not None:
+            deferred_attachments.append({"name": "notes.txt", "text": notes})
+            notes = "[Full notes stored as attachment notes.txt]"
+        else:
+            notes = notes[:BW_FIELD_MAX]
+
+    obj = {
+        "type": BW_TYPE.get(it.category, 2),
+        "name": it.title,
+        "notes": notes or None,
+        "favorite": it.favorite,
+        "fields": fields,
+        "organizationId": org_id,
+        "collectionIds": collection_ids or None,
+    }
+    if it.category == "login":
+        obj["login"] = {
+            "username": it.username,
+            "password": it.password,
+            "totp": it.totp,
+            "uris": [{"uri": u, "match": None} for u in it.uris],
+        }
+    elif it.category == "card":
+        obj["card"] = it.card or {}
+        # keep credentials discoverable even if unmapped
+        if it.username or it.password:
+            add_field("username", it.username, False)
+            add_field("password", it.password, True)
+    elif it.category == "identity":
+        obj["identity"] = it.identity or {}
+    elif it.category == "sshkey":
+        obj["type"] = 2  # store as note unless we have structured key material
+        obj["secureNote"] = {"type": 0}
+    else:
+        obj["secureNote"] = {"type": 0}
+        if it.username or it.password or it.totp:
+            add_field("username", it.username, False)
+            add_field("password", it.password, True)
+            if it.totp:
+                add_field("totp", it.totp, True)
+            obj["fields"] = fields
+        for u in it.uris:
+            add_field("url", u, False)
+        obj["fields"] = fields
+    return obj
+
+
+def merge_bw_update(body, existing_raw):
+    """Adapt an update payload to the existing Bitwarden item shape (preserve type/URIs)."""
+    if not existing_raw:
+        return body
+    bw_type = existing_raw.get("type")
+    if bw_type is not None:
+        body["type"] = bw_type
+    if bw_type == 1:
+        uris = []
+        for u in (body.get("login") or {}).get("uris") or []:
+            if u.get("uri"):
+                uris.append({"uri": u["uri"], "match": None})
+        kept_fields = []
+        for f in body.get("fields") or []:
+            if _is_uri_field_name(f.get("name")):
+                if f.get("value"):
+                    uri = str(f["value"])
+                    if not any(x.get("uri") == uri for x in uris):
+                        uris.append({"uri": uri, "match": None})
+            else:
+                kept_fields.append(f)
+        login = dict(existing_raw.get("login") or {})
+        if uris:
+            login["uris"] = uris
+        body["login"] = login
+        body["fields"] = kept_fields
+        body.pop("secureNote", None)
+    return body
+
+
+# =============================================================================
+# Rendering: normalized Item → 1Password item JSON (for op item create)
+# =============================================================================
+
+OP_CATEGORY = {"login": "LOGIN", "note": "SECURE_NOTE", "card": "CREDIT_CARD",
+               "identity": "IDENTITY", "sshkey": "SECURE_NOTE"}
+
+
+def item_to_op(it: Item):
+    fields = []
+    if it.category == "login" or it.username or it.password:
+        fields.append({"id": "username", "type": "STRING", "purpose": "USERNAME",
+                       "label": "username", "value": it.username or ""})
+        fields.append({"id": "password", "type": "CONCEALED", "purpose": "PASSWORD",
+                       "label": "password", "value": it.password or ""})
+    fields.append({"id": "notesPlain", "type": "STRING", "purpose": "NOTES",
+                   "label": "notesPlain", "value": it.notes or ""})
+    if it.totp:
+        fields.append({"id": "one-time password", "type": "OTP",
+                       "label": "one-time password", "value": it.totp,
+                       "section": {"id": "extra"}})
+    # preserve structured card / identity data as fields (op has no 1:1 import here)
+    for blob in (it.card, it.identity):
+        if isinstance(blob, dict):
+            for k, v in blob.items():
+                if v in (None, ""):
+                    continue
+                fields.append({"id": re.sub(r"\W+", "_", str(k))[:40] or "field",
+                               "type": "CONCEALED" if k in ("number", "code", "cvv") else "STRING",
+                               "label": k, "value": str(v), "section": {"id": "extra"}})
+    for f in it.fields:
+        fields.append({"id": re.sub(r"\W+", "_", f["name"])[:40] or "field",
+                       "type": "CONCEALED" if f.get("hidden") else "STRING",
+                       "label": f["name"], "value": str(f["value"]),
+                       "section": {"id": "extra"}})
+    obj = {
+        "title": it.title,
+        "category": OP_CATEGORY.get(it.category, "SECURE_NOTE"),
+        "fields": fields,
+    }
+    if it.uris:
+        obj["urls"] = [{"href": u, "primary": (i == 0)} for i, u in enumerate(it.uris)]
+    if any(f.get("section", {}).get("id") == "extra" for f in fields):
+        obj["sections"] = [{"id": "extra", "label": "Imported fields"}]
+    return obj
+
+
+# =============================================================================
+# Mapping resolver — 1P vault + state → Bitwarden destination
+# =============================================================================
+
+class Destination:
+    PERSONAL = "personal"
+
+    def __init__(self, kind, collection_name=None):
+        self.kind = kind                       # "personal" | "collection"
+        self.collection_name = collection_name
+
+    def label(self):
+        return "My Vault" if self.kind == "personal" else f"Collection: {self.collection_name}"
+
+    def key(self):
+        return "personal" if self.kind == "personal" else f"collection:{self.collection_name}"
+
+
+def _parse_dest(spec):
+    if spec == "personal":
+        return Destination("personal")
+    if spec and spec.startswith("collection:"):
+        return Destination("collection", spec.split(":", 1)[1])
+    return None
+
+
+def resolve_destination(it: Item, mapping):
+    if it.state == "archived":
+        policy = mapping.get("archived_policy", "native")
+        if policy == "skip":
+            return None
+        if policy.startswith("collection:"):
+            return Destination("collection", policy.split(":", 1)[1])
+        # "native" / "active" → fall through to the item's normal destination
+    private = set(mapping.get("private_vaults", []))
+    if it.vault in private:
+        return _parse_dest(mapping.get("private_destination", "personal")) or Destination("personal")
+    overrides = mapping.get("vault_to_collection", {})
+    name = overrides.get(it.vault, it.vault)
+    return Destination("collection", name)
+
+
+def should_archive(it: Item, mapping):
+    """True if this item must be natively archived after creation."""
+    return it.state == "archived" and mapping.get("archived_policy", "native") == "native"
+
+
+# =============================================================================
+# Engine: plan + execute (1Password → Bitwarden)
+# =============================================================================
+
+class ExistingEntry:
+    """A destination item matched by identity signature."""
+
+    __slots__ = ("id", "revision_date", "fingerprint")
+
+    def __init__(self, item_id, revision_date, fingerprint):
+        self.id = item_id
+        self.revision_date = revision_date
+        self.fingerprint = fingerprint
+
+
+class PlanRow:
+    def __init__(self, dest):
+        self.dest = dest
+        self.create = []     # Items to create
+        self.duplicate = []  # Items skipped (already present)
+        self.update = []     # Items to update in place (existing id, new item)
+
+
+def item_needs_update(src: Item, existing: ExistingEntry, overwrite=False):
+    """True when a matched item should be written to the destination."""
+    if overwrite:
+        return True
+    same_visible = src.public_fingerprint() == existing.fingerprint
+    if same_visible:
+        # Visible content matches — update only when source is newer (secret-only change).
+        if src.modified_at and existing.revision_date:
+            return src.modified_at > existing.revision_date
+        return False
+    # Visible content differs — update only when source is provably newer.
+    if src.modified_at and existing.revision_date:
+        return src.modified_at > existing.revision_date
+    return False
+
+
+def lookup_existing(dest_key, it, existing_index, title_index, match_keys):
+    """Find a destination item by signature, falling back to an unambiguous title match."""
+    existing = existing_index.get(dest_key, {}).get(it.signature(match_keys))
+    if existing:
+        return existing
+    cands = title_index.get(dest_key, {}).get(_norm(it.title), [])
+    unique = {c.id: c for c in cands}
+    if len(unique) == 1:
+        return next(iter(unique.values()))
+    return None
+
+
+def build_plan(items, mapping, existing_index, title_index, match_keys, overwrite=False):
+    """Group items by destination, classifying each as create/duplicate/update."""
+    plan = {}
+    skipped_archived = 0
+    for it in items:
+        dest = resolve_destination(it, mapping)
+        if dest is None:
+            skipped_archived += 1
+            continue
+        row = plan.setdefault(dest.key(), PlanRow(dest))
+        existing = lookup_existing(dest.key(), it, existing_index, title_index, match_keys)
+        if existing:
+            if item_needs_update(it, existing, overwrite=overwrite):
+                row.update.append((it, existing.id))
+            else:
+                row.duplicate.append(it)
+        else:
+            row.create.append(it)
+    return plan, skipped_archived
+
+
+def build_existing_index(bw_items, collections_by_id, match_keys):
+    """Index Bitwarden items by destination → signature and normalized title."""
+    index = {}
+    title_index = {}
+    for raw in bw_items:
+        it = _item_from_bw(raw)
+        sig = it.signature(match_keys)
+        entry = ExistingEntry(raw["id"], it.modified_at, it.public_fingerprint())
+
+        def _add(dest_key):
+            index.setdefault(dest_key, {})[sig] = entry
+            title_index.setdefault(dest_key, {}).setdefault(_norm(it.title), []).append(entry)
+
+        if raw.get("organizationId"):
+            for cid in raw.get("collectionIds") or []:
+                name = collections_by_id.get(cid)
+                if name:
+                    _add(f"collection:{name}")
+        else:
+            _add("personal")
+    return index, title_index
+
+
+# =============================================================================
+# Command: doctor
+# =============================================================================
+
+def cmd_doctor(args):
+    console.print(banner())
+    console.print()
+    table = Table(show_header=True, header_style="bold cyan", box=None, pad_edge=False)
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail", style="dim")
+
+    op = OpClient(account=args.account)
+    bw = BwClient()
+
+    # op
+    if op.available():
+        ver = op.version() or "?"
+        acct = op.configured()
+        if acct:
+            table.add_row("1Password CLI (op)", "✅",
+                          f"v{ver} · {acct.get('email', acct.get('url','configured'))}")
+        elif acct is None and op.accounts() == []:
+            table.add_row("1Password CLI (op)", "⚠️ ", f"v{ver} · no account configured (run: op signin)")
+        else:
+            table.add_row("1Password CLI (op)", "⚠️ ", f"v{ver} · account not found (check --account)")
+    else:
+        table.add_row("1Password CLI (op)", "❌", "not installed — https://1password.com/downloads/command-line")
+
+    # bw
+    if bw.available():
+        ver = bw.version() or "?"
+        st = bw.status() or {}
+        status = st.get("status", "?")
+        emoji = "✅" if status == "unlocked" else "⚠️ "
+        detail = f"v{ver} · {st.get('serverUrl','?')} · {status}"
+        if status != "unlocked":
+            detail += " (run: bw unlock)"
+        table.add_row("Bitwarden CLI (bw)", emoji, detail)
+    else:
+        table.add_row("Bitwarden CLI (bw)", "❌", "not installed — npm i -g @bitwarden/cli")
+
+    # python deps
+    table.add_row("Python: requests", "✅" if HAS_REQUESTS else "❌",
+                  "needed for the bw serve fast-path")
+    table.add_row("Python: readchar", "✅" if HAS_READCHAR else "⚠️ ",
+                  "needed for the interactive picker")
+    table.add_row("Config", "✅" if CONFIG_FILE.exists() else "ℹ️ ",
+                  str(CONFIG_FILE) + ("" if CONFIG_FILE.exists() else " (defaults in use)"))
+    console.print(table)
+    console.print()
+
+
+# =============================================================================
+# Command: status
+# =============================================================================
+
+def cmd_status(args):
+    console.print(banner())
+    console.print()
+    cfg = load_config()
+
+    # 1Password side (only if a source is given, to avoid op biometric prompts)
+    src = resolve_endpoint(args.source) if args.source else None
+    if src and src[0] == "onepassword" and src[1] == "file":
+        items = read_1pux(src[2])
+        console.print(f"[bold]🔐 1Password[/bold] [dim](from {Path(src[2]).name})[/dim]")
+        _print_source_summary(items)
+    elif src and src[0] == "onepassword":
+        op = OpClient(account=args.account)
+        if not op.available() or not op.configured():
+            print_warning("op not available / not signed in; skipping 1Password side")
+        else:
+            console.print("[bold]🔐 1Password[/bold] [dim](live via op)[/dim]")
+            vt = Table(box=None, header_style="bold", pad_edge=False)
+            vt.add_column("Vault"); vt.add_column("Items", justify="right")
+            for v in op.vaults():
+                vt.add_row(v["name"], str(v.get("items", "?")))
+            console.print(vt)
+    console.print()
+
+    # Bitwarden side
+    bw = BwClient()
+    if not bw.available():
+        print_error("bw not installed")
+        return
+    st = bw.status() or {}
+    console.print(f"[bold]🛡️  Bitwarden/Vaultwarden[/bold] [dim]({st.get('serverUrl','?')} · {st.get('status','?')})[/dim]")
+    if st.get("status") != "unlocked":
+        print_warning("vault locked — run: bw unlock")
+        return
+    bw.cli_sync()
+    orgs = bw.cli_list_organizations()
+    active_items = bw.cli_list_items()
+    archived_items = [i for i in bw.cli_list_items(include_archived=True)
+                      if i.get("id") not in {a["id"] for a in active_items}]
+
+    def counts_for(items, org_id):
+        n_p = sum(1 for i in items if not i.get("organizationId"))
+        per_coll = {}
+        for i in items:
+            if i.get("organizationId") == org_id:
+                for cid in i.get("collectionIds") or []:
+                    per_coll[cid] = per_coll.get(cid, 0) + 1
+        return n_p, per_coll
+
+    bt = Table(box=None, header_style="bold", pad_edge=False)
+    bt.add_column("Scope"); bt.add_column("Active", justify="right")
+    bt.add_column("Archived", justify="right", style="dim")
+    pa, _ = counts_for(active_items, None)
+    pr, _ = counts_for(archived_items, None)
+    bt.add_row("My Vault (personal)", str(pa), str(pr))
+    for org in orgs:
+        cols = bw.cli_list_org_collections(org["id"])
+        cmap = {c["id"]: c["name"] for c in cols}
+        _, act_coll = counts_for(active_items, org["id"])
+        _, arc_coll = counts_for(archived_items, org["id"])
+        tot_a = sum(1 for i in active_items if i.get("organizationId") == org["id"])
+        tot_r = sum(1 for i in archived_items if i.get("organizationId") == org["id"])
+        bt.add_row(f"[bold]{org['name']}[/bold] (org)", str(tot_a), str(tot_r))
+        for cid, cname in sorted(cmap.items(), key=lambda kv: kv[1]):
+            bt.add_row(f"  └ {cname}", str(act_coll.get(cid, 0)), str(arc_coll.get(cid, 0)))
+    console.print(bt)
+    console.print()
+
+
+def _print_source_summary(items):
+    from collections import Counter
+    by_vault = Counter((i.vault, i.state) for i in items)
+    vt = Table(box=None, header_style="bold", pad_edge=False)
+    vt.add_column("Vault"); vt.add_column("Active", justify="right"); vt.add_column("Archived", justify="right")
+    vaults = sorted({v for v, _ in by_vault})
+    for v in vaults:
+        vt.add_row(v, str(by_vault.get((v, "active"), 0)), str(by_vault.get((v, "archived"), 0)))
+    vt.add_row("[bold]TOTAL[/bold]", f"[bold]{sum(1 for i in items if i.state=='active')}[/bold]",
+               f"[bold]{sum(1 for i in items if i.state=='archived')}[/bold]")
+    console.print(vt)
+
+
+# =============================================================================
+# Shared: load source items + resolve org + build plan
+# =============================================================================
+
+_OP_ALIASES = {"1password", "1p", "op", "onepassword"}
+_BW_ALIASES = {"bitwarden", "bw", "vaultwarden", "vw"}
+
+
+def resolve_endpoint(value):
+    """Parse a --from/--to value into (platform, kind, ref).
+
+    platform: "onepassword" | "bitwarden"
+    kind:     "live" | "file"
+    ref:      file path for kind=="file", else None
+    Returns None if value is None.
+    """
+    if value is None:
+        return None
+    v = value.strip().lower()
+    if v in _OP_ALIASES:
+        return ("onepassword", "live", None)
+    if v in _BW_ALIASES:
+        return ("bitwarden", "live", None)
+    if value.endswith(".1pux") or Path(value).exists():
+        return ("onepassword", "file", value)
+    raise KeyferryError(f"unknown endpoint {value!r} — use 1password, bitwarden, or a .1pux file path")
+
+
+def _load_source_items(src, args):
+    platform, kind, ref = src
+    if platform == "onepassword" and kind == "file":
+        if not Path(ref).exists():
+            raise KeyferryError(f"file not found: {ref}")
+        with console.status("📦 Reading 1Password export…"):
+            items = read_1pux(ref)
+        print_success(f"Read {len(items)} items from {Path(ref).name}")
+        return items
+    if platform == "onepassword" and kind == "live":
+        op = OpClient(account=args.account)
+        if not op.available() or not op.configured():
+            raise KeyferryError("op not available or not signed in (run: op signin)")
+        with console.status("🔐 Reading 1Password live via op…") as status:
+            items = read_op_live(op, progress_cb=lambda v, n: status.update(f"🔐 Read vault {v} ({n})…"))
+        print_success(f"Read {len(items)} items live from 1Password")
+        return items
+    raise KeyferryError(f"cannot read items from {platform}")
+
+
+def _resolve_org(bw, cfg):
+    orgs = bw.cli_list_organizations()
+    want = cfg["mapping"].get("organization")
+    if want:
+        for o in orgs:
+            if o["id"] == want or o["name"] == want:
+                return o
+    if len(orgs) == 1:
+        return orgs[0]
+    if not orgs:
+        return None  # personal-only migrations don't need an org
+    raise KeyferryError("multiple organizations; set mapping.organization in config or pass --org")
+
+
+# =============================================================================
+# Command: sync / plan — resolve --from/--to and dispatch the right direction
+# =============================================================================
+
+def cmd_sync(args, execute=False):
+    console.print(banner())
+    console.print()
+    src = resolve_endpoint(args.source)
+    dst = resolve_endpoint(args.target)
+    if not src:
+        raise KeyferryError("specify --from (1password | bitwarden | path/to.1pux)")
+    if not dst:
+        raise KeyferryError("specify --to (1password | bitwarden)")
+    if dst[1] == "file":
+        raise KeyferryError("--to must be a live platform (1password | bitwarden), not a file")
+    if src[0] == dst[0]:
+        raise KeyferryError(f"--from and --to are both {src[0]} — pick two different platforms")
+
+    arrow = f"{src[0]}" + (f" ({Path(src[2]).name})" if src[1] == 'file' else "") + f" → {dst[0]}"
+    print_info(f"Direction: {arrow}")
+    console.print()
+
+    if dst[0] == "bitwarden":
+        _run_to_bitwarden(args, src, execute)
+    else:  # → onepassword
+        if src[0] != "bitwarden":
+            raise KeyferryError("syncing to 1Password requires --from bitwarden")
+        _run_to_onepassword(args, execute)
+
+
+# =============================================================================
+# Engine: ferry 1Password → Bitwarden
+# =============================================================================
+
+def _run_to_bitwarden(args, src, execute=False):
+    cfg = load_config()
+    if args.org:
+        cfg["mapping"]["organization"] = args.org
+    if args.skip_archived:
+        cfg["mapping"]["archived_policy"] = "skip"
+    elif args.archived_active:
+        cfg["mapping"]["archived_policy"] = "active"
+    match_keys = cfg["settings"]["match_keys"]
+    tags_mode = "field" if (args.keep_tags or cfg["settings"].get("tags") == "field") else "drop"
+
+    items = _load_source_items(src, args)
+
+    bw = BwClient(port=cfg["settings"]["serve_port"], concurrency=cfg["settings"]["concurrency"])
+    if not bw.available():
+        raise KeyferryError("bw not installed")
+    if (bw.status() or {}).get("status") != "unlocked":
+        raise KeyferryError("Bitwarden vault is locked — run: bw unlock")
+
+    with console.status("🛡️  Reading current Bitwarden vault…"):
+        bw.cli_sync()
+        org = _resolve_org(bw, cfg)
+        collections = bw.cli_list_org_collections(org["id"]) if org else []
+        col_by_name = {c["name"]: c["id"] for c in collections}
+        col_by_id = {c["id"]: c["name"] for c in collections}
+        existing = bw.cli_list_items(include_archived=True)
+    index, title_index = build_existing_index(existing, col_by_id, match_keys)
+    org_label = org["name"] if org else "(none — personal only)"
+    print_info(f"Target org: {org_label} · {len(collections)} collections · {len(existing)} existing items")
+
+    plan, skipped_archived = build_plan(items, cfg["mapping"], index, title_index, match_keys,
+                                         overwrite=args.overwrite)
+
+    # --- show the plan ---
+    console.print()
+    table = Table(title="📋 Migration plan", header_style="bold cyan", title_style="bold")
+    table.add_column("Destination"); table.add_column("Create", justify="right", style="green")
+    table.add_column("Update", justify="right", style="magenta")
+    table.add_column("Duplicate (skip)", justify="right", style="yellow")
+    tot_c = tot_d = tot_u = 0
+    for key in sorted(plan):
+        row = plan[key]
+        tot_c += len(row.create); tot_d += len(row.duplicate); tot_u += len(row.update)
+        table.add_row(row.dest.label(), str(len(row.create)), str(len(row.update)),
+                      str(len(row.duplicate)))
+    table.add_row("[bold]TOTAL[/bold]", f"[bold]{tot_c}[/bold]", f"[bold]{tot_u}[/bold]",
+                  f"[bold]{tot_d}[/bold]")
+    console.print(table)
+    missing_cols = sorted({plan[k].dest.collection_name for k in plan
+                           if plan[k].dest.kind == "collection"
+                           and plan[k].dest.collection_name not in col_by_name
+                           and (plan[k].create or plan[k].update)})
+    if missing_cols:
+        print_info(f"Collections to create: {', '.join(missing_cols)}")
+    if skipped_archived:
+        print_info(f"Archived items skipped by policy: {skipped_archived}")
+    n_archive = sum(1 for k in plan for it in plan[k].create if should_archive(it, cfg["mapping"]))
+    if n_archive:
+        print_info(f"Will be archived in place (native Archive): {n_archive}")
+    n_tagged = sum(1 for k in plan for it in plan[k].create if it.tags)
+    if n_tagged:
+        if tags_mode == "field":
+            print_info(f"1Password tags on {n_tagged} item(s) → preserved as a custom field")
+        else:
+            print_info(f"1Password tags on {n_tagged} item(s) → dropped (Bitwarden has no tags; "
+                       f"--keep-tags keeps them as a field; no folders are created)")
+    n_att = sum(len(it.attachments) for k in plan for it in plan[k].create)
+    if n_att:
+        print_info(f"Attachments to upload: {n_att}")
+
+    if not execute:
+        console.print()
+        print_info("This was a dry run. Run [bold]keyferry sync[/bold] to apply.")
+        return
+
+    if org is None and any(plan[k].dest.kind == "collection" and (plan[k].create or plan[k].update)
+                           for k in plan):
+        raise KeyferryError("shared-vault items need a Bitwarden organization — create one, "
+                            "or remap those vaults to personal (keyferry map)")
+
+    to_create = [(plan[k].dest, it) for k in plan for it in plan[k].create]
+    to_update = [(plan[k].dest, it, eid) for k in plan for (it, eid) in plan[k].update]
+    if not to_create and not to_update:
+        console.print()
+        print_success("Nothing to do — Bitwarden already in sync. 🎉")
+        return
+
+    console.print()
+    if not args.yes and not _prompt_yes_no(
+            f"Create {tot_c} item(s)" + (f", overwrite {tot_u}" if args.overwrite else "") + "?", True):
+        print_warning("Aborted.")
+        return
+
+    _execute_migration(bw, org, col_by_name, to_create, to_update, args, cfg["mapping"], tags_mode)
+
+
+def _execute_migration(bw, org, col_by_name, to_create, to_update, args, mapping, tags_mode="drop"):
+    # 1. ensure collections exist
+    dests = [d for d, _it in to_create] + [d for d, _it, _e in to_update]
+    needed = sorted({d.collection_name for d in dests
+                     if d.kind == "collection" and d.collection_name not in col_by_name})
+    for name in needed:
+        cid = bw.cli_create_collection(org["id"], name)
+        col_by_name[name] = cid
+        print_success(f"Created collection: {name}")
+
+    # 2. create items via the serve fast-path (with attachment deferral)
+    created_ok, created_fail = [], []
+    attachment_jobs = []   # (item_id, source attachment info OR {'text':...,'name':...})
+
+    def make(job):
+        dest, it = job
+        org_id = org["id"] if dest.kind == "collection" else None
+        coll_ids = [col_by_name[dest.collection_name]] if dest.kind == "collection" else None
+        deferred = []
+        body = item_to_bw(it, org_id=org_id, collection_ids=coll_ids,
+                          deferred_attachments=deferred, tags_mode=tags_mode)
+        new_id, err = bw.create_item(body)
+        return (it, new_id, err, deferred)
+
+    with bw.serve():
+        bw.serve_sync()
+        results = bw.parallel(make, to_create, description="🛳️  Ferrying items")
+        # overwrites
+        if to_update:
+            def upd(job):
+                dest, it, eid = job
+                org_id = org["id"] if dest.kind == "collection" else None
+                coll_ids = [col_by_name[dest.collection_name]] if dest.kind == "collection" else None
+                deferred = []
+                existing_raw = bw.get_item(eid)
+                body = item_to_bw(it, org_id=org_id, collection_ids=coll_ids,
+                                  deferred_attachments=deferred, tags_mode=tags_mode)
+                body = merge_bw_update(body, existing_raw)
+                ok, err = bw.edit_item(eid, body)
+                return (it, eid if ok else None, None if ok else err, deferred)
+            results += bw.parallel(upd, to_update, description="♻️  Updating items")
+
+    archive_ids = []
+    for it, new_id, err, deferred in results:
+        if new_id:
+            created_ok.append(it)
+            if should_archive(it, mapping):
+                archive_ids.append(new_id)
+            for d in deferred:
+                attachment_jobs.append((new_id, {"text": d["text"], "name": d["name"]}))
+            for att in it.attachments:
+                attachment_jobs.append((new_id, att))
+        else:
+            created_fail.append((it, err))
+
+    # 3. attachments (CLI, serve stopped to avoid local-cache races)
+    if attachment_jobs and not args.no_attachments:
+        _upload_attachments(bw, attachment_jobs)
+    elif attachment_jobs:
+        print_info(f"Skipped {len(attachment_jobs)} attachment(s) (--no-attachments)")
+
+    # 4. native archive (CLI) for items archived at the source
+    archived_ok = 0
+    if archive_ids:
+        bw.cli_sync()
+        with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+                      BarColumn(), MofNCompleteColumn(), console=console) as progress:
+            t = progress.add_task("🗄️  Archiving items", total=len(archive_ids))
+            for aid in archive_ids:
+                ok, _err = bw.cli_archive_item(aid)
+                archived_ok += 1 if ok else 0
+                progress.advance(t)
+        print_success(f"Archived {archived_ok}/{len(archive_ids)} item(s) in place")
+
+    # 5. summary
+    console.print()
+    print_success(f"Created {len(created_ok)} item(s)" + (f", updated {len(to_update)}" if to_update else ""))
+    if created_fail:
+        print_error(f"{len(created_fail)} item(s) failed:")
+        for it, err in created_fail[:10]:
+            console.print(f"     • {it.title}: [red]{err}[/red]")
+    console.print(f"\n{EMOJI} [bold green]Ferry complete.[/bold green]\n")
+
+
+def _upload_attachments(bw, jobs):
+    bw.cli_sync()
+    tmp = tempfile.mkdtemp(prefix="keyferry-")
+    prepared = []
+    for item_id, att in jobs:
+        path = None
+        if "text" in att:
+            path = os.path.join(tmp, att["name"])
+            Path(path).write_text(att["text"])
+        elif att.get("pux") and att.get("docid"):
+            path = extract_1pux_attachment(att["pux"], att["docid"], tmp)
+        elif att.get("op_ref"):
+            # live op file: op read of the file reference
+            ref = f"op://{att['op_vault']}/{att['op_item']}/{att['op_ref']}"
+            out = os.path.join(tmp, att.get("name") or att["op_ref"])
+            code, _, _ = run(["op", "read", ref, "--out-file", out], timeout=120)
+            path = out if code == 0 else None
+        if path and os.path.exists(path):
+            prepared.append((item_id, path))
+    ok = 0
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+                  BarColumn(), MofNCompleteColumn(), console=console) as progress:
+        t = progress.add_task("📎 Uploading attachments", total=len(prepared))
+        for item_id, path in prepared:
+            success, _err = bw.cli_create_attachment(item_id, path)
+            ok += 1 if success else 0
+            progress.advance(t)
+    shutil.rmtree(tmp, ignore_errors=True)
+    print_success(f"Uploaded {ok}/{len(prepared)} attachment(s)")
+
+
+# =============================================================================
+# Engine: ferry Bitwarden → 1Password
+# =============================================================================
+
+def _run_to_onepassword(args, execute=False):
+    cfg = load_config()
+    match_keys = cfg["settings"]["match_keys"]
+
+    op = OpClient(account=args.account)
+    bw = BwClient()
+    if not op.available() or not op.configured():
+        raise KeyferryError("op not available or not signed in (run: op signin)")
+    if not bw.available() or (bw.status() or {}).get("status") != "unlocked":
+        raise KeyferryError("bw not available or locked (run: bw unlock)")
+
+    with console.status("🛡️  Reading Bitwarden…"):
+        bw.cli_sync()
+        orgs = bw.cli_list_organizations()
+        col_by_id = {}
+        for o in orgs:
+            for c in bw.cli_list_org_collections(o["id"]):
+                col_by_id[c["id"]] = c["name"]
+        bw_items = bw.cli_list_items()
+    items = read_bw_live(bw_items, col_by_id)
+    print_success(f"Read {len(items)} items from Bitwarden")
+
+    # reverse mapping: BW vault label → op vault (Private→Private; collection name→same)
+    rev = cfg["mapping"].get("reverse_vault_map", {})
+
+    def op_vault_for(it):
+        if it.vault == "Private":
+            return rev.get("Private", "Private")
+        return rev.get(it.vault, it.vault)
+
+    # dedup against op
+    with console.status("🔐 Indexing 1Password for dedup…"):
+        op_vaults = {v["name"]: v["id"] for v in op.vaults()}
+        op_index = {}
+        for vname, vid in op_vaults.items():
+            ids = [i["id"] for i in op.list_items(vid, include_archive=True)]
+            for raw in op.get_items_full(vid, ids):
+                oit = _item_from_op(raw, vname)
+                op_index.setdefault(vname, set()).add(oit.signature(match_keys))
+
+    to_create = []
+    dup = 0
+    for it in items:
+        v = op_vault_for(it)
+        if it.signature(match_keys) in op_index.get(v, set()):
+            dup += 1
+            continue
+        to_create.append((v, it))
+
+    console.print()
+    t = Table(title="📋 Export plan (Bitwarden → 1Password)", header_style="bold cyan")
+    t.add_column("1Password vault"); t.add_column("Create", justify="right", style="green")
+    from collections import Counter
+    cnt = Counter(v for v, _ in to_create)
+    for v in sorted(cnt):
+        t.add_row(v, str(cnt[v]))
+    t.add_row("[bold]TOTAL[/bold]", f"[bold]{len(to_create)}[/bold]")
+    console.print(t)
+    print_info(f"Duplicates skipped: {dup}")
+
+    if not execute:
+        print_info("This was a dry run. Run [bold]keyferry sync[/bold] to apply.")
+        return
+    if not to_create:
+        print_success("1Password already in sync. 🎉")
+        return
+    if not args.yes and not _prompt_yes_no(f"Create {len(to_create)} item(s) in 1Password?", True):
+        print_warning("Aborted.")
+        return
+
+    vault_ids = {}
+    ok = fail = 0
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+                  BarColumn(), MofNCompleteColumn(), console=console) as progress:
+        task = progress.add_task("🛳️  Ferrying to 1Password", total=len(to_create))
+        for vname, it in to_create:
+            if vname not in vault_ids:
+                vault_ids[vname] = op.ensure_vault(vname)
+            _res, err = op.create_item(vault_ids[vname], item_to_op(it))
+            ok += 1 if not err else 0
+            fail += 1 if err else 0
+            progress.advance(task)
+    print_success(f"Created {ok} item(s) in 1Password" + (f"; {fail} failed" if fail else ""))
+    console.print(f"\n{EMOJI} [bold green]Ferry complete.[/bold green]\n")
+
+
+# =============================================================================
+# Command: map (interactive mapping editor)
+# =============================================================================
+
+def cmd_map(args):
+    console.print(banner())
+    console.print()
+    cfg = load_config()
+    m = cfg["mapping"]
+
+    console.print("[bold]Current mapping[/bold]")
+    console.print(f"  Private vaults → My Vault: [cyan]{', '.join(m['private_vaults'])}[/cyan]")
+    console.print(f"  Private destination: [cyan]{m['private_destination']}[/cyan]")
+    console.print(f"  Archived policy: [cyan]{m.get('archived_policy', 'native')}[/cyan]")
+    console.print(f"  Organization: [cyan]{m.get('organization') or '(auto)'}[/cyan]")
+    if m.get("vault_to_collection"):
+        for k, v in m["vault_to_collection"].items():
+            console.print(f"  {k} → collection [cyan]{v}[/cyan]")
+    console.print()
+
+    if not _prompt_yes_no("Edit mapping?", False):
+        return
+
+    pv = _prompt("Private vault names (comma-separated)", ", ".join(m["private_vaults"]))
+    m["private_vaults"] = [s.strip() for s in pv.split(",") if s.strip()]
+    m["private_destination"] = _prompt("Private destination (personal | collection:<name>)",
+                                        m["private_destination"])
+    m["archived_policy"] = _prompt("Archived policy (native | active | skip | collection:<name>)",
+                                   m.get("archived_policy", "native"))
+    org = _prompt("Organization name/id (blank = auto)", m.get("organization") or "")
+    m["organization"] = org or None
+    save_config(cfg)
+    print_success(f"Saved mapping to {CONFIG_FILE}")
+
+
+# =============================================================================
+# Command: tidy-folders — remove personal folders (e.g. junk from a native import)
+# =============================================================================
+
+def cmd_tidy_folders(args):
+    console.print(banner())
+    console.print()
+    bw = BwClient()
+    if not bw.available() or (bw.status() or {}).get("status") != "unlocked":
+        raise KeyferryError("bw not available or locked (run: bw unlock)")
+    bw.cli_sync()
+    folders = [f for f in bw.cli_list_folders() if f.get("id") and f.get("name") != "No Folder"]
+    if not folders:
+        print_success("No personal folders to tidy. 🎉")
+        return
+
+    # count items per folder (include archived) to show impact / find empties
+    items = bw.cli_list_items(include_archived=True)
+    in_use = {}
+    for i in items:
+        fid = i.get("folderId")
+        if fid:
+            in_use[fid] = in_use.get(fid, 0) + 1
+
+    from collections import Counter
+    dup_names = {n for n, c in Counter(f["name"] for f in folders).items() if c > 1}
+    targets = [f for f in folders if not in_use.get(f["id"])] if args.empty_only else folders
+
+    table = Table(title="🗂️  Personal folders", header_style="bold cyan", title_style="bold")
+    table.add_column("Folder"); table.add_column("Items", justify="right")
+    table.add_column("", style="dim")
+    for f in sorted(folders, key=lambda x: x["name"]):
+        flags = []
+        if f["name"] in dup_names:
+            flags.append("duplicate")
+        if not in_use.get(f["id"]):
+            flags.append("empty")
+        table.add_row(f["name"], str(in_use.get(f["id"], 0)), ", ".join(flags))
+    console.print(table)
+    console.print()
+    print_info("Bitwarden has no tags/labels — these usually come from a native 1Password import "
+               "mapping tags→folders. Deleting a folder only un-assigns its items (no items are lost).")
+    label = "empty folders" if args.empty_only else "ALL personal folders"
+    print_warning(f"About to delete {len(targets)} {label}. Items move to 'No Folder'.")
+    if not targets:
+        print_success("Nothing to delete.")
+        return
+    if not args.yes and not _prompt_yes_no(f"Delete {len(targets)} folder(s)?", False):
+        print_warning("Aborted.")
+        return
+
+    ok = 0
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+                  BarColumn(), MofNCompleteColumn(), console=console) as progress:
+        t = progress.add_task("🗑️  Deleting folders", total=len(targets))
+        for f in targets:
+            success, _err = bw.cli_delete_folder(f["id"])
+            ok += 1 if success else 0
+            progress.advance(t)
+    bw.cli_sync()
+    print_success(f"Deleted {ok}/{len(targets)} folder(s). Items preserved in 'No Folder'.")
+
+
+# =============================================================================
+# Command: config
+# =============================================================================
+
+def cmd_config(args):
+    cfg = load_config()
+    if args.config_action == "list" or not args.config_action:
+        console.print_json(json.dumps(cfg))
+    elif args.config_action == "get":
+        val = _config_get_nested(cfg, args.key)
+        console.print(json.dumps(val, indent=2) if val is not None else f"(unset: {args.key})")
+    elif args.config_action == "set":
+        _config_set_nested(cfg, args.key, args.value)
+        save_config(cfg)
+        print_success(f"Set {args.key} = {args.value}")
+
+
+# =============================================================================
+# CLI
+# =============================================================================
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="keyferry",
+        description=f"{EMOJI} keyferry v{__version__} — 1Password ⇄ Bitwarden/Vaultwarden ferry",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            Endpoints (--from / --to):
+              1password | 1p | op    1Password live via the op CLI
+              bitwarden | bw         Bitwarden/Vaultwarden live via the bw CLI
+              path/to/export.1pux    a 1Password .1pux export file (--from only)
+
+            Examples:
+              keyferry doctor                                       Check op/bw CLIs and auth
+              keyferry status --from export.1pux                    Compare both sides
+              keyferry plan --from export.1pux --to bitwarden       Preview (no writes, dedup-aware)
+              keyferry sync --from export.1pux --to bitwarden       Ferry 1Password → Bitwarden
+              keyferry sync --from 1password   --to bitwarden       Ferry live (deltas only)
+              keyferry sync --from bitwarden   --to 1password       Reverse direction
+              keyferry sync --from 1password --to bitwarden --overwrite
+              keyferry map                                          Edit vault→collection mapping
+
+            Matched items are updated when the source is newer than the destination.
+            Pass --overwrite to force-update every match regardless of timestamps.
+        """),
+    )
+    p.add_argument("-v", "--version", action="version", version=f"keyferry {__version__}")
+    sub = p.add_subparsers(dest="command")
+
+    def add_sync_args(sp):
+        sp.add_argument("--from", dest="source", metavar="SRC",
+                        help="source: 1password | bitwarden | path/to.1pux")
+        sp.add_argument("--to", dest="target", metavar="DST",
+                        help="target: 1password | bitwarden")
+        sp.add_argument("--account", help="op account shorthand (for live 1Password)")
+        sp.add_argument("--org", help="target Bitwarden organization name/id")
+        sp.add_argument("--overwrite", action="store_true",
+                        help="force-update all matched items, even when destination is newer")
+        sp.add_argument("--skip-archived", action="store_true", help="don't transfer archived items")
+        sp.add_argument("--archived-active", action="store_true",
+                        help="transfer archived items but leave them active (don't native-archive)")
+        sp.add_argument("--keep-tags", action="store_true",
+                        help="preserve 1Password tags as a custom field (default: drop — Bitwarden has no tags)")
+        sp.add_argument("--no-attachments", action="store_true", help="skip file attachments")
+        sp.add_argument("-y", "--yes", action="store_true", help="skip confirmation")
+
+    dp = sub.add_parser("doctor", help="Check CLIs, auth, versions")
+    dp.add_argument("--account", help="op account shorthand")
+
+    sp = sub.add_parser("status", help="Show both sides")
+    sp.add_argument("--from", dest="source", metavar="SRC",
+                    help="1Password source for the 1P side: 1password or a .1pux file")
+    sp.add_argument("--account", help="op account shorthand")
+
+    sp = sub.add_parser("plan", help="Dry-run: what would be created/skipped")
+    add_sync_args(sp)
+
+    sp = sub.add_parser("sync", help="Ferry credentials --from one side --to the other")
+    add_sync_args(sp)
+
+    sub.add_parser("map", help="Interactively edit the mapping")
+
+    sp = sub.add_parser("tidy-folders", help="Delete personal folders (e.g. junk from a native import)")
+    sp.add_argument("--empty-only", action="store_true", help="only delete folders with no items")
+    sp.add_argument("-y", "--yes", action="store_true", help="skip confirmation")
+
+    sp = sub.add_parser("config", help="Manage configuration")
+    csub = sp.add_subparsers(dest="config_action")
+    csub.add_parser("list")
+    g = csub.add_parser("get"); g.add_argument("key")
+    s = csub.add_parser("set"); s.add_argument("key"); s.add_argument("value")
+    return p
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    # normalize optional attrs that may be absent depending on subcommand
+    for attr in ("source", "target", "account", "org", "overwrite",
+                 "skip_archived", "archived_active", "keep_tags", "empty_only",
+                 "no_attachments", "yes"):
+        if not hasattr(args, attr):
+            setattr(args, attr, None)
+
+    try:
+        if args.command == "doctor":
+            cmd_doctor(args)
+        elif args.command == "status":
+            cmd_status(args)
+        elif args.command == "plan":
+            cmd_sync(args, execute=False)
+        elif args.command == "sync":
+            cmd_sync(args, execute=True)
+        elif args.command == "map":
+            cmd_map(args)
+        elif args.command == "tidy-folders":
+            cmd_tidy_folders(args)
+        elif args.command == "config":
+            cmd_config(args)
+        else:
+            console.print(banner())
+            console.print()
+            parser.print_help()
+    except KeyferryError as e:
+        print_error(str(e))
+        sys.exit(1)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⏹ Interrupted.[/yellow]")
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
