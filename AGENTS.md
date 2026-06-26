@@ -16,7 +16,7 @@ the source of truth for conventions; `CLAUDE.md` is a symlink to it.
   add tests. Full steps below.
 - **Editing a tool?** Reuse `scriptkit` for all output/config/subprocess. Run the
   test suite before and after. Don't add a dependency you don't list.
-- **Always run:** `venv/bin/python -m pytest` (118+ tests must stay green).
+- **Always run:** `venv/bin/python -m pytest` (140+ tests must stay green).
 - **Tools are extension-less Python files at the repo root** (`medcat`, `pluck`, …),
   run by a venv Python. The repo root holds `scriptkit/`, so `import scriptkit` just works.
 
@@ -102,6 +102,13 @@ sk.human_size(1536); sk.human_duration(185); sk.truncate(s, 40)
 raise sk.CliError("clean user-facing message")   # → printed, exit 1
 sys.exit(sk.run_cli(main))                        # CliError→1, Ctrl-C→130
 return sk.dispatch(args, HANDLERS, parser)        # route args.command
+
+# identity & framing — same first impression for every tool
+ICON, TAGLINE = "🚀", "does the thing"
+parser = sk.make_parser("mytool", __version__, TAGLINE, icon=ICON,
+                        examples=[("mytool go", "run it")])   # banner + -v/--version + epilog
+print(sk.banner("mytool", __version__, TAGLINE, ICON))        # runtime banner
+sk.header("Section")                                          # ━━━ Section ━━━━━
 ```
 
 Need rich directly (Panel, Syntax, Tree, custom markup)? Use the **shared console**:
@@ -166,6 +173,39 @@ these so styling stays consistent.
 
 ---
 
+## Versioning & changelog
+
+Every tool (and `scriptkit`) is versioned **independently** with
+[Semantic Versioning](https://semver.org). The "public API" of a tool is its CLI:
+its commands, flags, output format, exit codes, and config schema.
+
+**When you change a tool, bump it** — pick the level by the *largest* change:
+
+| Level | Bump | When |
+|-------|------|------|
+| **MAJOR** `X.0.0` | breaking | Remove/rename a command or flag, **change a flag's meaning**, change output/exit-code/config-schema in a way that could break existing scripts. |
+| **MINOR** `x.Y.0` | additive | New command, flag, source, or format; new optional config; a notable backwards-compatible UX addition (e.g. adding `--version` where it was missing). |
+| **PATCH** `x.y.Z` | invisible | Bug fix, internal refactor (e.g. moving onto `scriptkit`), dependency bump, help/doc wording, cosmetic styling — **no interface change**. |
+
+Rules of thumb:
+- **No interface change ⇒ PATCH.** Refactoring a tool onto `scriptkit` with identical
+  observable behavior is a PATCH, even if a lot of code moved.
+- A `scriptkit` change that alters a tool's *observable* behavior bumps **that tool too**
+  (at the matching level), plus `scriptkit` itself.
+- New tools start at **`0.1.0`** (the scaffold default).
+- When unsure between two levels, prefer the higher one and say why in the changelog.
+
+**Every bump touches the same places (keep them in sync):**
+1. The `__version__ = "X.Y.Z"` constant.
+2. The version in the module docstring header (`name — desc  vX.Y.Z`).
+3. The docs H1 *if* it pins a version (e.g. `docs/medcat.md`, `docs/netsy.md`).
+4. A `CHANGELOG.md` entry under that tool's section (newest on top), dated `YYYY-MM-DD`,
+   with a one-line-per-change summary. Flag breaking changes with a leading `⚠`.
+
+> Don't bump for changes that don't touch the tool file (pure test/doc edits elsewhere).
+
+---
+
 ## Conventions
 
 **Output & UX**
@@ -176,6 +216,12 @@ these so styling stays consistent.
 - Exit codes: success `0`, expected failure `1` (raise `sk.CliError`), interrupt
   `130` (automatic via `sk.run_cli`). Don't `sys.exit()` with ad-hoc codes for
   user errors — raise `CliError`.
+- **Identity:** build the parser with `sk.make_parser(...)` and define module-level
+  `ICON` + `TAGLINE`, so every tool shows the same `{icon} name vX.Y.Z — tagline`
+  banner. Pick a distinct brand emoji (current set: 🛠️ scripts · 🤖 aikit ·
+  🛳️ keyferry · 📚 medcat · 📡 netsy · 🪶 pluck · 🌊 voxtract).
+- **`-v`/`--version` is universal** (added by `make_parser`). Never repurpose `-v`
+  for `--verbose` — use `--verbose`. Use `sk.header()` for section rules.
 - Every tool has a `--help` and a one-line module docstring header (`name — desc  vX.Y.Z`).
 
 **Configuration**
@@ -247,15 +293,19 @@ import torch/yt-dlp at top level if you can defer it) so smoke tests stay fast.
 
 **New tool**
 - [ ] `cp templates/tool_template.py <name>`, edit, keep the `scriptkit` bootstrap
+- [ ] `ICON` + `TAGLINE` set; parser via `sk.make_parser`; `__version__ = "0.1.0"`
 - [ ] Subcommands wired into `build_parser()` + `HANDLERS`
 - [ ] Registered in `scripts` (`TOOLS` + `TOOL_NAMES`)
 - [ ] `requirements/<name>.txt` (+ `pyproject.toml` extra)
-- [ ] `docs/<name>.md` + README card
+- [ ] `docs/<name>.md` + README card + `CHANGELOG.md` section
 - [ ] Tests: `--help` smoke + pure-function unit tests
 - [ ] `venv/bin/python -m pytest` green
 
 **Editing a tool**
 - [ ] Output/config/subprocess go through `scriptkit`
 - [ ] New deps declared in `requirements/<tool>.txt`
+- [ ] **Version bumped** (MAJOR/MINOR/PATCH) in `__version__` **and** the docstring
+      header (and docs H1 if pinned) — see [Versioning](#versioning--changelog)
+- [ ] `CHANGELOG.md` entry added under the tool's section
 - [ ] Characterization tests still pass (or updated intentionally)
 - [ ] `venv/bin/python -m pytest` green

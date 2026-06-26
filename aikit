@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.3.1
+aikit — AI Coding Agent CLI Installer & Manager  v1.3.2
 Install, update, authenticate, and manage 16 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -51,7 +51,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 
 import scriptkit as sk
 from scriptkit.style import (
@@ -64,6 +64,10 @@ _BG_DEFAULT = "\033[49m"
 
 # Share the toolkit's console for consistent styling across tools.
 console = sk.rich_console
+
+# Brand identity — used for --help, --version, and runtime banners.
+ICON = "🤖"
+TAGLINE = "AI Coding Agent CLI Installer & Manager"
 
 # =============================================================================
 # Configuration — zero hardcoded secrets, three-tier loading
@@ -1977,10 +1981,8 @@ def do_serve(host=None, port=None, detach=False, stop=False):
 # =============================================================================
 
 def build_parser():
-    parser = argparse.ArgumentParser(
-        prog="aikit",
-        description=f"🤖 aikit v{__version__} — AI Coding Agent CLI Installer & Manager",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    parser = sk.make_parser(
+        "aikit", __version__, TAGLINE, icon=ICON,
         epilog=textwrap.dedent(f"""\
             Examples:
               aikit setup              First-run interactive wizard
@@ -2040,9 +2042,7 @@ def build_parser():
     config_set.add_argument("config_key", metavar="key", help="Dot-path key")
     config_set.add_argument("value", help="Value to set")
 
-    # version
-    parser.add_argument("-v", "--version", action="version", version=f"aikit {__version__}")
-
+    # -v/--version is added by sk.make_parser
     return parser
 
 

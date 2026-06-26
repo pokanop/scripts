@@ -1,4 +1,4 @@
-# 📚 medcat — Media Stack Ingest Tool · v2.1.0
+# 📚 medcat — Media Stack Ingest Tool · v2.2.0
 
 **Ingest media files into your media stack with metadata enrichment.**
 

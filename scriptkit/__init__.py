@@ -20,7 +20,8 @@ Typical use::
 
 from __future__ import annotations
 
-from . import config, console, proc, progress, style, tables, text
+from . import app, config, console, proc, progress, style, tables, text
+from .app import banner, examples_block, make_parser
 from .cli import (
     EXIT_ERROR,
     EXIT_INTERRUPT,
@@ -62,7 +63,9 @@ __version__ = "1.0.0"
 
 __all__ = [
     # submodules
-    "config", "console", "proc", "progress", "style", "tables", "text",
+    "app", "config", "console", "proc", "progress", "style", "tables", "text",
+    # app / identity
+    "banner", "examples_block", "make_parser",
     # style
     "styled", "icon", "ICONS", "use_color", "set_color", "strip_ansi",
     # console / messages

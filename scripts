@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts — Toolkit installer & lifecycle manager  v1.0.0
+scripts — Toolkit installer & lifecycle manager  v1.0.1
 Install, update, and diagnose the pokanop/scripts CLI toolkit.
 
 Usage:
@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # scriptkit is the shared toolkit library (lives alongside this file). It is
 # import-safe without third-party deps, but this installer must survive even a
@@ -716,23 +716,32 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
         print(f"   Restart your shell or run: {shell_source_hint()}")
 
 
+ICON = "🛠️"
+TAGLINE = "Toolkit installer & lifecycle manager"
+
+_EPILOG = (
+    "Examples:\n"
+    "  scripts install                 Install harness only\n"
+    "  scripts install medcat pluck    Add selected tools\n"
+    "  scripts install all             Install every tool\n"
+    "  scripts update                  Pull latest and refresh deps\n"
+    "  scripts uninstall               Remove install\n"
+    "  scripts uninstall medcat        Remove one tool\n"
+    "  scripts doctor                  Check environment\n"
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="scripts",
-        description="Install, update, and diagnose the pokanop/scripts CLI toolkit.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  scripts install                 Install harness only\n"
-            "  scripts install medcat pluck    Add selected tools\n"
-            "  scripts install all             Install every tool\n"
-            "  scripts update                  Pull latest and refresh deps\n"
-            "  scripts uninstall               Remove install\n"
-            "  scripts uninstall medcat        Remove one tool\n"
-            "  scripts doctor                  Check environment\n"
-        ),
-    )
-    parser.add_argument("-v", "--version", action="version", version=f"scripts {__version__}")
+    if _sk is not None:
+        parser = _sk.make_parser("scripts", __version__, TAGLINE, icon=ICON, epilog=_EPILOG)
+    else:  # bootstrap fallback when scriptkit is unavailable
+        parser = argparse.ArgumentParser(
+            prog="scripts",
+            description=f"scripts v{__version__} — {TAGLINE}",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog=_EPILOG,
+        )
+        parser.add_argument("-v", "--version", action="version", version=f"scripts {__version__}")
 
     sub = parser.add_subparsers(dest="command", required=True)
 

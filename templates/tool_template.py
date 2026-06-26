@@ -33,6 +33,11 @@ import scriptkit as sk
 
 __version__ = "0.1.0"
 
+# Brand identity — one house style for --help, --version, and runtime banners.
+# Pick a distinct emoji; keep the tagline short. See docs/scriptkit.md.
+ICON = "🧰"
+TAGLINE = "one-line description"
+
 # --- configuration ---------------------------------------------------------
 # Three-tier config: defaults < ~/.toolname/config.json < TOOLNAME_* env vars.
 CONFIG_DIR = Path(os.environ.get("TOOLNAME_CONFIG", Path.home() / ".toolname"))
@@ -80,17 +85,15 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 # --- CLI -------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="toolname",
-        description=f"toolname v{__version__} — one-line description",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  toolname hello --name Ada\n"
-            "  toolname doctor\n"
-        ),
+    # sk.make_parser gives the house identity line, a -v/--version flag, and an
+    # aligned Examples: epilog — the same first impression as every other tool.
+    parser = sk.make_parser(
+        "toolname", __version__, TAGLINE, icon=ICON,
+        examples=[
+            ("toolname hello --name Ada", "print a greeting"),
+            ("toolname doctor", "check the environment"),
+        ],
     )
-    parser.add_argument("-v", "--version", action="version", version=f"toolname {__version__}")
     sub = parser.add_subparsers(dest="command")
 
     hello = sub.add_parser("hello", help="Print a greeting")

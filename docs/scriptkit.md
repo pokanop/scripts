@@ -127,6 +127,41 @@ non-zero exit unless `check=True`.
   int return → exit code.
 - `sk.dispatch(args, handlers, parser)` — route `args.command` to a handler dict.
 
+### Identity & CLI framing (`scriptkit.app`)
+
+Every tool presents the **same first impression** — one identity line, a
+`-v/--version` flag, and an aligned `Examples:` epilog — by building its parser
+through `sk.make_parser` instead of `argparse.ArgumentParser`.
+
+```python
+ICON = "🚀"                        # one distinct brand emoji per tool
+TAGLINE = "does the thing"          # short; shown after the em-dash
+
+parser = sk.make_parser(
+    "mytool", __version__, TAGLINE, icon=ICON,
+    examples=[("mytool go", "run it"), ("mytool doctor", "check env")],
+)
+sub = parser.add_subparsers(dest="command")
+```
+
+- **`sk.banner(name, version, tagline, icon)`** → the identity line
+  `🚀 mytool v1.2.3 — does the thing` (name bold-cyan, version dim, NO_COLOR-aware).
+  Use it for `--help` (automatic via `make_parser`) *and* at runtime: `print(banner())`.
+- **`sk.make_parser(prog, version, tagline, *, icon, examples=None, epilog=None, …)`**
+  — sets the banner description, a `RawDescription` formatter, and a `-v/--version`
+  flag. Pass `examples=[(cmd, desc), …]` for an aligned epilog, or your own `epilog=`.
+- **`sk.examples_block(items)`** → the aligned `Examples:` block, if you want it standalone.
+
+> **`-v` means `--version` across the whole toolkit.** Don't reuse `-v` for
+> `--verbose` (use `--verbose`); a conflicting `-v` will fail to register.
+
+Define `ICON`/`TAGLINE` as module constants so the help banner, `--version`, and any
+runtime banner all read from one source of truth.
+
+The current brand emojis: 🛠️ scripts · 🤖 aikit · 🛳️ keyferry · 📚 medcat ·
+📡 netsy · 🪶 pluck · 🌊 voxtract. Use `sk.header("Section")` for in-tool section
+rules (`━━━ Section ━━━━━`) so sections look identical everywhere.
+
 ---
 
 ## Building a new tool

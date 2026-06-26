@@ -67,13 +67,13 @@ def step(n: int, total: int, text: str) -> None:
     print(f"{INDENT}{label} {text}")
 
 
-def header(text: str, width: int = 44) -> None:
-    """A section rule. Uses a rich rule when available, else an ASCII bar."""
-    if HAS_RICH and style.use_color():
-        console.print()
-        console.rule(f"[bold cyan]{text}[/]", style="cyan")
-        return
-    pad = max(3, width - len(text))
+def header(text: str, width: int = 50) -> None:
+    """A section header — one consistent look everywhere: ``━━━ Text ━━━━━``.
+
+    Bold accent rule, padded to ``width``. Kept identical across tools (and
+    across TTY/non-TTY) so sections feel familiar; color strips when off.
+    """
+    pad = max(3, width - len(text) - 5)
     print("\n" + style.styled(f"━━━ {text} {'━' * pad}", BOLD, CYAN))
 
 

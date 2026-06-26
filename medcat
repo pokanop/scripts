@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-medcat — Media Stack Ingest Tool  v2.1.0
+medcat — Media Stack Ingest Tool  v2.2.0
 Ingest media files into your media stack with metadata enrichment.
 
 Supported types: books (EPUB/PDF), comics (CBZ/CBR), audiobooks (M4B/MP3),
@@ -102,12 +102,16 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from rich.table import Table
 from rich.tree import Tree
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 import scriptkit as sk
 
 # Share the toolkit's console for consistent styling across tools.
 console = sk.rich_console
+
+# Brand identity — used for --help, --version, and runtime banners.
+ICON = "📚"
+TAGLINE = "Media Stack Ingest Tool"
 
 # ---------------------------------------------------------------------------
 # Configuration — generic, zero secrets, zero hardcoded hosts
@@ -3813,10 +3817,8 @@ def cmd_search(args):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(
-        prog="medcat",
-        description="Ingest media files into your media stack with metadata enrichment",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    parser = sk.make_parser(
+        "medcat", __version__, TAGLINE, icon=ICON,
         epilog=textwrap.dedent("""\
             examples:
               medcat setup                           # First-time interactive setup

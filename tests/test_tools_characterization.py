@@ -5,6 +5,7 @@ refactor is provably non-breaking: every assertion here passes before and
 after the tools are rewired onto the shared library.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -31,6 +32,39 @@ def test_tool_help_runs(tool):
     )
     assert proc.returncode == 0, proc.stderr
     assert tool in proc.stdout
+
+
+# Canonical brand emoji per tool — the unified identity line every tool shows.
+TOOL_ICONS = {
+    "scripts": "🛠", "aikit": "🤖", "keyferry": "🛳", "medcat": "📚",
+    "netsy": "📡", "pluck": "🪶", "voxtract": "🌊",
+}
+
+
+@pytest.mark.parametrize("tool", ALL_TOOLS)
+def test_tool_help_has_unified_identity(tool, tool_loader):
+    """Every tool's --help shows `{icon} {name} v{version} — {tagline}`."""
+    mod = tool_loader(tool)
+    version = mod.__version__
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / tool), "--help"],
+        capture_output=True, text=True, timeout=60, env={**os.environ, "NO_COLOR": "1"},
+    )
+    out = proc.stdout
+    assert TOOL_ICONS[tool] in out, f"{tool} missing brand emoji"
+    assert f"{tool} v{version} —" in out, f"{tool} missing unified identity line"
+
+
+@pytest.mark.parametrize("tool", ALL_TOOLS)
+def test_tool_version_flag(tool):
+    """Every tool supports `-v`/`--version` printing `<tool> <version>`, exit 0."""
+    for flag in ("-v", "--version"):
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / tool), flag],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert proc.returncode == 0, f"{tool} {flag}: {proc.stderr}"
+        assert tool in proc.stdout
 
 
 # --- build_parser smoke ----------------------------------------------------

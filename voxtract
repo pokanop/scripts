@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-voxtract — Voice Extract Tool  v3.0.0
+voxtract — Voice Extract Tool  v3.1.0
 Extract and isolate speech from video and audio across multiple sources.
 
 Sources: YouTube, Spotify, Jellyfin, Plex, podcasts (RSS), HTTP URLs, local files/directories.
@@ -65,7 +65,11 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
-__version__ = "3.0.0"
+__version__ = "3.1.0"
+
+# Brand identity — used for --help, --version, and runtime banners.
+ICON = "🌊"
+TAGLINE = "Voice Extract Tool"
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1999,11 +2003,11 @@ def cmd_info(args):
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(
-        prog="voxtract",
-        description=f"{icon('wave')} voxtract v{__version__} — Voice Extract Tool\nExtract and isolate speech from YouTube, Spotify, Jellyfin, Plex, podcasts, and more.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    parser = sk.make_parser(
+        "voxtract", __version__, TAGLINE, icon=ICON,
         epilog=f"""
+Extract and isolate speech from YouTube, Spotify, Jellyfin, Plex, podcasts, and more.
+
 Source URIs:
   youtube://VIDEO_ID           YouTube video
   spotify://track/ID           Spotify track (via spotdl → YouTube)
@@ -2036,7 +2040,7 @@ Config: ~/.voxtract/config.json
 Cache:  ~/.voxtract/cache/
 """
     )
-    parser.add_argument("--verbose", "-v", action="store_true", help="Show debug output (ffmpeg commands)")
+    parser.add_argument("--verbose", action="store_true", help="Show debug output (ffmpeg commands)")
     sub = parser.add_subparsers(dest="command", help="Commands")
 
     # fetch

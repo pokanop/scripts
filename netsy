@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-netsy — LAN Discovery Tool  v1.2.0
+netsy — LAN Discovery Tool  v1.2.1
 Ping-scan the local subnet and list live hosts with hostname, IP, MAC, and vendor.
 
 Architecture:
@@ -42,11 +42,15 @@ from rich.table import Table
 
 import scriptkit as sk
 
-__version__ = "1.2.0"
+__version__ = "1.2.1"
 
 # Share the toolkit's consoles for consistent styling across tools.
 console = sk.rich_console
 err_console = sk.err_console
+
+# Brand identity — used for --help, --version, and runtime banners.
+ICON = "📡"
+TAGLINE = "LAN Discovery Tool"
 
 _IP_PROBE_TARGETS = ("8.8.8.8", "1.1.1.1", "208.67.222.222")
 
@@ -774,10 +778,8 @@ def add_scan_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="netsy",
-        description=f"netsy v{__version__} — LAN Discovery Tool",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    parser = sk.make_parser(
+        "netsy", __version__, TAGLINE, icon=ICON,
         epilog="""
 Examples:
   netsy                              Scan auto-detected subnet
@@ -792,8 +794,6 @@ Why results vary:
   run-to-run. Use --thorough --passes 3, or find --watch for a specific host.
 """,
     )
-    parser.add_argument("-v", "--version", action="version", version=f"netsy {__version__}")
-
     sub = parser.add_subparsers(dest="command")
 
     scan_p = sub.add_parser("scan", help="Ping-scan a subnet for live hosts")

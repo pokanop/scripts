@@ -86,7 +86,7 @@ Run `scripts doctor` to verify PATH, Python deps, and system tools (`ffmpeg`, `n
 <tr>
 <td width="50%" valign="top">
 
-### 🔑 [keyferry](docs/keyferry.md)
+### 🛳️ [keyferry](docs/keyferry.md)
 
 **1Password ⇄ Bitwarden credential ferry**
 
@@ -110,7 +110,7 @@ Ingest books, comics, movies, shows, and music into your media stack with metada
 <tr>
 <td width="50%" valign="top">
 
-### 🎙️ [voxtract](docs/voxtract.md)
+### 🌊 [voxtract](docs/voxtract.md)
 
 **Voice extract tool**
 
@@ -198,9 +198,10 @@ sys.exit(sk.run_cli(main))                      # CliError → 1, Ctrl-C → 130
 5. Reuse `scriptkit` for all output/config/subprocess — don't re-roll helpers.
 
 > **Contributing or using an AI agent?** Read **[AGENTS.md](AGENTS.md)** — the full
-> guide to the runtime model, `scriptkit`, conventions, testing, and step-by-step
-> recipes for building a new tool or editing an existing one. (`CLAUDE.md` is a
-> symlink to it.)
+> guide to the runtime model, `scriptkit`, conventions, [versioning](AGENTS.md#versioning--changelog),
+> testing, and step-by-step recipes for building a new tool or editing an existing one.
+> (`CLAUDE.md` is a symlink to it.) Each tool is versioned independently; changes are
+> recorded in **[CHANGELOG.md](CHANGELOG.md)**.
 
 ---
 

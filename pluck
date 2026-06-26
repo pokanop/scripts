@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pluck — Config Key-Path Tool  v1.0.0
+pluck — Config Key-Path Tool  v1.0.1
 Copy, merge, read, set, and diff values at dot-separated paths across
 YAML, JSON, TOML, and .env files — one CLI, format-agnostic operations.
 
@@ -49,9 +49,10 @@ try:
 except ImportError:
     YAML = None  # type: ignore[misc, assignment]
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 EMOJI = "🪶"
+TAGLINE = "copy, merge, and edit config key paths (yaml · json · toml · env)"
 
 import scriptkit as sk
 
@@ -80,10 +81,7 @@ class PluckError(Exception):
 
 
 def banner() -> str:
-    return (
-        f"{EMOJI} [bold cyan]pluck[/bold cyan] [dim]v{__version__}[/dim] — "
-        "config key-path tool (yaml · json · toml · env)"
-    )
+    return sk.banner("pluck", __version__, TAGLINE, EMOJI)
 
 
 print_success = sk.success
@@ -702,7 +700,7 @@ def show_value(title: str, loaded: LoadedConfig, value: Any) -> None:
 
 
 def cmd_doctor(_args) -> None:
-    console.print(banner())
+    print(banner())
     console.print()
     table = Table(show_header=True, header_style="bold cyan", box=None, pad_edge=False)
     table.add_column("Check")
@@ -825,7 +823,7 @@ def _transfer(args, mode: str) -> None:
     changed = _apply_keys(src_loaded, dest_loaded, keys, mode, args.create_missing)
 
     if args.dry_run:
-        console.print(banner())
+        print(banner())
         console.print()
         print_info(
             f"Mode: {mode} · {src_fmt} → {dest_fmt} · keys: {', '.join(changed)}"
@@ -988,7 +986,7 @@ def cmd_diff(args) -> None:
 
 
 def cmd_formats(_args) -> None:
-    console.print(banner())
+    print(banner())
     console.print()
     table = Table(show_header=True, header_style="bold cyan")
     table.add_column("Format")
@@ -1004,10 +1002,8 @@ def cmd_formats(_args) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="pluck",
-        description=f"{EMOJI} pluck v{__version__} — copy, merge, and edit config key paths",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+    p = sk.make_parser(
+        "pluck", __version__, TAGLINE, icon=EMOJI,
         epilog=textwrap.dedent("""\
             Supported formats: yaml, json, toml, env (auto-detected from extension)
 
@@ -1027,7 +1023,6 @@ def build_parser() -> argparse.ArgumentParser:
               pluck diff a.yaml b.yaml model providers
         """),
     )
-    p.add_argument("-v", "--version", action="version", version=f"pluck {__version__}")
     sub = p.add_subparsers(dest="command")
 
     sub.add_parser("doctor", help="Check Python dependencies")
@@ -1120,7 +1115,7 @@ def main() -> None:
         elif args.command == "diff":
             cmd_diff(args)
         else:
-            console.print(banner())
+            print(banner())
             console.print()
             parser.print_help()
     except PluckError as exc:

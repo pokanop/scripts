@@ -1,4 +1,4 @@
-# 🔑 keyferry — 1Password ⇄ Bitwarden/Vaultwarden Credential Ferry
+# 🛳️ keyferry — 1Password ⇄ Bitwarden/Vaultwarden Credential Ferry
 
 **Intelligently migrate and sync passwords between 1Password and Bitwarden/Vaultwarden — with vault→collection mapping, content-aware deduplication, and timestamp-aware delta syncing that only updates when the source is newer.**
 

@@ -1,4 +1,4 @@
-# 🎙️ voxtract — Voice Extract Tool
+# 🌊 voxtract — Voice Extract Tool
 
 **Extract and isolate speech from any media source — YouTube, Jellyfin, Plex, Spotify, podcasts, direct URLs, or local files.**
 
