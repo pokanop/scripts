@@ -1,0 +1,1142 @@
+#!/usr/bin/env python3
+"""
+pluck — Config Key-Path Tool  v1.0.0
+Copy, merge, read, set, and diff values at dot-separated paths across
+YAML, JSON, TOML, and .env files — one CLI, format-agnostic operations.
+
+Architecture:
+    format adapter (load → dict tree, write back with format fidelity)
+        → dot-path navigation (nested dicts, list indices)
+        → copy | merge | get | set | diff
+        → optional backup / dry-run / cross-format transfer
+
+Usage:
+    pluck copy  SOURCE DEST model,providers,fallback_providers
+    pluck merge SOURCE DEST providers
+    pluck get   FILE model
+    pluck set   FILE model gpt-4o
+    pluck diff  A B model providers
+    pluck doctor
+
+Dependencies:
+    pip install ruamel.yaml rich tomli-w
+"""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import re
+import shutil
+import sys
+import textwrap
+import tomllib
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from enum import Enum
+from io import StringIO
+from pathlib import Path
+from typing import Any, Optional
+
+import tomli_w
+from rich.console import Console
+from rich.panel import Panel
+from rich.syntax import Syntax
+from rich.table import Table
+
+try:
+    from ruamel.yaml import YAML
+except ImportError:
+    YAML = None  # type: ignore[misc, assignment]
+
+__version__ = "1.0.0"
+
+EMOJI = "🪶"
+console = Console()
+err_console = Console(stderr=True)
+
+FORMAT_EXTENSIONS: dict[str, str] = {
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".json": "json",
+    ".toml": "toml",
+    ".env": "env",
+}
+
+
+class ConfigFormat(str, Enum):
+    YAML = "yaml"
+    JSON = "json"
+    TOML = "toml"
+    ENV = "env"
+
+
+class PluckError(Exception):
+    """User-facing error with a clean message."""
+
+
+def banner() -> str:
+    return (
+        f"{EMOJI} [bold cyan]pluck[/bold cyan] [dim]v{__version__}[/dim] — "
+        "config key-path tool (yaml · json · toml · env)"
+    )
+
+
+def print_success(text: str) -> None:
+    console.print(f"  ✅ {text}", style="bold green")
+
+
+def print_error(text: str) -> None:
+    err_console.print(f"  ❌ {text}", style="bold red")
+
+
+def print_info(text: str) -> None:
+    console.print(f"  ℹ️  {text}", style="dim")
+
+
+def print_warning(text: str) -> None:
+    console.print(f"  ⚠️  {text}", style="bold yellow")
+
+
+def detect_format(path: Path, override: Optional[str] = None) -> ConfigFormat:
+    if override:
+        try:
+            return ConfigFormat(override.lower())
+        except ValueError as exc:
+            raise PluckError(
+                f"unknown format {override!r} (yaml, json, toml, env)"
+            ) from exc
+    name = path.name.lower()
+    if name.startswith(".env") or name.endswith(".env"):
+        return ConfigFormat.ENV
+    ext = path.suffix.lower()
+    fmt = FORMAT_EXTENSIONS.get(ext)
+    if fmt:
+        return ConfigFormat(fmt)
+    raise PluckError(
+        f"cannot detect format for {path} "
+        "(use --format or a known extension: .yaml .json .toml .env)"
+    )
+
+
+def parse_path(path: str) -> list[str | int]:
+    """Parse dot paths with optional bracket indices: foo.bar[0].baz"""
+    if not path or not path.strip():
+        raise PluckError("key path cannot be empty")
+    parts: list[str | int] = []
+    for segment in path.split("."):
+        if not segment:
+            raise PluckError(f"invalid path {path!r}: empty segment")
+        buf = ""
+        i = 0
+        while i < len(segment):
+            ch = segment[i]
+            if ch == "[":
+                if buf:
+                    parts.append(buf)
+                    buf = ""
+                close = segment.find("]", i)
+                if close == -1:
+                    raise PluckError(f"invalid path {path!r}: unclosed [")
+                idx_text = segment[i + 1 : close].strip()
+                if not idx_text.isdigit():
+                    raise PluckError(f"invalid path {path!r}: index must be numeric")
+                parts.append(int(idx_text))
+                i = close + 1
+                continue
+            buf += ch
+            i += 1
+        if buf:
+            parts.append(buf)
+    return parts
+
+
+def get_at(data: Any, path: str) -> Any:
+    node = data
+    for part in parse_path(path):
+        if isinstance(part, int):
+            if not isinstance(node, list):
+                raise PluckError(f"path {path!r}: expected list at index {part}")
+            if part < 0 or part >= len(node):
+                raise PluckError(f"path {path!r}: index {part} out of range")
+            node = node[part]
+        else:
+            if not isinstance(node, dict) or part not in node:
+                raise PluckError(f"path {path!r}: key {part!r} not found")
+            node = node[part]
+    return node
+
+
+def path_exists(data: Any, path: str) -> bool:
+    try:
+        get_at(data, path)
+        return True
+    except PluckError:
+        return False
+
+
+def set_at(data: Any, path: str, value: Any) -> None:
+    parts = parse_path(path)
+    if not parts:
+        raise PluckError("key path cannot be empty")
+
+    node = data
+    for part in parts[:-1]:
+        if isinstance(part, int):
+            if not isinstance(node, list):
+                raise PluckError(f"path {path!r}: expected list at index {part}")
+            node = node[part]
+        else:
+            if not isinstance(node, dict):
+                raise PluckError(f"path {path!r}: expected mapping at {part!r}")
+            if part not in node:
+                raise PluckError(
+                    f"path {path!r}: key {part!r} not found (use --create-missing)"
+                )
+            node = node[part]
+
+    leaf = parts[-1]
+    if isinstance(leaf, int):
+        if not isinstance(node, list):
+            raise PluckError(f"path {path!r}: expected list at index {leaf}")
+        if leaf < 0 or leaf >= len(node):
+            raise PluckError(f"path {path!r}: index {leaf} out of range")
+        node[leaf] = value
+    else:
+        if not isinstance(node, dict):
+            raise PluckError(f"path {path!r}: expected mapping for key {leaf!r}")
+        node[leaf] = value
+
+
+def ensure_at(data: Any, path: str) -> tuple[Any, str | int]:
+    parts = parse_path(path)
+    if not parts:
+        raise PluckError("key path cannot be empty")
+
+    node = data
+    for part in parts[:-1]:
+        if isinstance(part, int):
+            if not isinstance(node, list):
+                raise PluckError(f"path {path!r}: cannot create index under non-list")
+            while len(node) <= part:
+                node.append({})
+            if node[part] is None:
+                node[part] = {}
+            node = node[part]
+        else:
+            if not isinstance(node, dict):
+                raise PluckError(f"path {path!r}: cannot create key under non-mapping")
+            if part not in node or node[part] is None:
+                node[part] = {}
+            node = node[part]
+    return node, parts[-1]
+
+
+def set_at_create(data: Any, path: str, value: Any) -> None:
+    parent, leaf = ensure_at(data, path)
+    if isinstance(leaf, int):
+        if not isinstance(parent, list):
+            raise PluckError(f"path {path!r}: expected list parent")
+        while len(parent) <= leaf:
+            parent.append(None)
+        parent[leaf] = value
+    else:
+        if not isinstance(parent, dict):
+            raise PluckError(f"path {path!r}: expected mapping parent")
+        parent[leaf] = value
+
+
+def deep_merge(base: Any, override: Any) -> Any:
+    if isinstance(base, dict) and isinstance(override, dict):
+        out = copy.deepcopy(base)
+        for key, val in override.items():
+            if key in out and isinstance(out[key], dict) and isinstance(val, dict):
+                out[key] = deep_merge(out[key], val)
+            else:
+                out[key] = copy.deepcopy(val)
+        return out
+    return copy.deepcopy(override)
+
+
+def clone_value(value: Any) -> Any:
+    return copy.deepcopy(value)
+
+
+def expand_key_specs(specs: list[str]) -> list[str]:
+    keys: list[str] = []
+    for spec in specs:
+        for part in re.split(r"[,\s]+", spec.strip()):
+            part = part.strip()
+            if part:
+                keys.append(part)
+    return keys
+
+
+def resolve_keys(args) -> list[str]:
+    keys = expand_key_specs(list(args.keys or []))
+    if getattr(args, "key_paths", None):
+        keys.extend(expand_key_specs(args.key_paths))
+    if args.keys_file:
+        path = Path(args.keys_file)
+        if not path.exists():
+            raise PluckError(f"keys file not found: {path}")
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                keys.extend(expand_key_specs([line]))
+    if not keys:
+        raise PluckError(
+            "specify at least one key path (positional keys, -k, or --keys-file)"
+        )
+    seen: set[str] = set()
+    unique: list[str] = []
+    for key in keys:
+        if key not in seen:
+            seen.add(key)
+            unique.append(key)
+    return unique
+
+
+def parse_value(text: str, fmt: ConfigFormat) -> Any:
+    if fmt == ConfigFormat.JSON:
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
+    if fmt == ConfigFormat.TOML:
+        try:
+            return tomllib.loads(f"v = {text}")["v"]
+        except tomllib.TOMLDecodeError:
+            return text
+    if fmt == ConfigFormat.YAML:
+        if YAML is None:
+            raise PluckError("ruamel.yaml is required for YAML value parsing")
+        y = yaml_engine()
+        try:
+            loaded = y.load(text)
+        except Exception:  # noqa: BLE001
+            return text
+        return loaded
+    return text
+
+
+def path_to_env_key(path: str) -> str:
+    """Map a dot-path to a conventional flat .env key."""
+    key = re.sub(r"\[(\d+)\]", r"_\1", path)
+    return key.replace(".", "_").upper()
+
+
+def serialize_for_env(value: Any) -> str:
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, separators=(",", ":"))
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def yaml_engine() -> YAML:
+    if YAML is None:
+        raise PluckError("ruamel.yaml is required (pip install ruamel.yaml)")
+    y = YAML()
+    y.preserve_quotes = True
+    y.default_flow_style = False
+    y.width = 4096
+    return y
+
+
+@dataclass
+class LoadedConfig:
+    data: Any
+    format: ConfigFormat
+    path: Path
+    env_doc: Optional["EnvDocument"] = None
+
+
+class FormatHandler(ABC):
+    format: ConfigFormat
+
+    @abstractmethod
+    def load(self, path: Path) -> LoadedConfig:
+        ...
+
+    @abstractmethod
+    def save(self, loaded: LoadedConfig, path: Path) -> None:
+        ...
+
+    def dump_preview(self, data: Any) -> str:
+        return json.dumps(data, indent=2, default=str)
+
+
+@dataclass
+class EnvLine:
+    raw: str
+    kind: str  # blank, comment, kv
+    key: Optional[str] = None
+    value: Optional[str] = None
+    exported: bool = False
+    quote: Optional[str] = None  # single, double, or None
+
+
+@dataclass
+class EnvDocument:
+    lines: list[EnvLine] = field(default_factory=list)
+    data: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def parse(cls, text: str) -> EnvDocument:
+        doc = cls()
+        for raw in text.splitlines():
+            stripped = raw.strip()
+            if not stripped:
+                doc.lines.append(EnvLine(raw=raw, kind="blank"))
+                continue
+            if stripped.startswith("#"):
+                doc.lines.append(EnvLine(raw=raw, kind="comment"))
+                continue
+
+            line = stripped
+            exported = False
+            if line.startswith("export "):
+                exported = True
+                line = line[7:].strip()
+
+            if "=" not in line:
+                doc.lines.append(EnvLine(raw=raw, kind="comment"))
+                continue
+
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            quote = None
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                quote = "double" if value[0] == '"' else "single"
+                value = value[1:-1]
+
+            doc.lines.append(
+                EnvLine(
+                    raw=raw,
+                    kind="kv",
+                    key=key,
+                    value=value,
+                    exported=exported,
+                    quote=quote,
+                )
+            )
+            doc.data[key] = value
+        return doc
+
+    def set_key(self, key: str, value: str, exported: bool = False) -> None:
+        self.data[key] = value
+        for line in self.lines:
+            if line.kind == "kv" and line.key == key:
+                line.value = value
+                line.exported = exported or line.exported
+                return
+        self.lines.append(
+            EnvLine(raw="", kind="kv", key=key, value=value, exported=exported)
+        )
+
+    def render(self) -> str:
+        out: list[str] = []
+        for line in self.lines:
+            if line.kind in ("blank", "comment"):
+                out.append(line.raw)
+                continue
+            if line.kind == "kv" and line.key is not None:
+                val = line.value or ""
+                needs_quote = any(ch in val for ch in " #\t\"'\\$") or not val
+                if line.quote == "double" or (needs_quote and line.quote != "single"):
+                    val = json.dumps(val)
+                elif line.quote == "single":
+                    val = f"'{val}'"
+                prefix = "export " if line.exported else ""
+                out.append(f"{prefix}{line.key}={val}")
+                continue
+            out.append(line.raw)
+        return "\n".join(out) + ("\n" if out else "")
+
+
+class YamlHandler(FormatHandler):
+    format = ConfigFormat.YAML
+
+    def load(self, path: Path) -> LoadedConfig:
+        if not path.exists():
+            raise PluckError(f"file not found: {path}")
+        y = yaml_engine()
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                data = y.load(fh)
+        except Exception as exc:  # noqa: BLE001
+            raise PluckError(f"could not parse {path}: {exc}") from exc
+        if data is None:
+            data = {}
+        if not isinstance(data, (dict, list)):
+            raise PluckError(
+                f"{path} root must be a mapping or sequence, got {type(data).__name__}"
+            )
+        return LoadedConfig(data=data, format=self.format, path=path)
+
+    def save(self, loaded: LoadedConfig, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        y = yaml_engine()
+        with path.open("w", encoding="utf-8") as fh:
+            y.dump(loaded.data, fh)
+
+    def dump_preview(self, data: Any) -> str:
+        y = yaml_engine()
+        buf = StringIO()
+        y.dump(data, buf)
+        return buf.getvalue().rstrip() or "(empty)"
+
+
+class JsonHandler(FormatHandler):
+    format = ConfigFormat.JSON
+
+    def load(self, path: Path) -> LoadedConfig:
+        if not path.exists():
+            raise PluckError(f"file not found: {path}")
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise PluckError(f"could not parse {path}: {exc}") from exc
+        if not isinstance(data, (dict, list)):
+            raise PluckError(
+                f"{path} root must be an object or array, got {type(data).__name__}"
+            )
+        return LoadedConfig(data=data, format=self.format, path=path)
+
+    def save(self, loaded: LoadedConfig, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(loaded.data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+    def dump_preview(self, data: Any) -> str:
+        return json.dumps(data, indent=2, default=str)
+
+
+class TomlHandler(FormatHandler):
+    format = ConfigFormat.TOML
+
+    def load(self, path: Path) -> LoadedConfig:
+        if not path.exists():
+            raise PluckError(f"file not found: {path}")
+        try:
+            with path.open("rb") as fh:
+                data = tomllib.load(fh)
+        except tomllib.TOMLDecodeError as exc:
+            raise PluckError(f"could not parse {path}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise PluckError(f"{path} root must be a table, got {type(data).__name__}")
+        return LoadedConfig(data=data, format=self.format, path=path)
+
+    def save(self, loaded: LoadedConfig, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(tomli_w.dumps(loaded.data))
+
+    def dump_preview(self, data: Any) -> str:
+        return tomli_w.dumps(data).decode("utf-8").rstrip() or "(empty)"
+
+
+class EnvHandler(FormatHandler):
+    format = ConfigFormat.ENV
+
+    def load(self, path: Path) -> LoadedConfig:
+        if not path.exists():
+            raise PluckError(f"file not found: {path}")
+        env_doc = EnvDocument.parse(path.read_text(encoding="utf-8"))
+        return LoadedConfig(
+            data=env_doc.data,
+            format=self.format,
+            path=path,
+            env_doc=env_doc,
+        )
+
+    def save(self, loaded: LoadedConfig, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if loaded.env_doc is None:
+            loaded.env_doc = EnvDocument.parse("")
+            for key, value in loaded.data.items():
+                loaded.env_doc.set_key(key, value)
+        else:
+            for key, value in loaded.data.items():
+                if key not in loaded.env_doc.data:
+                    loaded.env_doc.set_key(key, str(value))
+                else:
+                    loaded.env_doc.set_key(key, str(value))
+        path.write_text(loaded.env_doc.render(), encoding="utf-8")
+
+    def dump_preview(self, data: Any) -> str:
+        lines = [f"{k}={serialize_for_env(v)}" for k, v in data.items()]
+        return "\n".join(lines) or "(empty)"
+
+
+HANDLERS: dict[ConfigFormat, FormatHandler] = {
+    ConfigFormat.YAML: YamlHandler(),
+    ConfigFormat.JSON: JsonHandler(),
+    ConfigFormat.TOML: TomlHandler(),
+    ConfigFormat.ENV: EnvHandler(),
+}
+
+
+def handler_for(fmt: ConfigFormat) -> FormatHandler:
+    return HANDLERS[fmt]
+
+
+def load_config(path: Path, fmt: Optional[str] = None) -> LoadedConfig:
+    detected = detect_format(path, fmt)
+    return handler_for(detected).load(path)
+
+
+def write_config(
+    loaded: LoadedConfig,
+    path: Path,
+    fmt: Optional[str] = None,
+    backup: bool = False,
+) -> None:
+    target_fmt = detect_format(path, fmt or loaded.format.value)
+    if backup and path.exists():
+        backup_path = path.with_suffix(path.suffix + ".bak")
+        shutil.copy2(path, backup_path)
+        print_info(f"Backup: {backup_path}")
+    handler_for(target_fmt).save(loaded, path)
+
+
+def env_apply_key(
+    loaded: LoadedConfig,
+    path: str,
+    value: Any,
+    create_missing: bool,
+) -> None:
+    if loaded.env_doc is None:
+        raise PluckError("internal error: env document missing")
+    if "." in path or "[" in path:
+        env_key = path_to_env_key(path)
+        env_val = serialize_for_env(value)
+        loaded.env_doc.set_key(env_key, env_val)
+        loaded.data[env_key] = env_val
+        return
+
+    if not create_missing and path not in loaded.data:
+        raise PluckError(
+            f"destination missing key: {path} (pass --create-missing to add it)"
+        )
+    env_val = serialize_for_env(value)
+    loaded.env_doc.set_key(path, env_val)
+    loaded.data[path] = env_val
+
+
+def env_get_key(loaded: LoadedConfig, path: str) -> Any:
+    if path in loaded.data:
+        return loaded.data[path]
+    env_key = path_to_env_key(path)
+    if env_key in loaded.data:
+        raw = loaded.data[env_key]
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+    raise PluckError(f"path {path!r}: key not found in .env")
+
+
+def env_path_exists(loaded: LoadedConfig, path: str) -> bool:
+    try:
+        env_get_key(loaded, path)
+        return True
+    except PluckError:
+        return False
+
+
+def apply_key(
+    dest: LoadedConfig,
+    path: str,
+    value: Any,
+    create_missing: bool,
+) -> None:
+    if dest.format == ConfigFormat.ENV:
+        env_apply_key(dest, path, value, create_missing)
+        return
+    if create_missing:
+        set_at_create(dest.data, path, value)
+    else:
+        set_at(dest.data, path, value)
+
+
+def get_key(loaded: LoadedConfig, path: str) -> Any:
+    if loaded.format == ConfigFormat.ENV:
+        return env_get_key(loaded, path)
+    return get_at(loaded.data, path)
+
+
+def key_exists(loaded: LoadedConfig, path: str) -> bool:
+    if loaded.format == ConfigFormat.ENV:
+        return env_path_exists(loaded, path)
+    return path_exists(loaded.data, path)
+
+
+def show_value(title: str, loaded: LoadedConfig, value: Any) -> None:
+    handler = handler_for(loaded.format)
+    if isinstance(value, dict) and loaded.format == ConfigFormat.ENV:
+        text = handler.dump_preview(value)
+        lexer = "bash"
+    else:
+        if loaded.format == ConfigFormat.YAML:
+            y = yaml_engine()
+            buf = StringIO()
+            y.dump(value, buf)
+            text = buf.getvalue().rstrip() or "(empty)"
+            lexer = "yaml"
+        elif loaded.format == ConfigFormat.JSON:
+            text = json.dumps(value, indent=2, default=str)
+            lexer = "json"
+        elif loaded.format == ConfigFormat.TOML:
+            text = tomli_w.dumps(value).decode("utf-8").rstrip() or "(empty)"
+            lexer = "toml"
+        else:
+            text = str(value)
+            lexer = "bash"
+    console.print(
+        Panel(
+            Syntax(text, lexer, theme="monokai", line_numbers=False),
+            title=title,
+            border_style="cyan",
+        )
+    )
+
+
+def cmd_doctor(_args) -> None:
+    console.print(banner())
+    console.print()
+    table = Table(show_header=True, header_style="bold cyan", box=None, pad_edge=False)
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail", style="dim")
+
+    if YAML is not None:
+        table.add_row("Python: ruamel.yaml", "✅", "YAML round-trip loader")
+    else:
+        table.add_row("Python: ruamel.yaml", "❌", "pip install ruamel.yaml")
+
+    table.add_row("Python: tomllib", "✅", "TOML reader (stdlib)")
+    table.add_row("Python: tomli-w", "✅", "TOML writer")
+    table.add_row("Python: rich", "✅", "terminal output")
+    table.add_row("Formats", "✅", "yaml · json · toml · env")
+
+    console.print(table)
+    console.print()
+    if YAML is None:
+        sys.exit(1)
+
+
+def resolve_file_format(path: Path, explicit: Optional[str], role: str) -> str:
+    if explicit:
+        return explicit
+    try:
+        return detect_format(path).value
+    except PluckError as exc:
+        raise PluckError(f"{role}: {exc}") from exc
+
+
+def cmd_get(args) -> None:
+    path = Path(args.file)
+    fmt = resolve_file_format(path, args.format, "get")
+    loaded = load_config(path, fmt)
+    value = get_key(loaded, args.path)
+    if args.json:
+        console.print(json.dumps(value, indent=2, default=str))
+    else:
+        show_value(f"{path.name} → {args.path}", loaded, value)
+
+
+def cmd_set(args) -> None:
+    path = Path(args.file)
+    fmt = resolve_file_format(path, args.format, "set")
+    loaded = load_config(path, fmt)
+    value = parse_value(args.value, ConfigFormat(fmt))
+    create = args.create_missing or loaded.format == ConfigFormat.ENV
+    apply_key(loaded, args.path, value, create)
+    if args.dry_run:
+        show_value(f"would set {args.path}", loaded, value)
+        return
+    write_config(loaded, path, fmt, backup=args.backup)
+    print_success(f"Set {args.path} in {path}")
+
+
+def _apply_keys(
+    source: LoadedConfig,
+    dest: LoadedConfig,
+    keys: list[str],
+    mode: str,
+    create_missing: bool,
+) -> list[str]:
+    changed: list[str] = []
+    for key in keys:
+        if not key_exists(source, key):
+            raise PluckError(f"source missing key: {key}")
+        src_val = get_key(source, key)
+        if mode == "copy":
+            new_val = clone_value(src_val)
+        else:
+            if key_exists(dest, key):
+                if dest.format == ConfigFormat.ENV:
+                    existing = get_key(dest, key)
+                    if isinstance(existing, str) and isinstance(src_val, dict):
+                        try:
+                            existing = json.loads(existing)
+                        except json.JSONDecodeError:
+                            existing = {"value": existing}
+                        new_val = deep_merge(existing, src_val)
+                    else:
+                        new_val = deep_merge(existing, src_val)
+                else:
+                    new_val = deep_merge(get_key(dest, key), src_val)
+            else:
+                new_val = clone_value(src_val)
+        apply_key(dest, key, new_val, create_missing)
+        changed.append(key)
+    return changed
+
+
+def _transfer(args, mode: str) -> None:
+    source = Path(args.source)
+    dest = Path(args.dest)
+    src_fmt = resolve_file_format(source, args.src_format, "source")
+    dest_fmt = resolve_file_format(dest, args.dest_format, "destination")
+    keys = resolve_keys(args)
+
+    src_loaded = load_config(source, src_fmt)
+    if dest.exists():
+        dest_loaded = load_config(dest, dest_fmt)
+    elif args.create_missing:
+        if dest_fmt == "env":
+            dest_loaded = LoadedConfig(
+                data={},
+                format=ConfigFormat.ENV,
+                path=dest,
+                env_doc=EnvDocument.parse(""),
+            )
+        else:
+            dest_loaded = LoadedConfig(data={}, format=ConfigFormat(dest_fmt), path=dest)
+    else:
+        raise PluckError(
+            f"destination not found: {dest} (pass --create-missing to create)"
+        )
+
+    if dest_fmt != "env" and not isinstance(dest_loaded.data, dict):
+        raise PluckError(f"{dest} root must be a mapping for key-path updates")
+
+    changed = _apply_keys(src_loaded, dest_loaded, keys, mode, args.create_missing)
+
+    if args.dry_run:
+        console.print(banner())
+        console.print()
+        print_info(
+            f"Mode: {mode} · {src_fmt} → {dest_fmt} · keys: {', '.join(changed)}"
+        )
+        handler = handler_for(ConfigFormat(dest_fmt))
+        text = handler.dump_preview(dest_loaded.data)
+        lexer = {"yaml": "yaml", "json": "json", "toml": "toml", "env": "bash"}[dest_fmt]
+        console.print(
+            Panel(
+                Syntax(text, lexer, theme="monokai", line_numbers=False),
+                title=f"preview → {dest.name}",
+                border_style="cyan",
+            )
+        )
+        return
+
+    write_config(dest_loaded, dest, dest_fmt, backup=args.backup)
+    verb = "Copied" if mode == "copy" else "Merged"
+    print_success(
+        f"{verb} {len(changed)} key(s) from {source.name} ({src_fmt}) → "
+        f"{dest.name} ({dest_fmt})"
+    )
+    for key in changed:
+        console.print(f"     • {key}", style="dim")
+
+
+def cmd_copy(args) -> None:
+    _transfer(args, mode="copy")
+
+
+def cmd_merge(args) -> None:
+    _transfer(args, mode="merge")
+
+
+def _brief(value: Any, limit: int = 60) -> str:
+    if isinstance(value, (dict, list)):
+        text = json.dumps(value, default=str)
+    else:
+        text = str(value)
+    if len(text) > limit:
+        return text[: limit - 1] + "…"
+    return text
+
+
+def _path_label_candidates(path: Path, arg: Optional[str] = None) -> list[str]:
+    """Progressively more specific labels for a config file path."""
+    name = path.name
+    candidates = [name]
+    parent = path.parent
+    if parent.name and str(parent) not in (".", ""):
+        parent_label = f"{parent.name}/{name}"
+        if parent_label not in candidates:
+            candidates.append(parent_label)
+    full = (arg or str(path)).strip()
+    if full and full not in candidates:
+        candidates.append(full)
+    return candidates
+
+
+def _truncate_label(text: str, max_len: int) -> str:
+    if len(text) <= max_len:
+        return text
+    return "..." + text[-(max_len - 3) :]
+
+
+def diff_column_labels(
+    left: Path,
+    right: Path,
+    left_fmt: str,
+    right_fmt: str,
+    *,
+    left_arg: Optional[str] = None,
+    right_arg: Optional[str] = None,
+    max_len: int = 48,
+) -> tuple[str, str]:
+    """Build distinct diff column headers; add path context when basenames collide."""
+    left_cands = _path_label_candidates(left, left_arg)
+    right_cands = _path_label_candidates(right, right_arg)
+    depth = max(len(left_cands), len(right_cands))
+
+    for i in range(depth):
+        l_base = left_cands[min(i, len(left_cands) - 1)]
+        r_base = right_cands[min(i, len(right_cands) - 1)]
+        if l_base != r_base or i == depth - 1:
+            return (
+                _truncate_label(f"{l_base} ({left_fmt})", max_len),
+                _truncate_label(f"{r_base} ({right_fmt})", max_len),
+            )
+
+    return (
+        _truncate_label(f"{left.name} ({left_fmt})", max_len),
+        _truncate_label(f"{right.name} ({right_fmt})", max_len),
+    )
+
+
+def cmd_diff(args) -> None:
+    left = Path(args.a)
+    right = Path(args.b)
+    left_fmt = resolve_file_format(left, args.src_format, "left file")
+    right_fmt = resolve_file_format(right, args.dest_format, "right file")
+    keys = resolve_keys(args) if args.keys or args.keys_file else None
+
+    left_loaded = load_config(left, left_fmt)
+    right_loaded = load_config(right, right_fmt)
+
+    if keys is None:
+        if left_fmt == "env" or right_fmt == "env":
+            keys = sorted(
+                set(left_loaded.data) | set(right_loaded.data)
+            )
+        elif isinstance(left_loaded.data, dict) and isinstance(right_loaded.data, dict):
+            keys = sorted(set(left_loaded.data) | set(right_loaded.data))
+        else:
+            raise PluckError("diff without keys requires mapping roots on both sides")
+
+    left_label, right_label = diff_column_labels(
+        left,
+        right,
+        left_fmt,
+        right_fmt,
+        left_arg=args.a,
+        right_arg=args.b,
+    )
+
+    table = Table(title="Diff", header_style="bold cyan", title_style="bold")
+    table.add_column("Key")
+    table.add_column(left_label, style="cyan")
+    table.add_column(right_label, style="magenta")
+    table.add_column("Status")
+
+    for key in keys:
+        in_l = key_exists(left_loaded, key)
+        in_r = key_exists(right_loaded, key)
+        if not in_l and not in_r:
+            status = "missing both"
+            lv = rv = "—"
+        elif not in_l:
+            status = "only right"
+            lv = "—"
+            rv = _brief(get_key(right_loaded, key))
+        elif not in_r:
+            status = "only left"
+            lv = _brief(get_key(left_loaded, key))
+            rv = "—"
+        else:
+            lv = get_key(left_loaded, key)
+            rv = get_key(right_loaded, key)
+            status = "same" if lv == rv else "different"
+            lv, rv = _brief(lv), _brief(rv)
+        style = (
+            "green"
+            if status == "same"
+            else "yellow"
+            if status == "different"
+            else "dim"
+        )
+        table.add_row(key, lv, rv, f"[{style}]{status}[/{style}]")
+
+    console.print(table)
+
+
+def cmd_formats(_args) -> None:
+    console.print(banner())
+    console.print()
+    table = Table(show_header=True, header_style="bold cyan")
+    table.add_column("Format")
+    table.add_column("Extensions")
+    table.add_column("Notes")
+    table.add_row("yaml", ".yaml .yml", "round-trip comments via ruamel.yaml")
+    table.add_row("json", ".json", "pretty-printed output")
+    table.add_row("toml", ".toml", "stdlib read + tomli-w write")
+    table.add_row("env", ".env .env.*", "flat keys; nested paths → UPPER_SNAKE")
+    console.print(table)
+    console.print()
+    print_info("Format auto-detected from extension; override with --format / --src-format / --dest-format")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="pluck",
+        description=f"{EMOJI} pluck v{__version__} — copy, merge, and edit config key paths",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            Supported formats: yaml, json, toml, env (auto-detected from extension)
+
+            Key paths use dot notation; list indices use brackets:
+              model
+              providers.openai
+              servers[0].host
+
+            .env files use flat keys; nested paths map to UPPER_SNAKE names:
+              providers.openai  →  PROVIDERS_OPENAI
+
+            Examples:
+              pluck copy src.yaml dst.json model,providers
+              pluck copy settings.toml .env.local database
+              pluck get config.yaml model
+              pluck set .env API_KEY sk-xxx
+              pluck diff a.yaml b.yaml model providers
+        """),
+    )
+    p.add_argument("-v", "--version", action="version", version=f"pluck {__version__}")
+    sub = p.add_subparsers(dest="command")
+
+    sub.add_parser("doctor", help="Check Python dependencies")
+    sub.add_parser("formats", help="List supported config formats")
+
+    def add_format_flags(parser, include_transfer: bool = False):
+        parser.add_argument(
+            "--format",
+            metavar="FMT",
+            help="force file format (yaml, json, toml, env)",
+        )
+        if include_transfer:
+            parser.add_argument(
+                "--src-format",
+                metavar="FMT",
+                help="source format override for cross-format copy/merge/diff",
+            )
+            parser.add_argument(
+                "--dest-format",
+                metavar="FMT",
+                help="destination format override for cross-format copy/merge/diff",
+            )
+
+    gp = sub.add_parser("get", help="Print a key path from a config file")
+    gp.add_argument("file", help="config file")
+    gp.add_argument("path", help="dot-separated key path")
+    gp.add_argument("--json", action="store_true", help="emit JSON instead of formatted output")
+    add_format_flags(gp)
+
+    sp = sub.add_parser("set", help="Set a key path in a config file")
+    sp.add_argument("file", help="config file")
+    sp.add_argument("path", help="dot-separated key path")
+    sp.add_argument("value", help="value (parsed per format; plain strings work too)")
+    sp.add_argument("--create-missing", action="store_true", help="create missing keys")
+    sp.add_argument("-n", "--dry-run", action="store_true", help="preview without writing")
+    sp.add_argument("--backup", action="store_true", help="write .bak before saving")
+    add_format_flags(sp)
+
+    def add_transfer_flags(parser):
+        parser.add_argument("source", help="source config file")
+        parser.add_argument("dest", help="destination config file")
+        parser.add_argument("key_paths", nargs="*", metavar="KEY",
+                            help="key paths (comma/space-separated)")
+        parser.add_argument("-k", "--keys", action="append", default=[], metavar="KEYS",
+                            help="key paths (comma/space-separated; repeatable)")
+        parser.add_argument("--keys-file", metavar="FILE",
+                            help="file with key paths, one per line (# comments allowed)")
+        parser.add_argument("--create-missing", action="store_true",
+                            help="create dest file or missing key paths")
+        parser.add_argument("-n", "--dry-run", action="store_true", help="preview without writing")
+        parser.add_argument("--backup", action="store_true", help="write .bak before saving")
+        add_format_flags(parser, include_transfer=True)
+
+    cp = sub.add_parser("copy", help="Overwrite key paths in dest from source")
+    add_transfer_flags(cp)
+
+    mp = sub.add_parser("merge", help="Deep-merge key paths from source into dest")
+    add_transfer_flags(mp)
+
+    dp = sub.add_parser("diff", help="Compare key paths between two config files")
+    dp.add_argument("a", help="first config file")
+    dp.add_argument("b", help="second config file")
+    dp.add_argument("key_paths", nargs="*", metavar="KEY",
+                    help="key paths to compare (default: all top-level keys)")
+    dp.add_argument("-k", "--keys", action="append", default=[], metavar="KEYS",
+                    help="key paths (comma/space-separated; repeatable)")
+    dp.add_argument("--keys-file", metavar="FILE", help="file with key paths to compare")
+    add_format_flags(dp, include_transfer=True)
+
+    return p
+
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
+    try:
+        if args.command == "doctor":
+            cmd_doctor(args)
+        elif args.command == "formats":
+            cmd_formats(args)
+        elif args.command == "get":
+            cmd_get(args)
+        elif args.command == "set":
+            cmd_set(args)
+        elif args.command == "copy":
+            cmd_copy(args)
+        elif args.command == "merge":
+            cmd_merge(args)
+        elif args.command == "diff":
+            cmd_diff(args)
+        else:
+            console.print(banner())
+            console.print()
+            parser.print_help()
+    except PluckError as exc:
+        print_error(str(exc))
+        sys.exit(1)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⏹ Interrupted.[/yellow]")
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
