@@ -29,26 +29,26 @@ aikit setup
 
 | # | Agent | Install | Auth |
 |---|-------|---------|------|
-| 1 | 🧠 **Claude Code** | `curl` script | OAuth (browser) or `ANTHROPIC_API_KEY` |
-| 2 | 🛸 **Antigravity** | `curl` script | OAuth (Google account) |
-| 3 | 🖱️ **Cursor CLI** | `curl` script | OAuth (`agent` or `cursor-agent`) |
-| 4 | ☤ **Hermes Agent** | `curl` script | OAuth (Nous Portal) or API keys |
-| 5 | 📟 **Codex CLI** | `curl` script | OAuth (ChatGPT) or `OPENAI_API_KEY` |
-| 6 | ⚡ **Kilo CLI** | `npm` | Kilo account or BYOK |
-| 7 | 🔓 **OpenCode** | `npm` | Provider API keys |
-| 8 | 🐉 **Qwen Code** | `npm` | Alibaba Coding Plan or API keys |
-| 9 | 🐙 **GitHub Copilot CLI** | `curl` script | `GH_TOKEN` PAT or OAuth |
-| 10 | 🚀 **Grok Build** | `curl` script | OAuth (`grok` or `agent`) or `XAI_API_KEY` |
+| 1 | 🧠 **Claude Code** | `curl` script | OAuth (browser) or `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` |
+| 2 | 🛸 **Antigravity** | `curl` script | OAuth (Google account via `agy`) |
+| 3 | 🖱️ **Cursor CLI** | `curl` script | `agent login` OAuth or `CURSOR_API_KEY` |
+| 4 | ☤ **Hermes Agent** | `curl` script | `hermes setup --portal` (Nous Portal OAuth) or `hermes model` for API keys |
+| 5 | 📟 **Codex CLI** | `curl` script | `codex login` (ChatGPT OAuth) or `OPENAI_API_KEY` |
+| 6 | ⚡ **Kilo CLI** | `npm` | `kilo auth login` (Kilo account) or `/connect` for BYOK |
+| 7 | 🔓 **OpenCode** | `npm` | `opencode auth login` for provider API keys |
+| 8 | 🐉 **Qwen Code** | `npm` | `/auth` inside `qwen` (OAuth, Coding Plan, or API keys) |
+| 9 | 🐙 **GitHub Copilot CLI** | `curl` script | `copilot login` OAuth or `COPILOT_GITHUB_TOKEN` / fine-grained PAT |
+| 10 | 🚀 **Grok Build** | `curl` script | `grok login` OAuth or `XAI_API_KEY` |
 | 11 | 🤝 **Aider** | `pip`/`curl` | Provider API keys |
-| 12 | 🌙 **Kimi Code** | `curl` script | Kimi membership subscription |
-| 13 | 🦅 **Kiro CLI** | `curl` script | Kiro account subscription |
-| 14 | π **Pi Coding Agent** | `npm` | Provider API keys |
-| 15 | 🦞 **OpenClaw** | `curl` script | OAuth onboard flow |
-| 16 | ⬛ **Blackbox AI** | `npm` | API key from dashboard |
+| 12 | 🌙 **Kimi Code** | `curl` script | `/login` in `kimi-code` (membership OAuth) or Kimi Code Console API key |
+| 13 | 🦅 **Kiro CLI** | `curl` script | `kiro-cli login` OAuth or `KIRO_API_KEY` (Pro+) |
+| 14 | π **Pi Coding Agent** | `npm` | `/login` in `pi` (subscription OAuth) or provider API keys |
+| 15 | 🦞 **OpenClaw** | `curl` script | `openclaw onboard` guided setup |
+| 16 | ⬛ **Blackbox AI** | `npm` | API key from dashboard → `blackbox configure` |
 | 17 | 🪿 **Goose** | `curl` script | `goose configure` or provider API keys |
-| 18 | 🌀 **Cline** | `npm` | `cline auth` OAuth or BYOK |
-| 19 | 🙌 **OpenHands CLI** | `curl` script | LLM settings on first run or `openhands login` |
-| 20 | 💘 **Crush** | `npm` | Provider API keys on first run |
+| 18 | 🌀 **Cline** | `npm` | `cline auth` OAuth (Cline, ChatGPT) or BYOK |
+| 19 | 🙌 **OpenHands CLI** | `curl` script | First-run LLM settings; `openhands login` for Cloud only |
+| 20 | 💘 **Crush** | `npm` | `crush login` OAuth or provider env vars |
 
 ---
 

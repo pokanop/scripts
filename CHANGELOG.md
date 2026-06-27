@@ -50,6 +50,19 @@ Newest entries on top, within each tool.
   multi-line `--version` parsing (was timing out at 10s and re-probed every list).
 - `list` always runs a full fresh scan — install count drives wall time; more
   installed agents means more version/update probes (parallelized, up to 8 workers).
+- **Auth audit:** corrected per-agent auth notes and env vars against official docs
+  (e.g. `agent login`, `codex login`, `COPILOT_GITHUB_TOKEN`, `opencode auth login`);
+  improved credential discovery paths; setup wizard now guides OAuth agents too;
+  `aikit auth` no longer marks auth complete when credentials are still missing.
+- **`aikit auth` picker:** single-select over installed agents only; Enter accepts
+  `\r`/`\n` on macOS terminals (was ignored and left the menu stuck).
+- Kilo auth discovery no longer treats OpenCode's `~/.config/opencode/` config as
+  Kilo credentials (false positive when both tools are installed).
+- Stale `auth_configured` cache in `~/.aikit/config.json` no longer overrides
+  filesystem checks for API-key / provider-key agents.
+- Uninstall now prunes `~/.aikit/config.json` entries when the binary is gone;
+  `discover_and_persist` no longer re-adds ghost records for uninstalled agents.
+- GitHub Copilot auth now launches `copilot login` (OAuth) instead of prompting for PAT keys.
 
 ### 1.6.0 — 2026-06-27
 - Added four new agent registry entries: **Goose** (curl/AAIF), **Cline** (npm),

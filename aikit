@@ -190,8 +190,8 @@ AGENTS = {
         "version_check": {"type": "url_text", "url": "https://downloads.claude.ai/latest"},
         "uninstall_cmd": None,
         "auth_type": "oauth_browser",
-        "auth_env_vars": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
-        "auth_note": "Run 'claude' and follow browser login. Or set ANTHROPIC_API_KEY.",
+        "auth_env_vars": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"],
+        "auth_note": "Run 'claude' for browser OAuth (Pro/Max/Team). Or set ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN, or CLAUDE_CODE_OAUTH_TOKEN from 'claude setup-token' for CI.",
         "requires": ["curl"],
         "tags": ["anthropic", "claude", "sonnet", "opus"],
     },
@@ -234,8 +234,9 @@ AGENTS = {
         "version_check": {"type": "cursor_install_script", "url": "https://cursor.com/install"},
         "uninstall_cmd": None,
         "auth_type": "oauth_browser",
-        "auth_env_vars": [],
-        "auth_note": "Run 'agent' or 'cursor-agent' and follow browser login with your Cursor account.",
+        "auth_env_vars": ["CURSOR_API_KEY"],
+        "auth_cmd": "agent login",
+        "auth_note": "Run 'agent login' (or 'cursor-agent login') for browser OAuth. Or set CURSOR_API_KEY for scripts/CI.",
         "requires": ["curl"],
         "tags": ["cursor", "agent", "composer"],
     },
@@ -281,7 +282,8 @@ AGENTS = {
         "uninstall_cmd": None,
         "auth_type": "oauth_browser",
         "auth_env_vars": ["OPENAI_API_KEY"],
-        "auth_note": "Run 'codex' and sign in with ChatGPT. Or set OPENAI_API_KEY.",
+        "auth_cmd": "codex login",
+        "auth_note": "Run 'codex login' for ChatGPT OAuth or API key auth. Or: printenv OPENAI_API_KEY | codex login --with-api-key",
         "requires": ["curl"],
         "tags": ["openai", "codex", "gpt", "chatgpt"],
     },
@@ -303,7 +305,7 @@ AGENTS = {
         "uninstall_cmd": None,
         "auth_type": "account_or_byok",
         "auth_env_vars": [],
-        "auth_note": "Run 'kilo' and sign in with Kilo account, or bring your own API keys via settings.",
+        "auth_note": "Run 'kilo auth login' for Kilo account OAuth, or 'kilo' then '/connect' for BYOK provider keys.",
         "requires": ["node", "npm"],
         "tags": ["kilo", "opencode-fork", "byok", "500+ models"],
     },
@@ -325,7 +327,7 @@ AGENTS = {
         "uninstall_cmd": None,
         "auth_type": "provider_keys",
         "auth_env_vars": ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
-        "auth_note": "Run 'opencode auth list' to configure provider API keys.",
+        "auth_note": "Run 'opencode auth login' to add provider API keys. Use 'opencode auth list' to verify.",
         "requires": ["node", "npm"],
         "tags": ["opencode", "open-source", "provider-agnostic", "tui"],
     },
@@ -345,9 +347,9 @@ AGENTS = {
         "path_markers": ["/.qwen/", "qwen-code"],
         "version_check": {"type": "npm", "package": "@qwen-code/qwen-code"},
         "uninstall_cmd": None,
-        "auth_type": "api_key",
-        "auth_env_vars": ["BAILIAN_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY"],
-        "auth_note": "Run '/auth' inside qwen session to configure provider and API key.",
+        "auth_type": "account_or_byok",
+        "auth_env_vars": ["DASHSCOPE_API_KEY", "BAILIAN_CODING_PLAN_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
+        "auth_note": "Run 'qwen' and use '/auth' for Qwen OAuth, Coding Plan, or API keys. Or configure ~/.qwen/settings.json / env vars.",
         "requires": ["node", "npm"],
         "tags": ["qwen", "alibaba", "open-source", "multi-protocol"],
     },
@@ -366,9 +368,10 @@ AGENTS = {
         "update_cmd": "curl -fsSL https://gh.io/copilot-install | bash",
         "version_check": {"type": "github_release", "repo": "github/copilot-cli", "tag_prefix": "v"},
         "uninstall_cmd": None,
-        "auth_type": "pat_or_oauth",
-        "auth_env_vars": ["GH_TOKEN", "GITHUB_TOKEN"],
-        "auth_note": "Set GH_TOKEN or GITHUB_TOKEN (fine-grained PAT with Copilot Requests permission). Or use '/login' in interactive mode.",
+        "auth_type": "oauth_browser",
+        "auth_env_vars": ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"],
+        "auth_cmd": "copilot login",
+        "auth_note": "Run 'copilot login' for OAuth (recommended). For CI/headless, set COPILOT_GITHUB_TOKEN (fine-grained PAT with Copilot Requests — classic ghp_ PATs are not supported).",
         "requires": ["curl"],
         "tags": ["github", "copilot", "microsoft", "claude-sonnet"],
     },
@@ -397,7 +400,8 @@ AGENTS = {
         "uninstall_cmd": None,
         "auth_type": "oauth_browser",
         "auth_env_vars": ["XAI_API_KEY"],
-        "auth_note": "Run 'grok' (preferred; 'agent' if unambiguous) and authenticate via browser. Or set XAI_API_KEY for headless use.",
+        "auth_cmd": "grok login",
+        "auth_note": "Run 'grok login' for browser OAuth ('grok login --device-auth' on headless/SSH). Or set XAI_API_KEY for scripts/CI.",
         "requires": ["curl"],
         "tags": ["grok", "xai", "multi-agent", "agent"],
     },
@@ -438,9 +442,9 @@ AGENTS = {
         "update_via_install": True,
         "version_check": {"type": "url_text", "url": "https://code.kimi.com/kimi-code/latest"},
         "uninstall_cmd": None,
-        "auth_type": "subscription",
-        "auth_env_vars": ["MOONSHOT_API_KEY"],
-        "auth_note": "Requires Kimi membership subscription. Authenticate on first run.",
+        "auth_type": "oauth_browser",
+        "auth_env_vars": [],
+        "auth_note": "Run 'kimi-code' then '/login' for Kimi Code membership (OAuth). Or '/setup' with an API key from the Kimi Code Console. Requires Kimi membership.",
         "requires": ["curl"],
         "tags": ["kimi", "moonshot", "k2.7"],
     },
@@ -461,9 +465,10 @@ AGENTS = {
         "update_cmd": None,
         "update_via_install": True,
         "uninstall_cmd": None,
-        "auth_type": "subscription",
-        "auth_env_vars": [],
-        "auth_note": "Included with Kiro pricing tiers. Authenticate on first run.",
+        "auth_type": "oauth_browser",
+        "auth_env_vars": ["KIRO_API_KEY"],
+        "auth_cmd": "kiro-cli login",
+        "auth_note": "Run 'kiro-cli login' for browser or device-flow OAuth (included with Kiro tiers). Or set KIRO_API_KEY for headless/CI (Pro+ plans).",
         "requires": ["curl"],
         "tags": ["kiro", "claude", "context-management", "enterprise"],
     },
@@ -483,9 +488,9 @@ AGENTS = {
         "path_markers": ["pi-coding-agent", "/.pi/"],
         "version_check": {"type": "npm", "package": "@earendil-works/pi-coding-agent"},
         "uninstall_cmd": None,
-        "auth_type": "provider_keys",
-        "auth_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
-        "auth_note": "15+ providers supported. Configure API keys then run 'pi'.",
+        "auth_type": "account_or_byok",
+        "auth_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY"],
+        "auth_note": "Run 'pi' then '/login' for subscription OAuth (Claude, ChatGPT, Copilot) or API keys. Or set provider env vars.",
         "requires": ["node", "npm"],
         "tags": ["pi", "minimal", "customizable", "extensions", "self-modifying"],
     },
@@ -596,7 +601,7 @@ AGENTS = {
         "uninstall_cmd": openhands_uninstall_cmd(),
         "auth_type": "provider_keys",
         "auth_env_vars": ["LLM_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
-        "auth_note": "First run configures LLM settings. Set LLM_API_KEY or run 'openhands login' for OpenHands Cloud.",
+        "auth_note": "First 'openhands' run configures local LLM settings (~/.openhands/settings.json). Set LLM_API_KEY with --override-with-envs for one-off runs. 'openhands login' is for OpenHands Cloud only.",
         "requires": ["curl"],
         "tags": ["openhands", "tui", "mcp", "headless", "open-source"],
     },
@@ -618,7 +623,7 @@ AGENTS = {
         "uninstall_cmd": None,
         "auth_type": "provider_keys",
         "auth_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"],
-        "auth_note": "Run 'crush' and enter an API key on first use, or set provider env vars.",
+        "auth_note": "Run 'crush login' for OAuth providers, or set provider env vars. Crush prompts on first run if no key is set.",
         "requires": ["node", "npm"],
         "tags": ["crush", "charm", "tui", "lsp", "mcp", "multi-model"],
     },
@@ -1309,8 +1314,8 @@ def _read_key():
         return 'left'
     elif k == readchar.key.RIGHT:
         return 'right'
-    elif k == readchar.key.ENTER:
-        return 'enter'
+    elif k == readchar.key.ENTER or k in ("\r", "\n"):
+        return "enter"
     elif k == readchar.key.SPACE:
         return 'space'
     elif k == readchar.key.TAB:
@@ -1341,13 +1346,19 @@ _ansi = sk.styled
 # Interactive picker — raw terminal rendering, NO Rich
 # =============================================================================
 
-def interactive_agent_picker(title="Select agents", preselect_installed=False):
-    """Arrow-key-navigable multi-select agent picker.
-    
+def interactive_agent_picker(
+    title="Select agents",
+    preselect_installed=False,
+    *,
+    single=False,
+    only_installed=False,
+):
+    """Arrow-key-navigable agent picker (multi- or single-select).
+
     Uses readchar for keyboard input and direct ANSI escape codes for rendering.
     This avoids Rich's terminal state interference that breaks raw mode.
-    
-    Controls:
+
+    Multi-select controls:
       ↑/↓ or j/k — move cursor
       Space        — toggle selection
       Enter        — confirm and return selected
@@ -1355,119 +1366,160 @@ def interactive_agent_picker(title="Select agents", preselect_installed=False):
       n            — deselect all
       q/Esc        — cancel (return empty list)
       Numbers 0-9  — jump to that item
+
+    Single-select (``single=True``): Enter returns the highlighted agent only.
+    When ``only_installed=True``, lists installed agents only (for auth/uninstall).
     """
-    agent_keys = list(AGENTS.keys())
+    if only_installed:
+        agent_keys = [k for k in AGENTS if detect_agent_bin(k)]
+    else:
+        agent_keys = list(AGENTS.keys())
+    if not agent_keys:
+        return []
+
     n = len(agent_keys)
     installed = {k for k in agent_keys if detect_agent_bin(k)}
-    
-    # Initialize selection
-    if preselect_installed:
+
+    if single:
+        selected = set()
+    elif preselect_installed:
         selected = installed.copy()
     else:
         selected = set()
-    
+
     cursor_pos = 0
-    
-    # Height for clearing — track how many lines we last rendered
     last_height = 0
-    
+
+    if single:
+        controls = "  \u2191\u2193/jk = navigate  |  Enter = select  |  q = cancel"
+    else:
+        controls = (
+            "  \u2191\u2193/jk = navigate  |  Space = toggle  |  Enter = confirm  |  "
+            "a = all  |  n = none  |  q = cancel"
+        )
+
     while True:
-        # Build the menu as plain text lines (no Rich markup, just ANSI)
         out_lines = []
-        
-        # Title
         out_lines.append(_ansi(f"\n{title}", _BOLD, _CYAN))
-        out_lines.append(_ansi("  \u2191\u2193/jk = navigate  |  Space = toggle  |  Enter = confirm  |  a = all  |  n = none  |  q = cancel", _DIM))
+        out_lines.append(_ansi(controls, _DIM))
         out_lines.append("")
-        
+
         for i in range(n):
             agent = AGENTS[agent_keys[i]]
             key = agent_keys[i]
-            is_cursor = (i == cursor_pos)
-            
-            # Build each line
-            num = f" {i+1:>2} "
-            
+            is_cursor = i == cursor_pos
+            num = f" {i + 1:>2} "
+
             if is_cursor:
                 line = _ansi("\u2502" + num, _BG_BLUE, _BOLD, _WHITE)
             else:
                 line = " " + _ansi(num, _DIM)
-            
-            if key in selected:
-                line += _ansi("[X]", _BOLD, _GREEN)
-            else:
-                line += _ansi("[ ]", _DIM)
-            
+
+            if not single:
+                if key in selected:
+                    line += _ansi("[X]", _BOLD, _GREEN)
+                else:
+                    line += _ansi("[ ]", _DIM)
+
             line += f" {agent['icon']} {agent['name']:<20}"
-            
-            if key in installed:
+
+            if not only_installed and key in installed:
                 line += _ansi(" (installed)", _DIM)
-            
+
             out_lines.append(line)
-        
+
         out_lines.append("")
-        out_lines.append(f"  Selected: {len(selected)}/{n}  " + 
-                        (", ".join(sorted(selected)) if selected else "(none)"))
-        out_lines.append(_ansi(f"  Cursor: #{cursor_pos+1} {AGENTS[agent_keys[cursor_pos]]['name']}", _DIM))
-        
-        # Clear previous render by moving cursor up
+        if single:
+            out_lines.append(
+                _ansi(
+                    f"  Highlighted: {AGENTS[agent_keys[cursor_pos]]['icon']} "
+                    f"{AGENTS[agent_keys[cursor_pos]]['name']}",
+                    _DIM,
+                )
+            )
+        else:
+            out_lines.append(
+                f"  Selected: {len(selected)}/{n}  "
+                + (", ".join(sorted(selected)) if selected else "(none)")
+            )
+            out_lines.append(
+                _ansi(
+                    f"  Cursor: #{cursor_pos + 1} {AGENTS[agent_keys[cursor_pos]]['name']}",
+                    _DIM,
+                )
+            )
+
         if last_height > 0:
             sys.stdout.write(f"\033[{last_height}A")
-        
-        # Write the new frame
+
         output = "\n".join(out_lines)
         sys.stdout.write(output + "\n")
         sys.stdout.flush()
         last_height = len(out_lines) + 1
-        
-        # Read input
+
         ch = _read_key()
-        
+
         if ch is None:
-            # Non-TTY or no readchar — degrade to line input  
             print()
-            choice = _prompt("Action (enter=done, number=toggle, a=all, n=none, q=cancel)", "")
-            if choice == "":
-                return sorted(selected)
-            elif choice.lower() in ("q", "quit"):
-                return []
-            elif choice.lower() == "a":
-                selected = set(agent_keys)
-            elif choice.lower() == "n":
-                selected = set()
-            else:
+            if single:
+                choice = _prompt("Enter number to select (q=cancel)", "")
+                if choice.lower() in ("q", "quit"):
+                    return []
+                if choice == "":
+                    return [agent_keys[cursor_pos]]
                 try:
                     idx = int(choice) - 1
                     if 0 <= idx < n:
-                        key = agent_keys[idx]
-                        if key in selected:
-                            selected.discard(key)
-                        else:
-                            selected.add(key)
+                        return [agent_keys[idx]]
                 except ValueError:
                     pass
-        elif ch in ('up', 'k'):
+            else:
+                choice = _prompt("Action (enter=done, number=toggle, a=all, n=none, q=cancel)", "")
+                if choice == "":
+                    return sorted(selected)
+                elif choice.lower() in ("q", "quit"):
+                    return []
+                elif choice.lower() == "a":
+                    selected = set(agent_keys)
+                elif choice.lower() == "n":
+                    selected = set()
+                else:
+                    try:
+                        idx = int(choice) - 1
+                        if 0 <= idx < n:
+                            key = agent_keys[idx]
+                            if key in selected:
+                                selected.discard(key)
+                            else:
+                                selected.add(key)
+                    except ValueError:
+                        pass
+        elif ch in ("up", "k"):
             cursor_pos = max(0, cursor_pos - 1)
-        elif ch in ('down', 'j'):
+        elif ch in ("down", "j"):
             cursor_pos = min(n - 1, cursor_pos + 1)
-        elif ch == 'space':
+        elif ch == "space" and not single:
             key = agent_keys[cursor_pos]
             if key in selected:
                 selected.discard(key)
             else:
                 selected.add(key)
-        elif ch == 'enter':
+        elif ch in ("enter", "\r", "\n"):
+            if single:
+                return [agent_keys[cursor_pos]]
             return sorted(selected)
-        elif ch in ('q', 'esc'):
+        elif ch in ("q", "esc"):
             return []
-        elif ch == 'a':
+        elif ch == "a" and not single:
             selected = set(agent_keys)
-        elif ch == 'n':
+        elif ch == "n" and not single:
             selected = set()
         elif ch and ch.isdigit():
             idx = int(ch) - 1
             if 0 <= idx < n:
                 cursor_pos = idx
+                if single:
+                    return [agent_keys[cursor_pos]]
 
 
 def print_agent_table(agent_keys=None):
@@ -1824,6 +1876,7 @@ def _do_uninstall_impl(agent_keys, yes):
     validate_agent_keys(agent_keys)
 
     config = load_config()
+    removed = []
 
     for i, key in enumerate(agent_keys, 1):
         agent = AGENTS[key]
@@ -1863,11 +1916,17 @@ def _do_uninstall_impl(agent_keys, yes):
             print_info(f"  Typically: rm $(which {bin_name})")
 
         if not detect_agent_bin(key):
-            config["agents"].pop(key, None)
+            if config["agents"].pop(key, None) is not None:
+                removed.append(key)
             UPDATE_CHECK_CACHE.pop(key, None)
 
     save_config(config)
-    console.print(f"\n[bold green]✅ Uninstalled:[/bold green] {', '.join(agent_keys)}")
+    discover_and_persist()
+
+    if removed:
+        console.print(f"\n[bold green]✅ Uninstalled:[/bold green] {', '.join(removed)}")
+    else:
+        print_warning("No agents were fully removed — binaries may still be on PATH.")
 
 
 # =============================================================================
@@ -1885,6 +1944,20 @@ def _real_home():
 
 
 _REAL_HOME = _real_home()
+
+
+def _config_text_has_credentials(cfg_text):
+    """True when a config file likely stores credentials (not just provider names)."""
+    return any(
+        pat in cfg_text
+        for pat in (
+            '"apiKey"', "'apiKey'", "apiKey:",
+            '"api_key"', "api_key:",
+            "accessToken", "refreshToken",
+            '"type": "oauth"', '"type":"oauth"',
+            '"type": "api"', '"type":"api"',
+        )
+    )
 
 
 def discover_auth(agent_key):
@@ -1942,8 +2015,16 @@ def discover_auth(agent_key):
             except (json.JSONDecodeError, OSError):
                 pass
     
-    # Hermes: ~/.hermes/.env or profile .env (API keys)
+    # Hermes: ~/.hermes/auth.json (Nous Portal OAuth) or profile .env (API keys)
     if agent_key == "hermes":
+        auth_json = home / ".hermes" / "auth.json"
+        if auth_json.exists() and auth_json.stat().st_size > 0:
+            try:
+                data = json.loads(auth_json.read_text())
+                if data:
+                    return {"auth_configured": True, "method": "cred_file", "source": str(auth_json)}
+            except (json.JSONDecodeError, OSError):
+                pass
         for env_path in [
             home / ".hermes" / ".env",
             home / ".hermes" / "profiles" / "coder" / ".env",
@@ -1962,35 +2043,54 @@ def discover_auth(agent_key):
         if auth_file.exists() and auth_file.stat().st_size > 0:
             return {"auth_configured": True, "method": "cred_file", "source": str(auth_file)}
     
-    # Kilo CLI: ~/.config/kilo/opencode.json(jsonc), ~/.kilo/config.json, opencode config
+    # Kilo CLI: ~/.local/share/kilo/auth.json and ~/.config/kilo/* only (not OpenCode)
     if agent_key == "kilo":
+        auth_file = home / ".local" / "share" / "kilo" / "auth.json"
+        if auth_file.exists() and auth_file.stat().st_size > 0:
+            try:
+                data = json.loads(auth_file.read_text())
+                if data:
+                    return {"auth_configured": True, "method": "cred_file", "source": str(auth_file)}
+            except (json.JSONDecodeError, OSError):
+                pass
         for cfg_path in [
+            home / ".config" / "kilo" / "kilo.jsonc",
+            home / ".config" / "kilo" / "kilo.json",
             home / ".config" / "kilo" / "opencode.json",
             home / ".config" / "kilo" / "opencode.jsonc",
             home / ".kilo" / "config.json",
-            home / ".config" / "opencode" / "opencode.json",
-            home / ".config" / "opencode" / "opencode.jsonc",
         ]:
             if cfg_path.exists():
                 try:
                     cfg_text = cfg_path.read_text()
-                    if any(pat in cfg_text for pat in ("apiKey", "api_key", "provider", "ANTHROPIC_API_KEY", "OPENROUTER")):
+                    if _config_text_has_credentials(cfg_text):
                         return {"auth_configured": True, "method": "config_file", "source": str(cfg_path)}
                 except OSError:
                     pass
-        # Kilo also stores auth at the project level — check current dir too
-        for proj_path in [Path.cwd() / "opencode.json", Path.cwd() / "opencode.jsonc",
-                          Path.cwd() / ".opencode" / "opencode.json"]:
+        for proj_path in [
+            Path.cwd() / "kilo.jsonc",
+            Path.cwd() / ".kilo" / "kilo.jsonc",
+            Path.cwd() / ".kilo" / "opencode.json",
+            Path.cwd() / ".kilo" / "opencode.jsonc",
+        ]:
             if proj_path.exists():
                 try:
                     cfg_text = proj_path.read_text()
-                    if any(pat in cfg_text for pat in ("apiKey", "api_key", "provider")):
+                    if _config_text_has_credentials(cfg_text):
                         return {"auth_configured": True, "method": "project_config", "source": str(proj_path)}
                 except OSError:
                     pass
     
-    # OpenCode: ~/.config/opencode/opencode.json or ~/.opencode/config.json
+    # OpenCode: ~/.local/share/opencode/auth.json or legacy config paths
     if agent_key == "opencode":
+        auth_file = home / ".local" / "share" / "opencode" / "auth.json"
+        if auth_file.exists() and auth_file.stat().st_size > 0:
+            try:
+                data = json.loads(auth_file.read_text())
+                if data:
+                    return {"auth_configured": True, "method": "cred_file", "source": str(auth_file)}
+            except (json.JSONDecodeError, OSError):
+                pass
         for cfg_path in [
             home / ".config" / "opencode" / "opencode.json",
             home / ".config" / "opencode" / "opencode.jsonc",
@@ -1999,13 +2099,21 @@ def discover_auth(agent_key):
             if cfg_path.exists():
                 try:
                     cfg_text = cfg_path.read_text()
-                    if any(pat in cfg_text for pat in ("apiKey", "api_key", "provider", "OPENROUTER", "ANTHROPIC")):
+                    if _config_text_has_credentials(cfg_text):
                         return {"auth_configured": True, "method": "config_file", "source": str(cfg_path)}
                 except OSError:
                     pass
     
-    # GitHub Copilot: gh CLI auth or GITHUB_TOKEN/GH_TOKEN
+    # GitHub Copilot: env vars, ~/.copilot/config.json, or gh CLI fallback
     if agent_key == "copilot":
+        copilot_cfg = home / ".copilot" / "config.json"
+        if copilot_cfg.exists() and copilot_cfg.stat().st_size > 0:
+            try:
+                data = json.loads(copilot_cfg.read_text())
+                if data.get("githubToken") or data.get("token"):
+                    return {"auth_configured": True, "method": "config_file", "source": str(copilot_cfg)}
+            except (json.JSONDecodeError, OSError):
+                pass
         gh_hosts = home / ".config" / "gh" / "hosts.yml"
         if gh_hosts.exists():
             content = gh_hosts.read_text()
@@ -2023,8 +2131,14 @@ def discover_auth(agent_key):
             except OSError:
                 pass
     
-    # Antigravity: Google OAuth — check ~/.agy/ or gcloud credentials
+    # Antigravity: Google OAuth token under ~/.gemini/antigravity-cli/
     if agent_key == "antigravity":
+        for tok_path in [
+            home / ".gemini" / "antigravity-cli" / "antigravity-oauth-token",
+            home / ".gemini" / "antigravity-cli" / "credentials.json",
+        ]:
+            if tok_path.exists() and tok_path.stat().st_size > 0:
+                return {"auth_configured": True, "method": "cred_file", "source": str(tok_path)}
         for agy_path in [home / ".agy", home / ".antigravity", home / ".config" / "antigravity"]:
             if agy_path.exists():
                 try:
@@ -2033,13 +2147,17 @@ def discover_auth(agent_key):
                         return {"auth_configured": True, "method": "config_dir", "source": str(agy_path)}
                 except OSError:
                     pass
-        # Also check gcloud
-        for tok in [home / ".config" / "gcloud" / "application_default_credentials.json"]:
-            if tok.exists() and tok.stat().st_size > 0:
-                return {"auth_configured": True, "method": "gcloud_creds", "source": str(tok)}
     
-    # Pi Coding Agent: ~/.pi or ~/.config/pi
+    # Pi Coding Agent: ~/.pi/agent/auth.json or legacy config dirs
     if agent_key == "pi":
+        auth_file = home / ".pi" / "agent" / "auth.json"
+        if auth_file.exists() and auth_file.stat().st_size > 0:
+            try:
+                data = json.loads(auth_file.read_text())
+                if data:
+                    return {"auth_configured": True, "method": "cred_file", "source": str(auth_file)}
+            except (json.JSONDecodeError, OSError):
+                pass
         for pi_path in [
             home / ".pi",
             home / ".config" / "pi",
@@ -2064,14 +2182,31 @@ def discover_auth(agent_key):
         if bb_config.is_dir():
             return {"auth_configured": True, "method": "config_dir", "source": str(bb_config)}
     
-    # Qwen: ~/.qwen or ~/.config/qwen
+    # Qwen: ~/.qwen/settings.json or config dir
     if agent_key == "qwen":
+        settings = home / ".qwen" / "settings.json"
+        if settings.exists():
+            try:
+                cfg_text = settings.read_text()
+                if '"auth"' in cfg_text or any(
+                    pat in cfg_text for pat in ("DASHSCOPE_API_KEY", "apiKey", "selectedType")
+                ):
+                    return {"auth_configured": True, "method": "config_file", "source": str(settings)}
+            except OSError:
+                pass
         for qp in [home / ".qwen", home / ".config" / "qwen"]:
             if qp.is_dir():
-                return {"auth_configured": True, "method": "config_dir", "source": str(qp)}
+                try:
+                    if any(qp.iterdir()):
+                        return {"auth_configured": True, "method": "config_dir", "source": str(qp)}
+                except OSError:
+                    pass
     
-    # Kimi Code: ~/.kimi or ~/.kimi-code
+    # Kimi Code: ~/.kimi-code/config.toml or legacy dirs
     if agent_key == "kimi":
+        cfg_toml = home / ".kimi-code" / "config.toml"
+        if cfg_toml.exists() and cfg_toml.stat().st_size > 0:
+            return {"auth_configured": True, "method": "config_file", "source": str(cfg_toml)}
         for kp in [home / ".kimi", home / ".kimi-code", home / ".config" / "kimi"]:
             if kp.is_dir() or (kp.exists() and kp.stat().st_size > 0):
                 return {"auth_configured": True, "method": "config_path", "source": str(kp)}
@@ -2129,12 +2264,13 @@ def discover_auth(agent_key):
                 except OSError:
                     pass
     
-    # 3. OAuth-based agents are hard to auto-detect — trust config file if previously marked
-    config = load_config()
-    agent_cfg = config.get("agents", {}).get(agent_key, {})
-    if agent_cfg.get("auth_configured"):
-        return {"auth_configured": True, "method": "previously_confirmed", "source": "~/.aikit/config.json"}
-    
+    # OAuth agents are hard to auto-detect — trust a prior successful auth only for those
+    if auth_type in ("oauth_browser", "oauth_portal", "oauth_onboard"):
+        config = load_config()
+        agent_cfg = config.get("agents", {}).get(agent_key, {})
+        if agent_cfg.get("auth_configured"):
+            return {"auth_configured": True, "method": "previously_confirmed", "source": "~/.aikit/config.json"}
+
     return {"auth_configured": False, "method": "", "source": ""}
 
 
@@ -2187,7 +2323,10 @@ def _discover_agent_entry(key, config):
 
 def discover_and_persist():
     """Run full system discovery: detect installed agents, versions, and auth state.
-    Persists all findings to config. Called automatically by doctor, list, and install."""
+    Persists all findings to config. Called automatically by doctor, list, and install.
+
+    Only installed agents are kept in ``config["agents"]`` — uninstalled entries are
+    pruned so uninstall + list does not resurrect ghost records."""
     config = load_config()
     agents_cfg = dict(config.get("agents", {}))
     changed = False
@@ -2200,8 +2339,12 @@ def discover_and_persist():
     )
 
     for key, merged, entry_changed in results:
-        if entry_changed:
-            agents_cfg[key] = merged
+        if merged.get("installed"):
+            if entry_changed:
+                agents_cfg[key] = merged
+                changed = True
+        elif key in agents_cfg:
+            del agents_cfg[key]
             changed = True
 
     if changed:
@@ -2258,15 +2401,25 @@ def _do_auth_impl(agent_key):
 
     if auth_type == "oauth_browser":
         bin_name = resolve_agent_bin(agent_key) or agent["bin"]
-        console.print(f"\n  [dim]This agent uses OAuth. Run '{bin_name}' and complete the browser login.[/dim]")
+        auth_cmd = agent.get("auth_cmd") or bin_name
+        if auth_cmd != bin_name:
+            console.print(
+                f"\n  [dim]This agent uses OAuth. Run '{auth_cmd}' to sign in "
+                f"(or '{bin_name}' for interactive mode).[/dim]"
+            )
+        else:
+            console.print(f"\n  [dim]This agent uses OAuth. Run '{auth_cmd}' and complete the browser login.[/dim]")
         if _use_color() and sys.stdin.isatty():
             try:
-                if _prompt_yes_no(f"Launch '{bin_name}' now to authenticate?", True):
-                    os.system(bin_name)
+                if _prompt_yes_no(f"Launch '{auth_cmd}' now to authenticate?", True):
+                    os.system(auth_cmd)
             except KeyboardInterrupt:
                 raise
 
     elif auth_type in ("api_key", "provider_keys", "pat_or_oauth", "oauth_portal", "account_or_byok", "oauth_onboard"):
+        auth_cmd = agent.get("auth_cmd")
+        if auth_cmd:
+            console.print(f"\n  [dim]Recommended command: [bold]{auth_cmd}[/bold][/dim]")
         if env_vars:
             console.print("\n  [bold]Environment variables to set:[/bold]")
             for var in env_vars:
@@ -2285,17 +2438,29 @@ def _do_auth_impl(agent_key):
     elif auth_type == "subscription":
         console.print(f"\n  [dim]This agent requires a paid subscription. Visit {agent['homepage']} to subscribe.[/dim]")
 
-    # Mark as auth-attempted with real discovery
+    # Persist only when credentials are actually detected
     discover_and_persist()
+    result = discover_auth(agent_key)
     config = load_config()
-    config["agents"][agent_key] = {
+    entry = {
         **config["agents"].get(agent_key, {}),
-        "auth_configured": True,
-        "auth_date": time.strftime("%Y-%m-%d"),
+        "auth_method": result.get("method", ""),
+        "auth_source": result.get("source", ""),
     }
-    save_config(config)
-
-    print_success(f"{icon} {agent['name']} auth setup complete!")
+    if result["auth_configured"]:
+        entry["auth_configured"] = True
+        entry["auth_date"] = config["agents"].get(agent_key, {}).get("auth_date") or time.strftime("%Y-%m-%d")
+        config["agents"][agent_key] = entry
+        save_config(config)
+        print_success(f"{icon} {agent['name']} auth setup complete!")
+    else:
+        entry["auth_configured"] = False
+        config["agents"][agent_key] = entry
+        save_config(config)
+        print_warning(
+            f"{icon} {agent['name']} still needs authentication — follow the steps above, "
+            f"then run 'aikit auth {agent_key}' again."
+        )
 
 
 def _save_env_var(var, value):
@@ -2474,7 +2639,7 @@ def do_setup():
         if selected:
             console.print("\n[bold cyan]Step 3: Authentication[/bold cyan]")
             for key in selected:
-                if AGENTS[key].get("auth_env_vars"):
+                if AGENTS[key].get("auth_type"):
                     console.print(f"\n{AGENTS[key]['icon']} {AGENTS[key]['name']}:")
                     _do_auth_impl(key)
 
@@ -2982,7 +3147,11 @@ def cmd_auth(args):
         return
     # Ctrl-C inside the picker means "cancel this prompt", not "abort aikit".
     try:
-        agent_keys = interactive_agent_picker("Select agent to authenticate", preselect_installed=True)
+        agent_keys = interactive_agent_picker(
+            "Select agent to authenticate",
+            single=True,
+            only_installed=True,
+        )
     except KeyboardInterrupt:
         console.print("\n[yellow]⏹ Cancelled.[/yellow]")
         return

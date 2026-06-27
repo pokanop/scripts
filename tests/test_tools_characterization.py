@@ -5,6 +5,7 @@ refactor is provably non-breaking: every assertion here passes before and
 after the tools are rewired onto the shared library.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -579,6 +580,216 @@ def test_aikit_should_skip_update_force(tool_loader, monkeypatch):
     skip, check = m.should_skip_update("claude", force=True)
     assert skip is False
     assert check is None
+
+
+def test_aikit_auth_registry_login_commands(tool_loader):
+    m = tool_loader("aikit")
+    assert m.AGENTS["cursor"]["auth_cmd"] == "agent login"
+    assert "CURSOR_API_KEY" in m.AGENTS["cursor"]["auth_env_vars"]
+    assert m.AGENTS["codex"]["auth_cmd"] == "codex login"
+    assert m.AGENTS["grok"]["auth_cmd"] == "grok login"
+    assert m.AGENTS["copilot"]["auth_cmd"] == "copilot login"
+    assert m.AGENTS["copilot"]["auth_type"] == "oauth_browser"
+    assert "COPILOT_GITHUB_TOKEN" in m.AGENTS["copilot"]["auth_env_vars"]
+    assert "opencode auth login" in m.AGENTS["opencode"]["auth_note"]
+    assert "BAILIAN_CODING_PLAN_API_KEY" in m.AGENTS["qwen"]["auth_env_vars"]
+    assert "MOONSHOT_API_KEY" not in m.AGENTS["kimi"]["auth_env_vars"]
+    assert m.AGENTS["kiro"]["auth_cmd"] == "kiro-cli login"
+
+
+def test_aikit_discover_auth_env_var(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+    monkeypatch.setenv("CURSOR_API_KEY", "sk-test-key")
+    result = m.discover_auth("cursor")
+    assert result["auth_configured"] is True
+    assert result["method"] == "env_var"
+    assert result["source"] == "$CURSOR_API_KEY"
+
+
+def test_aikit_discover_auth_opencode_cred_file(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    auth_dir = home / ".local" / "share" / "opencode"
+    auth_dir.mkdir(parents=True)
+    auth_file = auth_dir / "auth.json"
+    auth_file.write_text('{"openai": {"type": "api", "key": "sk-test"}}')
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    result = m.discover_auth("opencode")
+    assert result["auth_configured"] is True
+    assert result["method"] == "cred_file"
+    assert result["source"] == str(auth_file)
+
+
+def test_aikit_discover_auth_antigravity_token(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    tok_dir = home / ".gemini" / "antigravity-cli"
+    tok_dir.mkdir(parents=True)
+    tok_file = tok_dir / "antigravity-oauth-token"
+    tok_file.write_text("oauth-token-data")
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    result = m.discover_auth("antigravity")
+    assert result["auth_configured"] is True
+    assert result["method"] == "cred_file"
+    assert result["source"] == str(tok_file)
+
+
+def test_aikit_discover_auth_kilo_ignores_opencode_config(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    oc_dir = home / ".config" / "opencode"
+    oc_dir.mkdir(parents=True)
+    (oc_dir / "opencode.json").write_text('{"provider": "anthropic", "model": "claude-sonnet"}')
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.setattr(m, "load_config", lambda: {"agents": {"kilo": {"auth_configured": True}}})
+    result = m.discover_auth("kilo")
+    assert result["auth_configured"] is False
+
+
+def test_aikit_discover_auth_kilo_auth_json(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    auth_dir = home / ".local" / "share" / "kilo"
+    auth_dir.mkdir(parents=True)
+    auth_file = auth_dir / "auth.json"
+    auth_file.write_text('{"anthropic": {"type": "api", "key": "sk-test"}}')
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    result = m.discover_auth("kilo")
+    assert result["auth_configured"] is True
+    assert result["method"] == "cred_file"
+    assert result["source"] == str(auth_file)
+
+
+def test_aikit_read_key_enter_accepts_carriage_return(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(m.readchar, "readkey", lambda: "\r")
+    assert m._read_key() == "enter"
+
+
+def test_aikit_auth_picker_single_select_on_enter(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    installed = {"claude", "codex", "cursor"}
+
+    def fake_detect(key):
+        return key in installed
+
+    keys = iter(["enter"])
+
+    monkeypatch.setattr(m, "detect_agent_bin", fake_detect)
+    monkeypatch.setattr(m, "_read_key", lambda: next(keys))
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
+
+    result = m.interactive_agent_picker(
+        "Select agent to authenticate",
+        single=True,
+        only_installed=True,
+    )
+    assert result == ["claude"]
+
+
+def test_aikit_auth_picker_only_installed(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "detect_agent_bin", lambda key: key == "codex")
+    monkeypatch.setattr(m, "_read_key", lambda: "enter")
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
+
+    result = m.interactive_agent_picker(
+        "Select agent to authenticate",
+        single=True,
+        only_installed=True,
+    )
+    assert result == ["codex"]
+
+
+def test_aikit_uninstall_prunes_config_entry(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    cfg_dir = tmp_path / ".aikit"
+    cfg_dir.mkdir()
+    cfg_file = cfg_dir / "config.json"
+    cfg_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "agents": {
+                    "kilo": {
+                        "installed": True,
+                        "auth_configured": True,
+                        "install_date": "2026-01-01",
+                    }
+                },
+                "settings": {},
+            }
+        )
+    )
+    monkeypatch.setattr(m, "CONFIG_DIR", cfg_dir)
+    monkeypatch.setattr(m, "CONFIG_FILE", cfg_file)
+    monkeypatch.setattr(m, "validate_agent_keys", lambda keys: None)
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: False)
+    monkeypatch.setattr(m, "resolve_uninstall_cmd", lambda _agent: "true")
+    monkeypatch.setattr(m, "run", lambda *_a, **_k: (0, "", ""))
+    monkeypatch.setattr(m, "discover_and_persist", lambda: None)
+
+    m._do_uninstall_impl(["kilo"], yes=True)
+
+    saved = json.loads(cfg_file.read_text())
+    assert "kilo" not in saved.get("agents", {})
+
+
+def test_aikit_discover_prunes_uninstalled_agents(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    cfg_dir = tmp_path / ".aikit"
+    cfg_dir.mkdir()
+    cfg_file = cfg_dir / "config.json"
+    cfg_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "agents": {
+                    "kilo": {
+                        "installed": True,
+                        "auth_configured": True,
+                        "install_date": "2026-01-01",
+                    }
+                },
+                "settings": {},
+            }
+        )
+    )
+    monkeypatch.setattr(m, "CONFIG_DIR", cfg_dir)
+    monkeypatch.setattr(m, "CONFIG_FILE", cfg_file)
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: False)
+    monkeypatch.setattr(m, "discover_auth", lambda _key: {"auth_configured": True, "method": "cred_file", "source": "/tmp/auth.json"})
+    monkeypatch.setattr(m, "check_update_status", lambda *_a, **_k: {})
+    monkeypatch.setattr(m, "detect_agent_version", lambda _key: None)
+
+    m.discover_and_persist()
+
+    saved = json.loads(cfg_file.read_text())
+    assert "kilo" not in saved.get("agents", {})
+
+
+def test_aikit_discover_does_not_add_never_installed_agents(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    cfg_dir = tmp_path / ".aikit"
+    cfg_dir.mkdir()
+    cfg_file = cfg_dir / "config.json"
+    cfg_file.write_text(json.dumps({"version": 1, "agents": {}, "settings": {}}))
+    monkeypatch.setattr(m, "CONFIG_DIR", cfg_dir)
+    monkeypatch.setattr(m, "CONFIG_FILE", cfg_file)
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: False)
+    monkeypatch.setattr(m, "discover_auth", lambda _key: {"auth_configured": False, "method": "", "source": ""})
+    monkeypatch.setattr(m, "check_update_status", lambda *_a, **_k: {})
+    monkeypatch.setattr(m, "detect_agent_version", lambda _key: None)
+
+    m.discover_and_persist()
+
+    saved = json.loads(cfg_file.read_text())
+    assert saved.get("agents") == {}
 
 
 # --- medcat ----------------------------------------------------------------
