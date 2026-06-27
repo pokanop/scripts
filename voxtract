@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-voxtract — Voice Extract Tool  v3.1.0
+voxtract — Voice Extract Tool  v3.2.0
 Extract and isolate speech from video and audio across multiple sources.
 
 Sources: YouTube, Spotify, Jellyfin, Plex, podcasts (RSS), HTTP URLs, local files/directories.
@@ -62,10 +62,9 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import urlparse
 
-__version__ = "3.1.0"
+__version__ = "3.2.0"
 
 # Brand identity — used for --help, --version, and runtime banners.
 ICON = "🌊"
@@ -111,9 +110,8 @@ LOUDNESS_PEAK = float(os.environ.get("VOXTRACT_PEAK", "-1.5"))       # True peak
 
 import scriptkit as sk
 from scriptkit.style import (
-    RESET as _RESET, BOLD as _BOLD, DIM as _DIM, RED as _RED, GREEN as _GREEN,
-    YELLOW as _YELLOW, BLUE as _BLUE, MAGENTA as _MAGENTA, CYAN as _CYAN,
-    WHITE as _WHITE, BG_RED as _BG_RED,
+    BOLD as _BOLD, DIM as _DIM, RED as _RED, GREEN as _GREEN,
+    YELLOW as _YELLOW, CYAN as _CYAN,
 )
 
 _use_color = sk.use_color
@@ -567,12 +565,12 @@ class JellyfinAdapter(SourceAdapter):
 
         # Download with streaming + ffmpeg
         import requests
-        print(f"  Streaming audio from Jellyfin...")
+        print("  Streaming audio from Jellyfin...")
         r = requests.get(stream_url, headers={
             "Authorization": f'MediaBrowser Token="{server["token"]}"',
         }, stream=True, timeout=600)
 
-        tmp_wav = str(dest_dir / f"source_raw.wav")
+        tmp_wav = str(dest_dir / "source_raw.wav")
         if r.status_code == 200:
             with open(tmp_wav, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
@@ -618,7 +616,7 @@ class JellyfinAdapter(SourceAdapter):
             else:
                 items = self._api_call(server, f"/Users/{server['user_id']}/Items", params)
         elif "Search" in path:
-            items = self._api_call(server, f"/Items", {"SearchTerm": query, **params})
+            items = self._api_call(server, "/Items", {"SearchTerm": query, **params})
         else:
             items = self._api_call(server, f"/Users/{server['user_id']}/Items", params)
 
@@ -711,13 +709,13 @@ class PlexAdapter(SourceAdapter):
         download_url = f"{server['url']}{part_key}?download=1&X-Plex-Token={server['token']}"
 
         import requests
-        print(f"  Downloading from Plex...")
+        print("  Downloading from Plex...")
         r = requests.get(download_url, stream=True, timeout=600)
         if r.status_code != 200:
             print(f"Download failed: HTTP {r.status_code}", file=sys.stderr)
             sys.exit(1)
 
-        tmp_file = str(dest_dir / f"source_download")
+        tmp_file = str(dest_dir / "source_download")
         with open(tmp_file, 'wb') as f:
             for chunk in r.iter_content(chunk_size=8192):
                 f.write(chunk)
@@ -755,7 +753,7 @@ class PlexAdapter(SourceAdapter):
 
         # Browse section or search
         if query:
-            data = self._api_call(server, f"/hubs/search", {"query": query, "limit": limit})
+            data = self._api_call(server, "/hubs/search", {"query": query, "limit": limit})
             hubs = data.get("MediaContainer", {}).get("Hub", [])
             results = []
             for hub in hubs:
@@ -980,11 +978,6 @@ class PodcastAdapter(SourceAdapter):
             print(f"RSS parse error: {e}", file=sys.stderr)
             return []
 
-        # Handle both RSS 2.0 and Atom
-        ns = {"itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd",
-              "atom": "http://www.w3.org/2005/Atom",
-              "content": "http://purl.org/rss/1.0/modules/content/"}
-
         results = []
         # Try RSS items first
         for item in root.findall(".//item"):
@@ -1199,7 +1192,7 @@ class SpotifyAdapter(SourceAdapter):
         print(f"  Album: {track['album']['name']}")
 
         # Use spotdl to download (it matches to YouTube internally)
-        print(f"  Matching to YouTube via spotdl...")
+        print("  Matching to YouTube via spotdl...")
         try:
             sdl = self._get_spotdl()
             songs = sdl.search([f"https://open.spotify.com/track/{track_id}"])
@@ -1224,7 +1217,7 @@ class SpotifyAdapter(SourceAdapter):
         tmp = tempfile.mkdtemp()
         try:
             tmp_audio = os.path.join(tmp, "source.%(ext)s")
-            dl = subprocess.run(
+            subprocess.run(
                 ["yt-dlp", "-x", "--audio-format", AUDIO_FORMAT,
                  "--audio-quality", "0", "-o", tmp_audio,
                  f"ytsearch1:{yt_query}"],
@@ -1261,7 +1254,7 @@ class SpotifyAdapter(SourceAdapter):
         # Search YouTube for the episode audio
         search_query = title
         description = ep.get("description", "")[:200]
-        print(f"  Searching YouTube for episode audio...")
+        print("  Searching YouTube for episode audio...")
 
         tmp = tempfile.mkdtemp()
         try:
@@ -1745,7 +1738,7 @@ def ensure_demucs_model_cached():
             return
     except ImportError:
         pass
-    print_info(f"Downloading Demucs model (~300MB, first run only)...")
+    print_info("Downloading Demucs model (~300MB, first run only)...")
     print_info(f"Model cache: {TORCH_HOME}/hub/checkpoints/")
 
 
@@ -2002,10 +1995,49 @@ def cmd_info(args):
 # CLI
 # ---------------------------------------------------------------------------
 
-def main():
+def cmd_doctor(args):
+    """Check audio tools and Python dependencies."""
+    return sk.doctor(
+        "voxtract", __version__, TAGLINE, ICON,
+        sections={
+            "Audio tools": [
+                sk.check_binary("ffmpeg", hint="brew install ffmpeg"),
+                sk.check_binary("ffprobe", hint="brew install ffmpeg"),
+            ],
+            "Python packages": [
+                sk.check_python("yt_dlp", hint="pip install yt-dlp"),
+                sk.check_python("requests", hint="pip install requests"),
+                sk.check_python("spotipy", hint="pip install spotipy", required=False),
+                sk.check_python("spotdl", hint="pip install spotdl", required=False),
+                sk.check_python("demucs", hint="pip install demucs", required=False),
+                sk.check_python("torch", hint="pip install torch (for --isolate)", required=False),
+            ],
+        },
+        tips=[
+            "Spotify needs `voxtract sources add spotify --id ID --secret SECRET`.",
+            "demucs/torch are only needed for speech isolation (--isolate).",
+        ],
+    )
+
+
+def _cleanup_temp() -> None:
+    """Remove orphaned temp files from an interrupted run."""
+    import tempfile
+    from pathlib import Path
+    print()
+    print_warning("Interrupted — cleaning up temp files...")
+    for p in Path(tempfile.gettempdir()).glob("tmp*.raw.tmp.wav"):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    print_info("Done.")
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = sk.make_parser(
         "voxtract", __version__, TAGLINE, icon=ICON,
-        epilog=f"""
+        epilog="""
 Extract and isolate speech from YouTube, Spotify, Jellyfin, Plex, podcasts, and more.
 
 Source URIs:
@@ -2102,32 +2134,34 @@ Cache:  ~/.voxtract/cache/
     src.add_argument("--user")
     src.add_argument("--password", "--pass")
 
-    args = parser.parse_args()
+    # doctor
+    sub.add_parser("doctor", help="Check audio tools and dependencies")
+
+    return parser
+
+
+HANDLERS = {
+    "fetch": cmd_fetch,
+    "clip": cmd_clip,
+    "list": cmd_list,
+    "isolate": cmd_isolate,
+    "cache": cmd_cache,
+    "info": cmd_info,
+    "sources": cmd_sources,
+    "doctor": cmd_doctor,
+}
+
+
+def main() -> int:
+    parser = build_parser()
+    args = sk.parse_args(parser)
 
     global VERBOSE
     VERBOSE = getattr(args, 'verbose', False)
 
-    try:
-        if args.command == "fetch":     cmd_fetch(args)
-        elif args.command == "clip":    cmd_clip(args)
-        elif args.command == "list":    cmd_list(args)
-        elif args.command == "isolate": cmd_isolate(args)
-        elif args.command == "cache":   cmd_cache(args)
-        elif args.command == "info":    cmd_info(args)
-        elif args.command == "sources": cmd_sources(args)
-        else:                           parser.print_help()
-    except KeyboardInterrupt:
-        print()
-        print_warning("Interrupted — cleaning up temp files...")
-        # Clean any orphaned temp files from this process
-        for p in Path(tempfile.gettempdir()).glob(f"tmp*.raw.tmp.wav"):
-            try:
-                p.unlink()
-            except OSError:
-                pass
-        print_info("Done.")
-        sys.exit(130)
+    return sk.dispatch(args, HANDLERS, parser,
+                       banner=sk.banner("voxtract", __version__, TAGLINE, ICON))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(sk.run_cli(main, on_interrupt=_cleanup_temp))

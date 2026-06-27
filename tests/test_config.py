@@ -3,8 +3,6 @@
 import json
 import sys
 
-import pytest
-
 import scriptkit.config as config
 from scriptkit.config import Config
 

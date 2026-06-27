@@ -1,4 +1,4 @@
-# 📚 medcat — Media Stack Ingest Tool · v2.2.0
+# 📚 medcat — Media Stack Ingest Tool · v2.3.0
 
 **Ingest media files into your media stack with metadata enrichment.**
 
@@ -207,6 +207,20 @@ Config is stored at `~/.medcat/config.json`. Override with `MEDCAT_CONFIG` env v
 ```bash
 export MEDCAT_CONFIG=/path/to/custom/.medcat
 ```
+
+---
+
+## Diagnostics
+
+```bash
+medcat doctor
+```
+
+Checks the environment in one sectioned report: media tools (`ffmpeg`, `yt-dlp`,
+`ia`, `wget`), Python packages (`ebooklib`, `pymupdf`, `musicbrainzngs`,
+`yt-dlp`), and whether a config file exists. Exits non-zero if a required
+dependency is missing. For service reachability use `medcat config --check` /
+`medcat config test`.
 
 ---
 

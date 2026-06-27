@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts — Toolkit installer & lifecycle manager  v1.0.1
+scripts — Toolkit installer & lifecycle manager  v1.2.0
 Install, update, and diagnose the pokanop/scripts CLI toolkit.
 
 Usage:
@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-__version__ = "1.0.1"
+__version__ = "1.2.0"
 
 # scriptkit is the shared toolkit library (lives alongside this file). It is
 # import-safe without third-party deps, but this installer must survive even a
@@ -508,6 +508,11 @@ def cmd_install(args: argparse.Namespace) -> None:
         print(f"Registered:  {', '.join(all_tools)}")
     print()
 
+    # Pull the latest source first so `install` means "install the latest"
+    # (a git checkout only). `--no-pull` skips it; non-git installs are a no-op.
+    if not args.no_pull and is_git_clone(install_dir):
+        git_pull(install_dir)
+
     ensure_venv(install_dir)
     if pip_tools:
         pip_install_requirements(install_dir, pip_tools, upgrade=args.upgrade)
@@ -556,11 +561,15 @@ def cmd_update(args: argparse.Namespace) -> None:
     print("✅ Update complete.")
 
 
-def cmd_doctor(args: argparse.Namespace) -> None:
+def cmd_doctor(args: argparse.Namespace) -> int:
     install_dir = resolve_install_dir(args.dir)
     bin_dir = resolve_bin_dir(args.bin_dir, install_dir)
     marker = read_marker(install_dir)
 
+    if _sk is not None:
+        return _doctor_rich(install_dir, bin_dir, marker)
+
+    # Bootstrap fallback (scriptkit unavailable): plain, dependency-free report.
     print(f"scripts doctor  v{__version__}")
     print()
     print(f"Install dir:  {install_dir} {'✅' if install_dir.is_dir() else '❌'}")
@@ -600,6 +609,62 @@ def cmd_doctor(args: argparse.Namespace) -> None:
             print(f"  {mark} {binary:<8} ({label}, {name}) — {hint}")
 
     print()
+    return 0
+
+
+def _doctor_rich(install_dir: Path, bin_dir: Path, marker: Optional[dict]) -> int:
+    """The shared, sectioned doctor report (scriptkit available)."""
+    vpy = venv_python(install_dir)
+    in_path = str(bin_dir) in os.environ.get("PATH", "").split(os.pathsep)
+
+    install = [
+        _sk.Check.ok("Install dir", str(install_dir)) if install_dir.is_dir()
+        else _sk.Check.fail("Install dir", str(install_dir), "missing — run: scripts install"),
+        _sk.Check.ok("Bin dir", str(bin_dir)) if bin_dir.is_dir()
+        else _sk.Check.warn("Bin dir", str(bin_dir), "wrapper dir missing"),
+        _sk.Check.ok("Marker", str(marker_path(install_dir))) if marker
+        else _sk.Check.warn("Marker", "not found", "toolkit may not be installed yet"),
+        _sk.Check.ok("Venv Python", str(vpy)) if vpy.exists()
+        else _sk.Check.warn("Venv Python", str(vpy), "venv missing — run: scripts install"),
+        _sk.Check.ok("PATH", str(bin_dir)) if in_path
+        else _sk.Check.warn("PATH", f"{bin_dir} not on PATH", f"add {bin_dir} to your PATH"),
+    ]
+
+    installed_tools = marker.get("tools", []) if marker else []
+    tools, available = [], []
+    for name in TOOL_NAMES:
+        script = install_dir / name
+        wrapper = bin_dir / (f"{name}.cmd" if platform.system() == "Windows" else name)
+        if wrapper.exists() and script.exists():
+            tools.append(_sk.Check.ok(name, TOOLS[name]["description"]))
+        elif installed_tools and name in installed_tools:
+            tools.append(_sk.Check.fail(name, "wrapper missing", f"reinstall: scripts install {name}"))
+        else:
+            available.append(name)
+
+    deps = []
+    for name, tool in TOOLS.items():
+        if installed_tools and name not in installed_tools:
+            continue
+        for binary, required, hint in tool["system"]:
+            if _sk.which(binary):
+                deps.append(_sk.Check.ok(binary, f"for {name}"))
+            elif required:
+                deps.append(_sk.Check.fail(binary, f"required by {name}", hint))
+            else:
+                deps.append(_sk.Check.warn(binary, f"optional for {name}", hint))
+
+    sections = {
+        "Install": install,
+        "Tools": tools or [_sk.Check.warn("tools", "none installed", "run: scripts install all")],
+    }
+    if deps:
+        sections["System dependencies"] = deps
+
+    tips = []
+    if available:
+        tips.append(f"Available to add: {', '.join(available)}  (scripts install <name>)")
+    return _sk.doctor("scripts", __version__, TAGLINE, ICON, sections=sections, tips=tips or None)
 
 
 def cmd_list(_: argparse.Namespace) -> None:
@@ -743,7 +808,7 @@ def build_parser() -> argparse.ArgumentParser:
         )
         parser.add_argument("-v", "--version", action="version", version=f"scripts {__version__}")
 
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--dir", help="Install directory (default: SCRIPTS_HOME or repo/marker)")
@@ -753,6 +818,7 @@ def build_parser() -> argparse.ArgumentParser:
     install_p.add_argument("tools", nargs="*", help="Tools to add (default: harness only; use 'all' for every tool)")
     install_p.add_argument("--upgrade", action="store_true", help="Upgrade existing packages")
     install_p.add_argument("--no-path", action="store_true", help="Do not modify shell PATH")
+    install_p.add_argument("--no-pull", action="store_true", help="Do not git pull latest source first")
     install_p.set_defaults(func=cmd_install)
 
     update_p = sub.add_parser("update", parents=[common], help="Update install from git + refresh deps")
@@ -773,13 +839,39 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
+# Bare `scripts` lists available tools (and install status) — a useful default
+# rather than an error.
+DEFAULT_COMMAND = "list"
+
+
+def main() -> int:
     parser = build_parser()
-    args = parser.parse_args()
-    args.func(args)
+    if _sk is not None:
+        args = _sk.parse_args(parser, default=DEFAULT_COMMAND)
+    else:  # bootstrap fallback: inject the default command by hand
+        argv = sys.argv[1:]
+        commands = {"install", "update", "uninstall", "doctor", "list", "path"}
+        if argv and argv[0] not in commands and not argv[0].startswith("-"):
+            argv = [DEFAULT_COMMAND, *argv]
+        elif not argv:
+            argv = [DEFAULT_COMMAND]
+        args = parser.parse_args(argv)
+
+    func = getattr(args, "func", None)
+    if func is None:
+        parser.print_help()
+        return 0
+    if _sk is not None:  # identity to stderr — visible, never pollutes stdout
+        print(_sk.banner("scripts", __version__, TAGLINE, ICON), file=sys.stderr)
+    rc = func(args)
+    return rc if isinstance(rc, int) and not isinstance(rc, bool) else 0
 
 
 if __name__ == "__main__":
     if _sk is not None:
         sys.exit(_sk.run_cli(main))
-    main()
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\n  ⏹ Interrupted.", file=sys.stderr)
+        sys.exit(130)

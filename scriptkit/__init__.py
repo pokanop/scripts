@@ -28,8 +28,10 @@ from .cli import (
     EXIT_OK,
     CliError,
     dispatch,
+    parse_args,
 )
 from .cli import run as run_cli
+from .doctor import Check, check_binary, check_python, doctor
 from .config import Config, coerce_scalar, config_from_env, deep_merge, get_nested, set_nested
 from .console import (
     HAS_RICH,
@@ -59,13 +61,15 @@ from .text import (
     truncate,
 )
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     # submodules
     "app", "config", "console", "proc", "progress", "style", "tables", "text",
     # app / identity
     "banner", "examples_block", "make_parser",
+    # doctor
+    "doctor", "Check", "check_binary", "check_python",
     # style
     "styled", "icon", "ICONS", "use_color", "set_color", "strip_ansi",
     # console / messages
@@ -82,6 +86,7 @@ __all__ = [
     # text
     "human_size", "human_duration", "format_timecode", "human_count", "truncate",
     # cli
-    "CliError", "run_cli", "dispatch", "EXIT_OK", "EXIT_ERROR", "EXIT_INTERRUPT",
+    "CliError", "run_cli", "dispatch", "parse_args",
+    "EXIT_OK", "EXIT_ERROR", "EXIT_INTERRUPT",
     "__version__",
 ]

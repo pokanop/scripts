@@ -14,6 +14,30 @@ from . import style
 from .style import BOLD, CYAN, DIM
 
 
+class BannerFirstParser(argparse.ArgumentParser):
+    """An ArgumentParser whose ``--help`` leads with the identity banner.
+
+    Stock argparse always prints ``usage:`` before the description; this puts
+    the description (the tool's identity line) *above* usage, so help reads
+    "what is this → how to call it". Mirrors ArgumentParser.format_help with
+    the usage/description order swapped.
+    """
+
+    def format_help(self) -> str:
+        formatter = self._get_formatter()
+        formatter.add_text(self.description)                       # identity banner FIRST
+        formatter.add_usage(
+            self.usage, self._actions, self._mutually_exclusive_groups
+        )
+        for action_group in self._action_groups:
+            formatter.start_section(action_group.title)
+            formatter.add_text(action_group.description)
+            formatter.add_arguments(action_group._group_actions)
+            formatter.end_section()
+        formatter.add_text(self.epilog)
+        return formatter.format_help()
+
+
 def banner(name: str, version: str, tagline: str = "", icon: str = "") -> str:
     """The house identity line, ANSI-styled (and NO_COLOR-aware).
 
@@ -77,7 +101,7 @@ def make_parser(
     if epilog is None and examples is not None:
         epilog = examples_block(examples)
     kwargs.setdefault("formatter_class", argparse.RawDescriptionHelpFormatter)
-    parser = argparse.ArgumentParser(prog=prog, description=desc, epilog=epilog, **kwargs)
+    parser = BannerFirstParser(prog=prog, description=desc, epilog=epilog, **kwargs)
     if add_version:
         parser.add_argument(
             "-v", "--version", action="version", version=f"{prog} {version}"

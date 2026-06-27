@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-keyferry — 1Password ⇄ Bitwarden/Vaultwarden credential ferry  v1.0.1
+keyferry — 1Password ⇄ Bitwarden/Vaultwarden credential ferry  v1.1.0
 Intelligently migrate and sync passwords between 1Password and Bitwarden/Vaultwarden,
 with vault→collection mapping, content-aware deduplication, and timestamp-aware delta syncing.
 
@@ -24,7 +24,6 @@ Dependencies:
     pip install rich requests readchar      (op + bw CLIs installed separately)
 """
 
-import argparse
 import atexit
 import concurrent.futures
 import hashlib
@@ -40,7 +39,6 @@ import time
 import zipfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, List, Dict, Any
 
 try:
     import readchar
@@ -59,13 +57,9 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
 import scriptkit as sk
-from scriptkit.style import (
-    RESET as _RESET, BOLD as _BOLD, DIM as _DIM, GREEN as _GREEN,
-    CYAN as _CYAN, WHITE as _WHITE, BG_BLUE as _BG_BLUE,
-)
 
 # Share the toolkit's console for consistent styling across tools.
 console = sk.rich_console
@@ -151,10 +145,6 @@ print_error = sk.error
 print_warning = sk.warning
 print_info = sk.info
 print_step = sk.step
-
-
-def banner():
-    return sk.banner("keyferry", __version__, TAGLINE, EMOJI)
 
 
 # ANSI styling for the raw-mode interactive picker (Rich interferes with raw
@@ -275,7 +265,7 @@ def which(binary):
     return shutil.which(binary) is not None
 
 
-class KeyferryError(Exception):
+class KeyferryError(sk.CliError):
     """User-facing error with a clean message."""
 
 
@@ -1225,52 +1215,59 @@ def build_existing_index(bw_items, collections_by_id, match_keys):
 # =============================================================================
 
 def cmd_doctor(args):
-    print(banner())
-    console.print()
-    table = Table(show_header=True, header_style="bold cyan", box=None, pad_edge=False)
-    table.add_column("Check")
-    table.add_column("Status")
-    table.add_column("Detail", style="dim")
-
     op = OpClient(account=args.account)
     bw = BwClient()
 
-    # op
+    # 1Password CLI (op) — installed, versioned, and signed into an account
     if op.available():
         ver = op.version() or "?"
         acct = op.configured()
         if acct:
-            table.add_row("1Password CLI (op)", "✅",
-                          f"v{ver} · {acct.get('email', acct.get('url','configured'))}")
+            op_check = sk.Check.ok("1Password CLI (op)",
+                                   f"v{ver} · {acct.get('email', acct.get('url', 'configured'))}")
         elif acct is None and op.accounts() == []:
-            table.add_row("1Password CLI (op)", "⚠️ ", f"v{ver} · no account configured (run: op signin)")
+            op_check = sk.Check.warn("1Password CLI (op)", f"v{ver} · no account configured",
+                                     hint="op signin")
         else:
-            table.add_row("1Password CLI (op)", "⚠️ ", f"v{ver} · account not found (check --account)")
+            op_check = sk.Check.warn("1Password CLI (op)", f"v{ver} · account not found",
+                                     hint="check --account")
     else:
-        table.add_row("1Password CLI (op)", "❌", "not installed — https://1password.com/downloads/command-line")
+        op_check = sk.Check.fail("1Password CLI (op)", "not installed",
+                                 hint="https://1password.com/downloads/command-line")
 
-    # bw
+    # Bitwarden CLI (bw) — installed, versioned, and unlocked
     if bw.available():
         ver = bw.version() or "?"
         st = bw.status() or {}
         status = st.get("status", "?")
-        emoji = "✅" if status == "unlocked" else "⚠️ "
-        detail = f"v{ver} · {st.get('serverUrl','?')} · {status}"
-        if status != "unlocked":
-            detail += " (run: bw unlock)"
-        table.add_row("Bitwarden CLI (bw)", emoji, detail)
+        detail = f"v{ver} · {st.get('serverUrl', '?')} · {status}"
+        if status == "unlocked":
+            bw_check = sk.Check.ok("Bitwarden CLI (bw)", detail)
+        else:
+            bw_check = sk.Check.warn("Bitwarden CLI (bw)", detail, hint="bw unlock")
     else:
-        table.add_row("Bitwarden CLI (bw)", "❌", "not installed — npm i -g @bitwarden/cli")
+        bw_check = sk.Check.fail("Bitwarden CLI (bw)", "not installed",
+                                 hint="npm i -g @bitwarden/cli")
 
-    # python deps
-    table.add_row("Python: requests", "✅" if HAS_REQUESTS else "❌",
-                  "needed for the bw serve fast-path")
-    table.add_row("Python: readchar", "✅" if HAS_READCHAR else "⚠️ ",
-                  "needed for the interactive picker")
-    table.add_row("Config", "✅" if CONFIG_FILE.exists() else "ℹ️ ",
-                  str(CONFIG_FILE) + ("" if CONFIG_FILE.exists() else " (defaults in use)"))
-    console.print(table)
-    console.print()
+    cfg_check = (sk.Check.ok("Config", str(CONFIG_FILE)) if CONFIG_FILE.exists()
+                 else sk.Check.warn("Config", "defaults in use", hint=str(CONFIG_FILE)))
+
+    return sk.doctor(
+        "keyferry", __version__, TAGLINE, EMOJI,
+        sections={
+            "CLIs": [op_check, bw_check],
+            "Python": [
+                sk.check_python("requests", hint="needed for the bw serve fast-path"),
+                sk.check_python("readchar", hint="needed for the interactive picker",
+                                required=False),
+            ],
+            "Config": [cfg_check],
+        },
+        tips=[
+            "`keyferry status --from export.1pux` compares both sides.",
+            "`keyferry plan` previews a sync with no writes.",
+        ],
+    )
 
 
 # =============================================================================
@@ -1278,10 +1275,6 @@ def cmd_doctor(args):
 # =============================================================================
 
 def cmd_status(args):
-    print(banner())
-    console.print()
-    cfg = load_config()
-
     # 1Password side (only if a source is given, to avoid op biometric prompts)
     src = resolve_endpoint(args.source) if args.source else None
     if src and src[0] == "onepassword" and src[1] == "file":
@@ -1426,8 +1419,6 @@ def _resolve_org(bw, cfg):
 # =============================================================================
 
 def cmd_sync(args, execute=False):
-    print(banner())
-    console.print()
     src = resolve_endpoint(args.source)
     dst = resolve_endpoint(args.target)
     if not src:
@@ -1761,8 +1752,6 @@ def _run_to_onepassword(args, execute=False):
 # =============================================================================
 
 def cmd_map(args):
-    print(banner())
-    console.print()
     cfg = load_config()
     m = cfg["mapping"]
 
@@ -1796,8 +1785,6 @@ def cmd_map(args):
 # =============================================================================
 
 def cmd_tidy_folders(args):
-    print(banner())
-    console.print()
     bw = BwClient()
     if not bw.available() or (bw.status() or {}).get("status") != "unlocked":
         raise KeyferryError("bw not available or locked (run: bw unlock)")
@@ -1945,42 +1932,37 @@ def build_parser():
     return p
 
 
-def main():
+def cmd_plan(args):
+    return cmd_sync(args, execute=False)
+
+
+def cmd_sync_cmd(args):
+    return cmd_sync(args, execute=True)
+
+
+HANDLERS = {
+    "doctor": cmd_doctor,
+    "status": cmd_status,
+    "plan": cmd_plan,
+    "sync": cmd_sync_cmd,
+    "map": cmd_map,
+    "tidy-folders": cmd_tidy_folders,
+    "config": cmd_config,
+}
+
+
+def main() -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    args = sk.parse_args(parser)
     # normalize optional attrs that may be absent depending on subcommand
     for attr in ("source", "target", "account", "org", "overwrite",
                  "skip_archived", "archived_active", "keep_tags", "empty_only",
                  "no_attachments", "yes"):
         if not hasattr(args, attr):
             setattr(args, attr, None)
-
-    try:
-        if args.command == "doctor":
-            cmd_doctor(args)
-        elif args.command == "status":
-            cmd_status(args)
-        elif args.command == "plan":
-            cmd_sync(args, execute=False)
-        elif args.command == "sync":
-            cmd_sync(args, execute=True)
-        elif args.command == "map":
-            cmd_map(args)
-        elif args.command == "tidy-folders":
-            cmd_tidy_folders(args)
-        elif args.command == "config":
-            cmd_config(args)
-        else:
-            print(banner())
-            console.print()
-            parser.print_help()
-    except KeyferryError as e:
-        print_error(str(e))
-        sys.exit(1)
-    except KeyboardInterrupt:
-        console.print("\n[yellow]⏹ Interrupted.[/yellow]")
-        sys.exit(130)
+    return sk.dispatch(args, HANDLERS, parser,
+                       banner=sk.banner("keyferry", __version__, TAGLINE, EMOJI))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(sk.run_cli(main))

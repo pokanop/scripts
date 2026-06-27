@@ -73,16 +73,20 @@ echo "    Install dir: $INSTALL_DIR"
 echo "    Bin dir:     $BIN_DIR"
 echo
 
-if [[ "$IN_PLACE" -eq 0 && ! -d "$INSTALL_DIR/.git" ]]; then
-    if [[ -d "$INSTALL_DIR" ]]; then
+PULLED=0
+if [[ "$IN_PLACE" -eq 0 ]]; then
+    if [[ -d "$INSTALL_DIR/.git" ]]; then
+        # Existing clone: always refresh so the installer runs the latest code.
+        echo "==> Pulling latest changes"
+        git -C "$INSTALL_DIR" pull --ff-only || echo "warn: git pull skipped (local changes or no fast-forward)"
+        PULLED=1
+    elif [[ -d "$INSTALL_DIR" ]]; then
         echo "==> Using existing directory: $INSTALL_DIR"
     else
         echo "==> Cloning $REPO_URL (ref: $REPO_REF)"
         git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$INSTALL_DIR"
+        PULLED=1
     fi
-elif [[ "$UPDATE" -eq 1 && -d "$INSTALL_DIR/.git" ]]; then
-    echo "==> Pulling latest changes"
-    git -C "$INSTALL_DIR" pull --ff-only
 fi
 
 if [[ ! -f "$INSTALL_DIR/scripts" ]]; then
@@ -98,6 +102,10 @@ fi
 PYTHON="${SCRIPTS_PYTHON:-python3}"
 
 INSTALL_ARGS=(--dir "$INSTALL_DIR" --bin-dir "$BIN_DIR")
+if [[ "$PULLED" -eq 1 ]]; then
+    # Source is already current — avoid a redundant pull inside `scripts install`.
+    INSTALL_ARGS+=(--no-pull)
+fi
 if [[ "$NO_PATH" -eq 1 ]]; then
     INSTALL_ARGS+=(--no-path)
 fi

@@ -16,6 +16,8 @@ for item in sk.track(items, "Working"):  # spinner + bar + M/N + elapsed
     ...
 cfg = sk.Config(path, defaults={...}, env_prefix="MYTOOL").load()
 res = sk.run(["git", "status"])          # Result(code, out, err)
+sk.doctor("mytool", __version__, sections={...})   # one diagnostic look for all
+args = sk.parse_args(parser, default="scan")        # bare run → default command
 sys.exit(sk.run_cli(main))               # CliError → exit 1, Ctrl-C → exit 130
 ```
 
@@ -121,11 +123,74 @@ non-zero exit unless `check=True`.
 `sk.format_timecode(75.5) → "1:15.50"` · `sk.human_count(2, "host") → "2 hosts"` ·
 `sk.truncate("hello world", 8) → "hello w…"`
 
-### CLI (`scriptkit.cli`)
-- `sk.CliError(msg)` — raise for expected failures; printed cleanly, exit 1.
-- `sk.run_cli(main)` — wraps `main`: `CliError` → 1, `KeyboardInterrupt` → 130,
-  int return → exit code.
-- `sk.dispatch(args, handlers, parser)` — route `args.command` to a handler dict.
+### CLI lifecycle (`scriptkit.cli`)
+
+One lifecycle for every tool — parse → (optional default command) → dispatch →
+clean exit. A tool's `main` collapses to four lines:
+
+```python
+DEFAULT_COMMAND = None          # or e.g. "scan" / "list" for a default action
+
+def main() -> int:
+    parser = build_parser()
+    args = sk.parse_args(parser, default=DEFAULT_COMMAND)
+    return sk.dispatch(args, HANDLERS, parser, default=DEFAULT_COMMAND,
+                       banner=sk.banner("mytool", __version__, TAGLINE, ICON))
+
+if __name__ == "__main__":
+    sys.exit(sk.run_cli(main))
+```
+
+- **`sk.CliError(msg)`** — raise for expected failures; printed cleanly as
+  `❌ msg`, exit 1. **Give each tool its own type by subclassing it**
+  (`class PluckError(sk.CliError): ...`); `run_cli` catches the whole family, so
+  no tool needs a per-command `try/except`.
+- **`sk.run_cli(main, *, on_interrupt=None)`** — wraps `main`: `CliError` → exit
+  1, `KeyboardInterrupt` → run `on_interrupt()` (optional cleanup, e.g. removing
+  temp files) then exit 130, int return → exit code. **This is the only place
+  Ctrl-C is handled** — never hand-roll a `KeyboardInterrupt` handler in a tool.
+- **`sk.parse_args(parser, *, default=None)`** — `parser.parse_args`, but when
+  `default` is set and the user gave no subcommand (and didn't ask for
+  `-h`/`-v`), the default subcommand is injected so its parser defaults populate
+  (bare `netsy` → `netsy scan`). Omit `default` and a bare invocation shows
+  banner-led help.
+- **`sk.dispatch(args, handlers, parser=None, *, default=None, banner=None)`** —
+  routes `args.command` to `handlers[cmd](args)`. For any real command it prints
+  `banner` **to stderr** (always visible, never pollutes piped stdout); a bare
+  invocation with no `default` prints banner-led help and exits 0.
+
+### Doctor (`scriptkit.doctor`)
+
+Every tool's `doctor` uses **one renderer** so they look identical: an
+auto-generated **System** section, your **check sections**, a rolled-up
+**Issues** list, optional **Tips**, and a verdict with a meaningful exit code
+(`1` iff any *required* check failed).
+
+```python
+def cmd_doctor(args) -> int:
+    return sk.doctor("mytool", __version__, TAGLINE, ICON,
+        sections={
+            "Prerequisites": [
+                sk.check_binary("ffmpeg", hint="brew install ffmpeg"),
+                sk.check_binary("optional-bin", required=False, hint="…"),
+            ],
+            "Python packages": [sk.check_python("rich", required=False)],
+            "Config": [sk.Check.ok("Config file", str(CONFIG.path))],
+        },
+        tips=["a dim line of guidance"])
+```
+
+- **`sk.check_binary(name, *, hint="", required=True, version=True)`** — on
+  `PATH`? Captures the first line of `--version` as detail. Missing → `FAIL`
+  (required) or `WARN` (optional).
+- **`sk.check_python(module, *, hint="", required=True)`** — importable? (uses
+  `find_spec`, so it's cheap and won't trigger heavy imports).
+- **`sk.Check.ok(label, detail="")` / `.warn(label, detail, hint)` /
+  `.fail(label, detail, hint)`** — for anything custom (a detected IP, a config
+  path). `hint` surfaces in the **Issues** section when not OK.
+
+`sk.doctor` omits the banner because `dispatch` already prints it (to stderr);
+pass `show_banner=True` only when calling `doctor` outside the dispatch flow.
 
 ### Identity & CLI framing (`scriptkit.app`)
 

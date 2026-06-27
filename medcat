@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-medcat — Media Stack Ingest Tool  v2.2.0
+medcat — Media Stack Ingest Tool  v2.3.0
 Ingest media files into your media stack with metadata enrichment.
 
 Supported types: books (EPUB/PDF), comics (CBZ/CBR), audiobooks (M4B/MP3),
@@ -73,11 +73,7 @@ Usage:
     medcat scan --service readarr
 """
 
-import argparse
-import fnmatch
-import hashlib
 import json
-import mimetypes
 import os
 import re
 import shlex
@@ -89,20 +85,17 @@ import textwrap
 import time
 import xml.etree.ElementTree as ET
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Callable
-from urllib.parse import urlencode, urlparse, urlunparse
+from typing import Optional
+from urllib.parse import urlparse
 
 import requests
-from rich import print as rprint
 from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
-from rich.tree import Tree
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 import scriptkit as sk
 
@@ -550,16 +543,16 @@ def _run_wizard_sections(config: dict, section: str = None):
             current_scan = existing.get("scan", "")
 
             console.print(f"  [bold magenta]{dest_name}[/]")
-            path = _prompt(f"  Storage path", current_path)
+            path = _prompt("  Storage path", current_path)
             if path:
                 config.setdefault("destinations", {}).setdefault(dest_name, {})
                 config["destinations"][dest_name]["path"] = path
 
-                if _prompt_yes_no(f"  Auto-scan after ingest?", bool(current_scan)):
-                    scan_svc = _prompt(f"  Scan service (e.g. kavita, radarr)", current_scan)
+                if _prompt_yes_no("  Auto-scan after ingest?", bool(current_scan)):
+                    scan_svc = _prompt("  Scan service (e.g. kavita, radarr)", current_scan)
                     config["destinations"][dest_name]["scan"] = scan_svc
                     if scan_svc and scan_svc != "abs":
-                        lib_id = _prompt(f"  Library ID (for Kavita, blank if N/A)",
+                        lib_id = _prompt("  Library ID (for Kavita, blank if N/A)",
                                          str(existing.get("scan_library_id") or ""))
                         config["destinations"][dest_name]["scan_library_id"] = int(lib_id) if lib_id else None
                 else:
@@ -598,14 +591,14 @@ def _run_wizard_sections(config: dict, section: str = None):
                 console.print()
                 continue
 
-            url = _prompt(f"  URL (e.g. http://192.168.1.100:5080)",
+            url = _prompt("  URL (e.g. http://192.168.1.100:5080)",
                           existing_svc.get("url", ""))
 
             # Some services use username/password instead of API key
             if svc_name in ("deluge", "qbittorrent"):
-                username = _prompt(f"  Username",
+                username = _prompt("  Username",
                                    existing_svc.get("username", "admin" if svc_name == "qbittorrent" else ""))
-                password = _prompt(f"  Password",
+                password = _prompt("  Password",
                                    existing_svc.get("password", ""))
                 if url:
                     config.setdefault("services", {}).setdefault(svc_name, {})
@@ -615,7 +608,7 @@ def _run_wizard_sections(config: dict, section: str = None):
                     if password:
                         config["services"][svc_name]["password"] = password
             else:
-                api_key = _prompt(f"  API key",
+                api_key = _prompt("  API key",
                                   existing_svc.get("api_key", ""))
                 if url:
                     config.setdefault("services", {}).setdefault(svc_name, {})
@@ -866,7 +859,6 @@ def extract_epub_metadata(filepath: str) -> dict:
             root = ET.fromstring(opf_xml)
 
         # Namespace map
-        dc_ns = 'http://purl.org/dc/elements/1.1/'
         opf_ns = 'http://www.idpf.org/2007/opf'
 
         def find_text(tag_local):
@@ -1261,7 +1253,6 @@ def enrich_music_musicbrainz(metadata: dict) -> dict:
 def write_epub_metadata(filepath: str, metadata: dict):
     """Write enriched metadata back into EPUB."""
     try:
-        import ebooklib
         from ebooklib import epub
 
         book = epub.read_epub(filepath)
@@ -1941,7 +1932,6 @@ def process_file(
 def render_file_result(result: dict):
     """Render a single file result with rich formatting."""
     meta = result["metadata"]
-    handler = result["handler"]
     media_type = result["media_type"]
 
     # Icon per type
@@ -2038,7 +2028,7 @@ def cmd_ingest(args):
 
     if not dest_config or not dest_config.get("path"):
         console.print(f"[red]No destination configured for: {media_type}[/]")
-        console.print(f"[dim]Run: medcat setup --section destinations[/]")
+        console.print("[dim]Run: medcat setup --section destinations[/]")
         sys.exit(1)
 
     # Collect all files
@@ -2118,7 +2108,7 @@ def cmd_ingest(args):
             console.print(f"  [red]✗[/] {r['file']}: {r.get('error', 'unknown')}")
 
     if not args.dry_run and ok and not args.scan:
-        console.print(f"\n[dim]💡 Run [bold]medcat scan --service kavita[/] (or another service) to refresh the library after ingestion.[/]")
+        console.print("\n[dim]💡 Run [bold]medcat scan --service kavita[/] (or another service) to refresh the library after ingestion.[/]")
 
 
 def cmd_identify(args):
@@ -2249,8 +2239,8 @@ def cmd_config(args):
                 for k, v in _mask_secrets(node).items():
                     if isinstance(v, dict):
                         console.print(f"  [bold]{k}:[/]")
-                        for sk, sv in v.items():
-                            console.print(f"    {sk} = {sv}")
+                        for sub_k, sub_v in v.items():
+                            console.print(f"    {sub_k} = {sub_v}")
                     else:
                         console.print(f"  {k} = {v}")
             else:
@@ -2614,7 +2604,7 @@ def _archive_download(result: SearchResult, dest_dir: str = None) -> bool:
             pass
 
     # Fallback: direct HTTP download for single-file items
-    console.print(f"[dim]  Downloading from archive.org...[/]")
+    console.print("[dim]  Downloading from archive.org...[/]")
     try:
         # Get the item metadata to find files
         meta_resp = requests.get(
@@ -2667,7 +2657,6 @@ def _archive_download(result: SearchResult, dest_dir: str = None) -> bool:
             return False
 
         out_path = os.path.join(dest, target_file)
-        total = int(r.headers.get("content-length", 0))
         with open(out_path, "wb") as f:
             downloaded = 0
             for chunk in r.iter_content(chunk_size=8192):
@@ -2811,7 +2800,7 @@ def _youtube_download(result: SearchResult, dest_dir: str = None,
     cmd.append(url)
 
     try:
-        console.print(f"[dim]  Downloading from YouTube...[/]")
+        console.print("[dim]  Downloading from YouTube...[/]")
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if proc.returncode == 0:
             console.print(f"[green]  ✓ Downloaded to {escape(dest)}[/]")
@@ -2878,7 +2867,7 @@ def _deluge_add_magnet(magnet_url: str, svc_config: dict) -> bool:
             console.print(f"[green]  ✓ Added to Deluge: {escape(str(result)[:50])}[/]")
             return True
         else:
-            console.print(f"[red]✗ Deluge rejected magnet[/]")
+            console.print("[red]✗ Deluge rejected magnet[/]")
             return False
 
     except Exception as e:
@@ -3278,7 +3267,6 @@ def _download_torrent_file(url: str, config: dict) -> bool:
             return False
 
         torrent_data = r.content
-        content_type = r.headers.get("content-type", "")
 
         # If the response IS a magnet link or torrent data, handle accordingly
         if "magnet:" in r.text[:20]:
@@ -3660,7 +3648,7 @@ def cmd_search(args):
 
     # --- URL auto-detection: if query looks like a URL, redirect to grab ---
     if _looks_like_url(query):
-        console.print(f"[dim]  Detected URL → using grab mode[/]")
+        console.print("[dim]  Detected URL → using grab mode[/]")
         # Build a synthetic args namespace for grab
         class _GrabArgs:
             pass
@@ -3807,7 +3795,7 @@ def cmd_search(args):
                     console.print("[green]  ✓ Sent to torrent client[/]")
                     console.print("[dim]  The torrent client will download the file to its configured directory.[/]")
             else:
-                console.print(f"[red]  ✗ Download failed[/]")
+                console.print("[red]  ✗ Download failed[/]")
 
         # Ask if they want to select more
         if not _prompt_yes_no("\n  Download more?", default=False):
@@ -3943,7 +3931,38 @@ def build_parser():
     config_test.add_argument("test_services", nargs="*", metavar="service",
                              help="Service names to test (default: all configured)")
 
+    # --- doctor ---
+    subparsers.add_parser("doctor", help="Check media tools, Python packages, and config")
+
     return parser
+
+
+def cmd_doctor(args) -> int:
+    """Diagnose media tools, Python packages, and configuration."""
+    media = [
+        sk.check_binary("ffmpeg", required=False, hint="brew install ffmpeg — audio/video metadata"),
+        sk.check_binary("yt-dlp", required=False, hint="pip install yt-dlp — YouTube/archive downloads"),
+        sk.check_binary("ia", required=False, hint="pip install internetarchive — archive.org access"),
+        sk.check_binary("wget", required=False, hint="direct file downloads"),
+    ]
+    packages = [
+        sk.check_python("ebooklib", hint="pip install ebooklib"),
+        sk.check_python("fitz", hint="pip install pymupdf"),
+        sk.check_python("musicbrainzngs", hint="pip install musicbrainzngs"),
+        sk.check_python("yt_dlp", hint="pip install yt-dlp", required=False),
+    ]
+    config = [
+        sk.Check.ok("Config file", str(CONFIG_FILE)) if CONFIG_FILE.exists()
+        else sk.Check.warn("Config file", "not found", "run: medcat setup")
+    ]
+    return sk.doctor(
+        "medcat", __version__, TAGLINE, ICON,
+        sections={"Media tools": media, "Python packages": packages, "Config": config},
+        tips=[
+            "Validate configuration completeness: medcat config --check",
+            "Test service connections: medcat config test",
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3951,10 +3970,25 @@ def build_parser():
 # ---------------------------------------------------------------------------
 
 
-def main():
-    parser = build_parser()
-    args = parser.parse_args()
+# Command dispatch. (Note: the module-level ``HANDLERS`` dict is media-type
+# destinations, not commands — keep these separate.)
+COMMANDS = {
+    "setup": cmd_setup,
+    "ingest": cmd_ingest,
+    "identify": cmd_identify,
+    "scan": cmd_scan,
+    "search": cmd_search,
+    "grab": cmd_grab,
+    "config": cmd_config,
+    "doctor": cmd_doctor,
+}
 
+
+def main() -> int:
+    parser = build_parser()
+    args = sk.parse_args(parser)
+
+    # Bare invocation: first-run welcome, otherwise banner-led help.
     if not args.command:
         if _needs_setup():
             console.print(Panel.fit(
@@ -3964,26 +3998,15 @@ def main():
                 "[dim]This will guide you through configuring destinations, services, and transport.[/]",
                 border_style="cyan",
             ))
-        else:
-            parser.print_help()
-        sys.exit(0)
-
-    commands = {
-        "setup": cmd_setup,
-        "ingest": cmd_ingest,
-        "identify": cmd_identify,
-        "scan": cmd_scan,
-        "search": cmd_search,
-        "grab": cmd_grab,
-        "config": cmd_config,
-    }
-
-    if args.command not in commands:
+            return 0
         parser.print_help()
-        sys.exit(1)
+        return 0
 
-    commands[args.command](args)
+    return sk.dispatch(
+        args, COMMANDS, parser,
+        banner=sk.banner("medcat", __version__, TAGLINE, ICON),
+    )
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(sk.run_cli(main))

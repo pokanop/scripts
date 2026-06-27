@@ -74,7 +74,7 @@ def header(text: str, width: int = 50) -> None:
     across TTY/non-TTY) so sections feel familiar; color strips when off.
     """
     pad = max(3, width - len(text) - 5)
-    print("\n" + style.styled(f"━━━ {text} {'━' * pad}", BOLD, CYAN))
+    print("\n" + style.styled(f"━━━ {text} {'━' * pad}", BOLD))
 
 
 def elapsed(label: str, seconds: float) -> None:

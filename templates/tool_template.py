@@ -10,8 +10,9 @@ This is the canonical scaffold for a new pokanop/scripts tool. To create one:
     # then: replace "toolname"/"TOOLNAME", add subcommands, register in `scripts`
 
 Everything visual or structural (color, icons, messages, tables, progress,
-config, subprocess, prompts, error handling) comes from the shared `scriptkit`
-library so the tool matches the rest of the toolkit for free.
+config, subprocess, prompts, the doctor report, the run/dispatch lifecycle, and
+error handling) comes from the shared `scriptkit` library so the tool matches
+the rest of the toolkit for free.
 """
 
 from __future__ import annotations
@@ -38,6 +39,19 @@ __version__ = "0.1.0"
 ICON = "🧰"
 TAGLINE = "one-line description"
 
+# A bare invocation (no subcommand) runs this command after showing the banner.
+# Set to None to show banner-led help instead (the right choice for tools that
+# mutate state — don't make an implicit action destructive).
+DEFAULT_COMMAND = None
+
+
+# --- errors ----------------------------------------------------------------
+# Subclass CliError so `run_cli` prints "❌ message" and exits 1 — no traceback,
+# no per-command try/except. Raise it for any expected, user-facing failure.
+class ToolnameError(sk.CliError):
+    """A clean, user-facing error for toolname."""
+
+
 # --- configuration ---------------------------------------------------------
 # Three-tier config: defaults < ~/.toolname/config.json < TOOLNAME_* env vars.
 CONFIG_DIR = Path(os.environ.get("TOOLNAME_CONFIG", Path.home() / ".toolname"))
@@ -63,23 +77,36 @@ def cmd_hello(args: argparse.Namespace) -> None:
     sk.success("done")
 
 
-def cmd_doctor(args: argparse.Namespace) -> None:
-    """Demonstrate a status table and dependency checks."""
-    sk.table(
-        [{"name": "Check"}, {"name": "Status"}, {"name": "Detail", "style": "dim"}],
-        [
-            ["python", "✅", sys.version.split()[0]],
-            ["git", "✅" if sk.which("git") else "❌", "version control"],
-        ],
-        title="toolname doctor",
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """The shared diagnostic report — identical look across every tool.
+
+    Build a list of checks per section; `sk.doctor` auto-adds a System section,
+    rolls up issues, prints tips, and returns 1 if any required check FAILs.
+    """
+    return sk.doctor(
+        "toolname", __version__, TAGLINE, ICON,
+        sections={
+            "Tools": [
+                sk.check_binary("git", hint="install git"),
+                sk.check_binary("ffmpeg", required=False, hint="brew install ffmpeg"),
+            ],
+            "Python packages": [
+                sk.check_python("rich", required=False, hint="pip install rich"),
+            ],
+            "Config": [
+                sk.Check.ok("Config file", str(CONFIG.path)) if CONFIG.path.exists()
+                else sk.Check.warn("Config file", "not found", "run: toolname hello"),
+            ],
+        },
+        tips=["Run `toolname hello --name Ada` to try it out"],
     )
 
 
 def cmd_run(args: argparse.Namespace) -> None:
-    """Demonstrate subprocess handling and CliError."""
+    """Demonstrate subprocess handling and the tool's error type."""
     result = sk.run(["git", "rev-parse", "--show-toplevel"])
     if not result.ok:
-        raise sk.CliError(f"not a git repo: {result.err}")
+        raise ToolnameError(f"not a git repo: {result.err}")
     sk.kv("repo root", result.out)
 
 
@@ -109,10 +136,19 @@ HANDLERS = {"hello": cmd_hello, "doctor": cmd_doctor, "run": cmd_run}
 
 
 def main() -> int:
+    # One lifecycle for every tool: parse (optionally defaulting a subcommand),
+    # then dispatch (which prints the identity banner to stderr for any command
+    # and falls back to banner-led help on a bare invocation).
     parser = build_parser()
-    args = parser.parse_args()
-    return sk.dispatch(args, HANDLERS, parser)
+    args = sk.parse_args(parser, default=DEFAULT_COMMAND)
+    return sk.dispatch(
+        args, HANDLERS, parser, default=DEFAULT_COMMAND,
+        banner=sk.banner("toolname", __version__, TAGLINE, ICON),
+    )
 
 
 if __name__ == "__main__":
+    # run_cli centralizes clean exit: CliError → "❌ …" exit 1; Ctrl-C →
+    # "⏹ Interrupted." exit 130. Pass on_interrupt=<cleanup> if the tool leaves
+    # temp files or partial state behind on interrupt.
     sys.exit(sk.run_cli(main))

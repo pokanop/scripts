@@ -62,6 +62,12 @@ step or vendoring.** The template additionally walks parent dirs to find
 `scriptkit` is **import-safe without `rich`** (it degrades to plain ANSI/text), so
 even the bootstrap `scripts` installer can use it under a bare system Python.
 
+> **Updating an install:** the install dir is its own git clone, separate from your
+> dev repo. `scripts install` (and `install.sh`) now **`git pull --ff-only` first**
+> when that dir is a git checkout — so "install" gets the latest code. `scripts
+> update` does the same; pass `--no-pull` to skip. (Historically only `update`
+> pulled, which made `install` look like it was "caching" old code.)
+
 ---
 
 ## The scriptkit library
@@ -98,10 +104,21 @@ sk.which("ffmpeg"); sk.require("ffmpeg", hint="brew install ffmpeg")
 # text
 sk.human_size(1536); sk.human_duration(185); sk.truncate(s, 40)
 
-# CLI plumbing
-raise sk.CliError("clean user-facing message")   # → printed, exit 1
-sys.exit(sk.run_cli(main))                        # CliError→1, Ctrl-C→130
-return sk.dispatch(args, HANDLERS, parser)        # route args.command
+# CLI lifecycle — one shape for every tool (parse → dispatch → clean exit)
+class MytoolError(sk.CliError): ...               # tool error subclasses CliError
+raise MytoolError("clean user-facing message")    # → ❌ printed, exit 1
+args = sk.parse_args(parser, default=DEFAULT_COMMAND)  # bare run → default cmd (or help)
+return sk.dispatch(args, HANDLERS, parser, default=DEFAULT_COMMAND,
+                   banner=sk.banner("mytool", __version__, TAGLINE, ICON))  # banner→stderr
+sys.exit(sk.run_cli(main))                         # CliError→1, Ctrl-C→130
+sys.exit(sk.run_cli(main, on_interrupt=cleanup))   # …with cleanup on Ctrl-C
+
+# doctor — one diagnostic look for every tool (System section auto-added)
+return sk.doctor("mytool", __version__, TAGLINE, ICON,
+    sections={"Prerequisites": [sk.check_binary("ffmpeg", hint="brew install ffmpeg")],
+              "Python packages": [sk.check_python("rich", required=False)],
+              "Config": [sk.Check.ok("Config", str(CONFIG.path))]},
+    tips=["a dim line of guidance"])               # returns 1 iff a required check FAILs
 
 # identity & framing — same first impression for every tool
 ICON, TAGLINE = "🚀", "does the thing"
@@ -124,12 +141,16 @@ these so styling stays consistent.
    cp templates/tool_template.py mytool
    chmod +x mytool
    ```
-   The scaffold is a working CLI demonstrating messages, a tracked loop, a table,
-   config, subprocess, `CliError`, and `dispatch`.
+   The scaffold is a working CLI demonstrating the full lifecycle (`parse_args` →
+   `dispatch` → `run_cli`), messages, a tracked loop, config, subprocess, a
+   `CliError` subclass, and a `sk.doctor` report.
 
 2. **Edit `mytool`:** replace `toolname`/`TOOLNAME`, set `__version__`, write your
    subcommands as `cmd_*` functions, and register them in the `HANDLERS` dict and
-   `build_parser()`. Keep the upward-search `scriptkit` bootstrap at the top.
+   `build_parser()`. Set `DEFAULT_COMMAND` if a bare invocation should run a command
+   (else leave it `None`). Rename the `ToolnameError` subclass. Fill in the `doctor`
+   sections with the real binaries/packages your tool needs. Keep the upward-search
+   `scriptkit` bootstrap at the top, and keep `__main__` as `sk.run_cli(main)`.
 
 3. **Register it in the `scripts` installer** so it can be installed/updated. In the
    `scripts` file add an entry to `TOOLS` and append the name to `TOOL_NAMES`:
@@ -208,14 +229,37 @@ Rules of thumb:
 
 ## Conventions
 
+**The lifecycle (do this the same way in every tool)**
+- **One `main`.** `build_parser()` → `sk.parse_args(parser, default=DEFAULT_COMMAND)`
+  → `sk.dispatch(args, HANDLERS, parser, default=DEFAULT_COMMAND, banner=sk.banner(...))`.
+  Entry point is always `sys.exit(sk.run_cli(main))`. Don't hand-roll arg parsing,
+  command if/elif chains, or `__main__` logic — copy the template.
+- **Graceful exit lives in `scriptkit`, nowhere else.** `sk.run_cli` is the *only*
+  place `KeyboardInterrupt` is handled (→ `⏹ Interrupted.`, exit 130). **Never write
+  a `try/except KeyboardInterrupt` in a tool.** Need cleanup on Ctrl-C? Pass
+  `on_interrupt=<fn>` to `run_cli` (e.g. voxtract removes temp files that way).
+- **Errors:** give the tool its own type by **subclassing `sk.CliError`**
+  (`class MytoolError(sk.CliError): ...`) and `raise` it for expected failures.
+  `run_cli` catches the whole family → `❌ msg`, exit 1. Don't catch your own error
+  type in `main`; don't `sys.exit()` with ad-hoc codes for user errors.
+- **The banner shows for every command** — `dispatch` prints it to **stderr** (always
+  visible, never pollutes piped stdout). `--help`/`--version` carry it via
+  `make_parser`. Don't `print(banner)` yourself in a handler.
+- **Default action:** set `DEFAULT_COMMAND` to run a command on a bare invocation
+  (netsy → `scan`, aikit/scripts → `list`). Leave it `None` for tools that mutate
+  state — a bare run then shows banner-led help, never an implicit destructive action.
+- **Every tool has a `doctor`** built with `sk.doctor(...)` + `sk.check_binary` /
+  `sk.check_python` / `sk.Check.*`. Don't hand-roll a diagnostic with Panels/Tables —
+  the shared renderer is the house look (System section auto-added; returns exit 1 iff
+  a required check fails).
+
 **Output & UX**
 - Use the `scriptkit` message helpers; don't hand-roll ANSI or `print("✅ …")`.
 - Errors go to **stderr** (`sk.error` already does this); normal output to stdout.
 - Honor `NO_COLOR` / `FORCE_COLOR` — automatic via `scriptkit`. Never hardcode color
   on; never assume a TTY.
-- Exit codes: success `0`, expected failure `1` (raise `sk.CliError`), interrupt
-  `130` (automatic via `sk.run_cli`). Don't `sys.exit()` with ad-hoc codes for
-  user errors — raise `CliError`.
+- Exit codes: success `0`, expected failure `1` (raise a `CliError` subclass),
+  interrupt `130` (automatic via `sk.run_cli`).
 - **Identity:** build the parser with `sk.make_parser(...)` and define module-level
   `ICON` + `TAGLINE`, so every tool shows the same `{icon} name vX.Y.Z — tagline`
   banner. Pick a distinct brand emoji (current set: 🛠️ scripts · 🤖 aikit ·
@@ -286,6 +330,13 @@ import torch/yt-dlp at top level if you can defer it) so smoke tests stay fast.
   (`try/except`) so a broken library can't brick installs — keep it that way.
 - **Don't construct a new `rich.Console()`** in a tool — use `sk.rich_console` /
   `sk.err_console`.
+- **`sk.doctor` is the function; `scriptkit.doctor` (the submodule) is shadowed by
+  it** at the package level (by design). Tools only ever call `sk.doctor(...)` —
+  don't `import scriptkit.doctor` (you'll get the function). Tests that need the
+  module's constants reach it via `sys.modules["scriptkit.doctor"]`.
+- **The banner goes to stderr** (via `dispatch`), so a command's stdout stays a
+  clean data stream (`pluck get x | jq` works). Keep machine output on stdout;
+  don't print chrome there.
 
 ---
 
@@ -294,7 +345,9 @@ import torch/yt-dlp at top level if you can defer it) so smoke tests stay fast.
 **New tool**
 - [ ] `cp templates/tool_template.py <name>`, edit, keep the `scriptkit` bootstrap
 - [ ] `ICON` + `TAGLINE` set; parser via `sk.make_parser`; `__version__ = "0.1.0"`
-- [ ] Subcommands wired into `build_parser()` + `HANDLERS`
+- [ ] Subcommands wired into `build_parser()` + `HANDLERS`; `DEFAULT_COMMAND` chosen
+- [ ] Tool error type subclasses `sk.CliError`; `__main__` is `sk.run_cli(main)`
+- [ ] `doctor` built with `sk.doctor` + `check_binary`/`check_python` (real deps)
 - [ ] Registered in `scripts` (`TOOLS` + `TOOL_NAMES`)
 - [ ] `requirements/<name>.txt` (+ `pyproject.toml` extra)
 - [ ] `docs/<name>.md` + README card + `CHANGELOG.md` section

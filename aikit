@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.3.2
+aikit — AI Coding Agent CLI Installer & Manager  v1.4.0
 Install, update, authenticate, and manage 16 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -21,7 +21,6 @@ Dependencies:
     pip install rich requests flask readchar
 """
 
-import argparse
 import json
 import os
 import platform
@@ -32,9 +31,7 @@ import subprocess
 import sys
 import textwrap
 import time
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, List
 
 try:
     import readchar
@@ -42,22 +39,17 @@ try:
 except ImportError:
     HAS_READCHAR = False
 
-import requests
-from rich import print as rprint
-from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.prompt import Confirm, Prompt
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.3.2"
+__version__ = "1.4.0"
 
 import scriptkit as sk
 from scriptkit.style import (
-    RESET as _RESET, BOLD as _BOLD, DIM as _DIM, RED as _RED, GREEN as _GREEN,
-    YELLOW as _YELLOW, BLUE as _BLUE, CYAN as _CYAN, WHITE as _WHITE,
-    BG_BLUE as _BG_BLUE,
+    BOLD as _BOLD, DIM as _DIM, GREEN as _GREEN,
+    CYAN as _CYAN, WHITE as _WHITE, BG_BLUE as _BG_BLUE,
 )
 
 _BG_DEFAULT = "\033[49m"
@@ -1380,7 +1372,7 @@ def _do_auth_impl(agent_key):
 
     elif auth_type in ("api_key", "provider_keys", "pat_or_oauth", "oauth_portal", "account_or_byok", "oauth_onboard"):
         if env_vars:
-            console.print(f"\n  [bold]Environment variables to set:[/bold]")
+            console.print("\n  [bold]Environment variables to set:[/bold]")
             for var in env_vars:
                 current = os.environ.get(var, "")
                 if current:
@@ -1439,76 +1431,54 @@ def _save_env_var(var, value):
 # Doctor
 # =============================================================================
 
-def do_doctor():
-    """Diagnose environment and agent health.
-    Auto-discovers and persists all agent states to config."""
-    # Run full discovery first — ensure config reflects reality
+def do_doctor() -> int:
+    """Diagnose environment and agent health via the shared doctor report.
+
+    Auto-discovers and persists all agent states to config first, so the report
+    reflects reality.
+    """
     discover_and_persist()
-    
-    console.print(Panel("[bold]🩺 aikit Doctor[/bold] — diagnosing environment and agents", border_style="cyan"))
-
-    # System
-    console.print("\n[bold]System[/bold]")
-    print_info(f"Platform: {_CURRENT_PLATFORM} ({platform.release()})")
-    print_info(f"Python:   {sys.version.split()[0]}")
-    print_info(f"Shell:    {os.environ.get('SHELL', 'unknown')}")
-    print_info(f"aikit:    v{__version__}")
-
-    # Prerequisites
-    console.print("\n[bold]Prerequisites[/bold]")
-    for tool in ["curl", "git", "node", "npm", "python3", "pip"]:
-        status = "[green]✓[/green]" if which(tool) else "[red]✗[/red]"
-        version = ""
-        if which(tool):
-            _, stdout, _ = run(f"{tool} --version 2>&1", timeout=5)
-            version = f" — {stdout.split(chr(10))[0][:60]}" if stdout else ""
-        console.print(f"  {status} {tool}{version}")
-
-    # Agents
-    total = len(AGENTS)
-    console.print(f"\n[bold]Agents ({total} total)[/bold]")
-    installed_count = 0
-    auth_count = 0
     config = load_config()
 
+    prereq = [
+        sk.check_binary("curl", required=False, hint="curl needed for most install scripts"),
+        sk.check_binary("git", required=False, hint="git needed by some agents"),
+        sk.check_binary("node", required=False, hint="Node.js/npm needed for npm-based agents"),
+        sk.check_binary("npm", required=False, hint="npm needed for npm-based agents"),
+        sk.check_binary("python3"),
+        sk.check_binary("pip", required=False),
+    ]
+
+    agents: list = []
+    installed_count = auth_count = 0
+    not_installed: list[str] = []
     for key in AGENTS:
         agent = AGENTS[key]
         agent_cfg = config.get("agents", {}).get(key, {})
         installed = agent_cfg.get("installed", False) or detect_agent_bin(key)
-        version = agent_cfg.get("version") or detect_agent_version(key) if installed else None
-        auth = agent_cfg.get("auth_configured", False)
-
-        if installed:
-            installed_count += 1
-            if auth:
-                auth_count += 1
-            status = "[green]✓[/green]"
-            vstr = f" — {version}" if version else ""
-            astr = " [green]auth✓[/green]" if auth else " [yellow]needs auth[/yellow]"
-            console.print(f"  {status} {agent['icon']} {agent['name']}{vstr}{astr}")
+        if not installed:
+            not_installed.append(agent["name"])
+            continue
+        installed_count += 1
+        version = agent_cfg.get("version") or detect_agent_version(key)
+        label = f"{agent['icon']} {agent['name']}"
+        if agent_cfg.get("auth_configured", False):
+            auth_count += 1
+            agents.append(sk.Check.ok(label, version or "installed"))
         else:
-            console.print(f"  [dim]  {agent['icon']} {agent['name']} — not installed[/dim]")
+            agents.append(sk.Check.warn(label, version or "installed", f"configure auth: aikit auth {key}"))
+    if not agents:
+        agents.append(sk.Check.warn("agents", "none installed", "install one: aikit install"))
 
-    console.print(f"\n[bold]Summary:[/bold] {installed_count}/{total} installed, {auth_count} authenticated")
+    tips = [f"{installed_count}/{len(AGENTS)} installed, {auth_count} authenticated"]
+    if not_installed:
+        tips.append("Not installed: " + ", ".join(not_installed) + "  (aikit install)")
 
-    # Issues
-    console.print("\n[bold]Issues[/bold]")
-    issues = 0
-
-    if not which("curl"):
-        print_warning("curl not found — required for most install scripts")
-        issues += 1
-    if not which("node") or not which("npm"):
-        print_warning("Node.js/npm not found — required for npm-based agents")
-        issues += 1
-    if not which("git"):
-        print_warning("git not found — required by some agents")
-        issues += 1
-
-    if issues == 0:
-        print_success("No issues detected")
-    else:
-        print_info(f"  {issues} issue(s) found. Install missing prerequisites first.")
+    return sk.doctor(
+        "aikit", __version__, TAGLINE, ICON,
+        sections={"Prerequisites": prereq, "Agents": agents},
+        tips=tips,
+    )
 
 
 # =============================================================================
@@ -1620,7 +1590,6 @@ def create_flask_app():
     except ImportError:
         console.print("[bold red]Flask is not installed. Run: pip install flask[/bold red]")
         sys.exit(1)
-    import threading
 
     app = Flask(__name__)
 
@@ -1931,7 +1900,6 @@ _serve_process = None
 
 def do_serve(host=None, port=None, detach=False, stop=False):
     """Start/stop the web dashboard."""
-    global _serve_process
 
     config = load_config()
     settings = config.get("settings", {})
@@ -2035,7 +2003,7 @@ def build_parser():
     config_p = sub.add_parser("config", help="Manage configuration")
     config_sub = config_p.add_subparsers(dest="config_action")
 
-    config_list = config_sub.add_parser("list", help="Show all config (secrets masked)")
+    config_sub.add_parser("list", help="Show all config (secrets masked)")
     config_get = config_sub.add_parser("get", help="Get a config value")
     config_get.add_argument("config_key", metavar="key", help="Dot-path key (e.g. settings.web_port)")
     config_set = config_sub.add_parser("set", help="Set a config value")
@@ -2046,95 +2014,104 @@ def build_parser():
     return parser
 
 
-def main():
-    parser = build_parser()
-    args = parser.parse_args()
+def cmd_install(args):
+    do_install(args.agents, yes=args.yes)
 
-    # Handle config sub-commands
-    if args.command == "config":
-        if args.config_action == "list":
-            do_config_list()
-        elif args.config_action == "get":
-            do_config_get(args.config_key)
-        elif args.config_action == "set":
-            do_config_set(args.config_key, args.value)
-        else:
-            do_config_list()
+
+def cmd_update(args):
+    do_update(args.agents or None)
+
+
+def cmd_uninstall(args):
+    do_uninstall(args.agents, yes=args.yes)
+
+
+def cmd_list(args):
+    print_agent_table()
+
+
+def cmd_auth(args):
+    if args.agent:
+        do_auth(args.agent)
         return
-
-    # First-run: auto-discover and persist, then warn if no agents
-    if not args.command and _needs_setup():
-        discover_and_persist()
-        config = load_config()
-        installed_count = sum(1 for k in AGENTS if config.get("agents", {}).get(k, {}).get("installed", False))
-        authenticated_count = sum(1 for k in AGENTS if config.get("agents", {}).get(k, {}).get("auth_configured", False))
-        
-        console.print(Panel(
-            "[bold]👋 Welcome to aikit![/bold]\n\n"
-            "aikit has auto-discovered your system state:\n"
-            f"  [green]• {installed_count}/{len(AGENTS)} agents installed[/green]\n"
-            f"  [green]• {authenticated_count} agents authenticated[/green]\n\n"
-            "Run: [bold]aikit setup[/bold] for guided setup\n"
-            "  or [bold]aikit list[/bold] to see the full table\n"
-            "  or [bold]aikit doctor[/bold] to diagnose everything",
-            border_style="cyan"
-        ))
-        SETUP_MARKER.touch()
+    if not any(detect_agent_bin(k) for k in AGENTS):
+        print_warning("No agents installed. Run 'aikit install' first.")
         return
-
-    # Dispatch with KeyboardInterrupt safety
+    # Ctrl-C inside the picker means "cancel this prompt", not "abort aikit".
     try:
-        if args.command == "install":
-            do_install(args.agents, yes=args.yes)
-        elif args.command == "update":
-            do_update(args.agents or None)
-        elif args.command == "uninstall":
-            do_uninstall(args.agents, yes=args.yes)
-        elif args.command == "list":
-            print_agent_table()
-        elif args.command == "auth":
-            if not args.agent:
-                agent_keys = [k for k in AGENTS if detect_agent_bin(k)]
-                if not agent_keys:
-                    print_warning("No agents installed. Run 'aikit install' first.")
-                    return
-                try:
-                    agent_keys = interactive_agent_picker("Select agent to authenticate", preselect_installed=True)
-                except KeyboardInterrupt:
-                    console.print("\n[yellow]⏹ Cancelled.[/yellow]")
-                    return
-                if agent_keys:
-                    for key in agent_keys:
-                        do_auth(key)
-                else:
-                    print_warning("No agent selected.")
-            else:
-                do_auth(args.agent)
-        elif args.command == "serve":
-            do_serve(
-                host=args.host,
-                port=args.port,
-                detach=args.detach,
-                stop=args.stop,
-            )
-        elif args.command == "doctor":
-            do_doctor()
-        elif args.command == "setup":
-            do_setup()
-        elif not args.command:
-            # Default: show banner + help
-            console.print(Panel(
-                f"[bold]🤖 aikit v{__version__}[/bold]\n"
-                f"AI Coding Agent CLI Installer & Manager\n"
-                f"[dim]{len(AGENTS)} agents • {_CURRENT_PLATFORM} • ~/.aikit/config.json[/dim]",
-                border_style="cyan"
-            ))
-            print_agent_table()
-            console.print(f"\n[dim]Commands: install | update | uninstall | list | auth | serve | doctor | setup | config[/dim]")
+        agent_keys = interactive_agent_picker("Select agent to authenticate", preselect_installed=True)
     except KeyboardInterrupt:
-        console.print("\n[yellow]⏹ Interrupted.[/yellow]")
-        sys.exit(130)
+        console.print("\n[yellow]⏹ Cancelled.[/yellow]")
+        return
+    if not agent_keys:
+        print_warning("No agent selected.")
+        return
+    for key in agent_keys:
+        do_auth(key)
+
+
+def cmd_serve(args):
+    do_serve(host=args.host, port=args.port, detach=args.detach, stop=args.stop)
+
+
+def cmd_doctor(args):
+    return do_doctor()
+
+
+def cmd_setup(args):
+    do_setup()
+
+
+def cmd_config(args):
+    action = getattr(args, "config_action", None)
+    if action == "get":
+        do_config_get(args.config_key)
+    elif action == "set":
+        do_config_set(args.config_key, args.value)
+    else:  # "list" or no sub-action
+        do_config_list()
+
+
+HANDLERS = {
+    "install": cmd_install, "update": cmd_update, "uninstall": cmd_uninstall,
+    "list": cmd_list, "auth": cmd_auth, "serve": cmd_serve,
+    "doctor": cmd_doctor, "setup": cmd_setup, "config": cmd_config,
+}
+
+# Bare `aikit` shows the agent table — the at-a-glance default.
+DEFAULT_COMMAND = "list"
+_COMMANDS = frozenset(HANDLERS)
+
+
+def _first_run_notice() -> None:
+    """One-time welcome on a fresh machine: discover state, then point the way."""
+    discover_and_persist()
+    config = load_config()
+    installed = sum(1 for k in AGENTS if config.get("agents", {}).get(k, {}).get("installed", False))
+    authed = sum(1 for k in AGENTS if config.get("agents", {}).get(k, {}).get("auth_configured", False))
+    console.print(Panel(
+        "[bold]👋 Welcome to aikit![/bold]\n\n"
+        "aikit has auto-discovered your system state:\n"
+        f"  [green]• {installed}/{len(AGENTS)} agents installed[/green]\n"
+        f"  [green]• {authed} agents authenticated[/green]\n\n"
+        "Run: [bold]aikit setup[/bold] for guided setup\n"
+        "  or [bold]aikit doctor[/bold] to diagnose everything",
+        border_style="cyan",
+    ))
+    SETUP_MARKER.touch()
+
+
+def main() -> int:
+    parser = build_parser()
+    bare = not any(tok in _COMMANDS for tok in sys.argv[1:])
+    args = sk.parse_args(parser, default=DEFAULT_COMMAND)
+    if bare and _needs_setup():
+        _first_run_notice()  # then fall through to the default `list` table
+    return sk.dispatch(
+        args, HANDLERS, parser, default=DEFAULT_COMMAND,
+        banner=sk.banner("aikit", __version__, TAGLINE, ICON),
+    )
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(sk.run_cli(main))

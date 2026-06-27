@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pluck — Config Key-Path Tool  v1.0.1
+pluck — Config Key-Path Tool  v1.1.0
 Copy, merge, read, set, and diff values at dot-separated paths across
 YAML, JSON, TOML, and .env files — one CLI, format-agnostic operations.
 
@@ -49,9 +49,9 @@ try:
 except ImportError:
     YAML = None  # type: ignore[misc, assignment]
 
-__version__ = "1.0.1"
+__version__ = "1.1.0"
 
-EMOJI = "🪶"
+ICON = "🪶"
 TAGLINE = "copy, merge, and edit config key paths (yaml · json · toml · env)"
 
 import scriptkit as sk
@@ -76,12 +76,8 @@ class ConfigFormat(str, Enum):
     ENV = "env"
 
 
-class PluckError(Exception):
+class PluckError(sk.CliError):
     """User-facing error with a clean message."""
-
-
-def banner() -> str:
-    return sk.banner("pluck", __version__, TAGLINE, EMOJI)
 
 
 print_success = sk.success
@@ -699,28 +695,21 @@ def show_value(title: str, loaded: LoadedConfig, value: Any) -> None:
     )
 
 
-def cmd_doctor(_args) -> None:
-    print(banner())
-    console.print()
-    table = Table(show_header=True, header_style="bold cyan", box=None, pad_edge=False)
-    table.add_column("Check")
-    table.add_column("Status")
-    table.add_column("Detail", style="dim")
-
-    if YAML is not None:
-        table.add_row("Python: ruamel.yaml", "✅", "YAML round-trip loader")
-    else:
-        table.add_row("Python: ruamel.yaml", "❌", "pip install ruamel.yaml")
-
-    table.add_row("Python: tomllib", "✅", "TOML reader (stdlib)")
-    table.add_row("Python: tomli-w", "✅", "TOML writer")
-    table.add_row("Python: rich", "✅", "terminal output")
-    table.add_row("Formats", "✅", "yaml · json · toml · env")
-
-    console.print(table)
-    console.print()
-    if YAML is None:
-        sys.exit(1)
+def cmd_doctor(_args) -> int:
+    return sk.doctor(
+        "pluck", __version__, TAGLINE, ICON,
+        sections={
+            "Python": [
+                sk.check_python("ruamel.yaml", hint="pip install ruamel.yaml"),
+                sk.Check.ok("python: tomllib", "stdlib"),
+                sk.check_python("tomli_w", hint="pip install tomli-w"),
+                sk.check_python("rich", hint="pip install rich", required=False),
+            ],
+            "Formats": [
+                sk.Check.ok("Formats", "yaml · json · toml · env"),
+            ],
+        },
+    )
 
 
 def resolve_file_format(path: Path, explicit: Optional[str], role: str) -> str:
@@ -823,8 +812,6 @@ def _transfer(args, mode: str) -> None:
     changed = _apply_keys(src_loaded, dest_loaded, keys, mode, args.create_missing)
 
     if args.dry_run:
-        print(banner())
-        console.print()
         print_info(
             f"Mode: {mode} · {src_fmt} → {dest_fmt} · keys: {', '.join(changed)}"
         )
@@ -986,8 +973,6 @@ def cmd_diff(args) -> None:
 
 
 def cmd_formats(_args) -> None:
-    print(banner())
-    console.print()
     table = Table(show_header=True, header_style="bold cyan")
     table.add_column("Format")
     table.add_column("Extensions")
@@ -1003,7 +988,7 @@ def cmd_formats(_args) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     p = sk.make_parser(
-        "pluck", __version__, TAGLINE, icon=EMOJI,
+        "pluck", __version__, TAGLINE, icon=ICON,
         epilog=textwrap.dedent("""\
             Supported formats: yaml, json, toml, env (auto-detected from extension)
 
@@ -1095,36 +1080,23 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def main() -> None:
-    parser = build_parser()
-    args = parser.parse_args()
+HANDLERS = {
+    "doctor": cmd_doctor,
+    "formats": cmd_formats,
+    "get": cmd_get,
+    "set": cmd_set,
+    "copy": cmd_copy,
+    "merge": cmd_merge,
+    "diff": cmd_diff,
+}
 
-    try:
-        if args.command == "doctor":
-            cmd_doctor(args)
-        elif args.command == "formats":
-            cmd_formats(args)
-        elif args.command == "get":
-            cmd_get(args)
-        elif args.command == "set":
-            cmd_set(args)
-        elif args.command == "copy":
-            cmd_copy(args)
-        elif args.command == "merge":
-            cmd_merge(args)
-        elif args.command == "diff":
-            cmd_diff(args)
-        else:
-            print(banner())
-            console.print()
-            parser.print_help()
-    except PluckError as exc:
-        print_error(str(exc))
-        sys.exit(1)
-    except KeyboardInterrupt:
-        console.print("\n[yellow]⏹ Interrupted.[/yellow]")
-        sys.exit(130)
+
+def main() -> int:
+    parser = build_parser()
+    args = sk.parse_args(parser)
+    return sk.dispatch(args, HANDLERS, parser,
+                       banner=sk.banner("pluck", __version__, TAGLINE, ICON))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(sk.run_cli(main))

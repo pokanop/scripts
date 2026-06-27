@@ -79,6 +79,12 @@ Manage media server connections.
 - `add <type>` — Add a server (jellyfin, plex, spotify)
 - `remove <type>` — Remove a server
 
+### `voxtract doctor`
+Check the environment: audio tools (`ffmpeg`, `ffprobe`) and Python packages
+(`yt-dlp` and `requests` required; `spotipy`/`spotdl` for Spotify and
+`demucs`/`torch` for `--isolate` are optional). Prints a sectioned report and
+exits non-zero if a required dependency is missing.
+
 ---
 
 ## Source URI Reference

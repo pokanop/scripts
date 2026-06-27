@@ -45,6 +45,17 @@ def test_make_parser_help_has_identity(no_color, capsys):
     assert "Examples:" in out and "mytool go" in out
 
 
+def test_make_parser_banner_before_usage(no_color, capsys):
+    import pytest
+
+    parser = app.make_parser("mytool", "1.0.0", "a tagline", icon="🚀")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help"])
+    out = capsys.readouterr().out
+    # identity line comes BEFORE the usage grammar
+    assert out.index("mytool v1.0.0") < out.index("usage:")
+
+
 def test_make_parser_version_flag(no_color, capsys):
     import pytest
 
