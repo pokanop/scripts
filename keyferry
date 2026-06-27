@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-keyferry — 1Password ⇄ Bitwarden/Vaultwarden credential ferry  v1.1.0
+keyferry — 1Password ⇄ Bitwarden/Vaultwarden credential ferry  v1.1.1
 Intelligently migrate and sync passwords between 1Password and Bitwarden/Vaultwarden,
 with vault→collection mapping, content-aware deduplication, and timestamp-aware delta syncing.
 
@@ -21,7 +21,7 @@ Usage:
     keyferry config get/set/list    Manage configuration
 
 Dependencies:
-    pip install rich requests readchar      (op + bw CLIs installed separately)
+    pip install rich requests readchar      (op + bw native CLIs installed separately)
 """
 
 import atexit
@@ -29,6 +29,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -57,7 +58,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 import scriptkit as sk
 
@@ -263,6 +264,20 @@ def run(cmd, timeout=300, input_text=None):
 
 def which(binary):
     return shutil.which(binary) is not None
+
+
+BW_CLI_RELEASES = "https://github.com/bitwarden/clients/releases"
+BW_CLI_HELP = "https://bitwarden.com/help/cli/"
+
+
+def bw_install_hint() -> str:
+    """Platform-appropriate install hint for the native Bitwarden CLI (not npm)."""
+    system = platform.system()
+    if system == "Darwin":
+        return f"brew install bitwarden-cli  |  binary: {BW_CLI_RELEASES}"
+    if system == "Windows":
+        return f"choco install bitwarden-cli  |  binary: {BW_CLI_RELEASES}"
+    return f"binary: {BW_CLI_RELEASES}  |  snap: sudo snap install bw  |  {BW_CLI_HELP}"
 
 
 class KeyferryError(sk.CliError):
@@ -1247,7 +1262,7 @@ def cmd_doctor(args):
             bw_check = sk.Check.warn("Bitwarden CLI (bw)", detail, hint="bw unlock")
     else:
         bw_check = sk.Check.fail("Bitwarden CLI (bw)", "not installed",
-                                 hint="npm i -g @bitwarden/cli")
+                                 hint=bw_install_hint())
 
     cfg_check = (sk.Check.ok("Config", str(CONFIG_FILE)) if CONFIG_FILE.exists()
                  else sk.Check.warn("Config", "defaults in use", hint=str(CONFIG_FILE)))
@@ -1298,6 +1313,7 @@ def cmd_status(args):
     bw = BwClient()
     if not bw.available():
         print_error("bw not installed")
+        sk.info(f"Install: {bw_install_hint()}")
         return
     st = bw.status() or {}
     console.print(f"[bold]🛡️  Bitwarden/Vaultwarden[/bold] [dim]({st.get('serverUrl','?')} · {st.get('status','?')})[/dim]")
@@ -1461,7 +1477,7 @@ def _run_to_bitwarden(args, src, execute=False):
 
     bw = BwClient(port=cfg["settings"]["serve_port"], concurrency=cfg["settings"]["concurrency"])
     if not bw.available():
-        raise KeyferryError("bw not installed")
+        raise KeyferryError(f"bw not installed — {bw_install_hint()}")
     if (bw.status() or {}).get("status") != "unlocked":
         raise KeyferryError("Bitwarden vault is locked — run: bw unlock")
 
@@ -1669,8 +1685,10 @@ def _run_to_onepassword(args, execute=False):
     bw = BwClient()
     if not op.available() or not op.configured():
         raise KeyferryError("op not available or not signed in (run: op signin)")
-    if not bw.available() or (bw.status() or {}).get("status") != "unlocked":
-        raise KeyferryError("bw not available or locked (run: bw unlock)")
+    if not bw.available():
+        raise KeyferryError(f"bw not installed — {bw_install_hint()}")
+    if (bw.status() or {}).get("status") != "unlocked":
+        raise KeyferryError("Bitwarden vault is locked — run: bw unlock")
 
     with console.status("🛡️  Reading Bitwarden…"):
         bw.cli_sync()
@@ -1786,8 +1804,10 @@ def cmd_map(args):
 
 def cmd_tidy_folders(args):
     bw = BwClient()
-    if not bw.available() or (bw.status() or {}).get("status") != "unlocked":
-        raise KeyferryError("bw not available or locked (run: bw unlock)")
+    if not bw.available():
+        raise KeyferryError(f"bw not installed — {bw_install_hint()}")
+    if (bw.status() or {}).get("status") != "unlocked":
+        raise KeyferryError("Bitwarden vault is locked — run: bw unlock")
     bw.cli_sync()
     folders = [f for f in bw.cli_list_folders() if f.get("id") and f.get("name") != "No Folder"]
     if not folders:

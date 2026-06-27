@@ -146,6 +146,17 @@ def test_keyferry_deep_merge(tool_loader):
     assert m._deep_merge({"a": {"b": 1}}, {"a": {"c": 2}}) == {"a": {"b": 1, "c": 2}}
 
 
+def test_keyferry_bw_install_hint(tool_loader, monkeypatch):
+    m = tool_loader("keyferry")
+    monkeypatch.setattr(m.platform, "system", lambda: "Darwin")
+    assert "brew install bitwarden-cli" in m.bw_install_hint()
+    assert m.BW_CLI_RELEASES in m.bw_install_hint()
+    monkeypatch.setattr(m.platform, "system", lambda: "Windows")
+    assert "choco install bitwarden-cli" in m.bw_install_hint()
+    monkeypatch.setattr(m.platform, "system", lambda: "Linux")
+    assert "snap install bw" in m.bw_install_hint()
+
+
 # --- aikit -----------------------------------------------------------------
 def test_aikit_config_nested(tool_loader):
     m = tool_loader("aikit")

@@ -136,6 +136,10 @@ Newest entries on top, within each tool.
 
 ## keyferry
 
+### 1.1.1 — 2026-06-27
+- Doctor, errors, and docs now recommend the **native Bitwarden CLI binary**
+  (GitHub releases, Homebrew, Chocolatey, snap) instead of `npm i -g @bitwarden/cli`.
+
 ### 1.1.0 — 2026-06-26
 - `doctor` rebuilt on the shared `sk.doctor` renderer (CLIs / Python / Config
   sections), matching every other tool's diagnostic look.
@@ -223,6 +227,10 @@ Newest entries on top, within each tool.
 ---
 
 ## scripts
+
+### 1.2.1 — 2026-06-27
+- `doctor` Bitwarden CLI hint now recommends the native binary (GitHub releases,
+  Homebrew, Chocolatey, snap) instead of npm.
 
 ### 1.2.0 — 2026-06-26
 - **Bare `scripts` now lists available tools** (with install status) instead of

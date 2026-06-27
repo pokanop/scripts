@@ -25,12 +25,30 @@ curl -fsSL https://raw.githubusercontent.com/pokanop/scripts/main/install.sh | b
 
 # Vendor CLIs (installed separately):
 #   op  — https://1password.com/downloads/command-line   (op signin)
-#   bw  — npm i -g @bitwarden/cli                          (bw login && bw unlock)
+#   bw  — native binary (not npm):
+#         macOS:   brew install bitwarden-cli
+#         Windows: choco install bitwarden-cli
+#         Linux:   https://github.com/bitwarden/clients/releases  |  sudo snap install bw
+#         Details: https://bitwarden.com/help/cli/   (bw login && bw unlock)
 
 keyferry doctor
 ```
 
 keyferry never writes anything until you run `sync` — and even then it only **creates** new items or **updates** matched items when the source is newer. `plan` (same flags as `sync`) is always safe.
+
+### Vendor CLIs
+
+keyferry shells out to the **native** Bitwarden CLI (`bw`) — not the npm package. Install separately:
+
+| Platform | Install |
+|----------|---------|
+| **macOS** | `brew install bitwarden-cli` — or download from [GitHub releases](https://github.com/bitwarden/clients/releases) |
+| **Windows** | `choco install bitwarden-cli` — or download from [GitHub releases](https://github.com/bitwarden/clients/releases) |
+| **Linux** | Download from [GitHub releases](https://github.com/bitwarden/clients/releases), or `sudo snap install bw` |
+
+Full options: [bitwarden.com/help/cli](https://bitwarden.com/help/cli/). After install: `bw login && bw unlock`.
+
+The 1Password CLI (`op`) is separate: [1password.com/downloads/command-line](https://1password.com/downloads/command-line) → `op signin`.
 
 ---
 
