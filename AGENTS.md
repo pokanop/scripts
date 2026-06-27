@@ -223,6 +223,19 @@ Rules of thumb:
 4. A `CHANGELOG.md` entry under that tool's section (newest on top), dated `YYYY-MM-DD`,
    with a one-line-per-change summary. Flag breaking changes with a leading `⚠`.
 
+**Coalesce bumps — one version per commit/PR, not per agent session:**
+- Before bumping, check whether the tool (or `scriptkit`) **already has an uncommitted
+  version bump** (`git diff` on the tool file / `CHANGELOG.md`, or `git log -1` vs
+  `origin/main`). If yes, **do not bump again** — keep that version and **append** to
+  its existing `CHANGELOG.md` entry (or extend the entry you added earlier in the same
+  branch).
+- Bump **once** when the work is ready to land. Follow-up tasks in the same uncommitted
+  batch (even across separate chat sessions) are changelog bullets under the same
+  version, not a new `x.y.Z`.
+- Only open a **new** changelog section (and increment the version) after the previous
+  bump has been **committed and pushed** — i.e. at the next release boundary — unless
+  the user explicitly asks for a separate release.
+
 > Don't bump for changes that don't touch the tool file (pure test/doc edits elsewhere).
 
 ---
@@ -357,8 +370,10 @@ import torch/yt-dlp at top level if you can defer it) so smoke tests stay fast.
 **Editing a tool**
 - [ ] Output/config/subprocess go through `scriptkit`
 - [ ] New deps declared in `requirements/<tool>.txt`
-- [ ] **Version bumped** (MAJOR/MINOR/PATCH) in `__version__` **and** the docstring
-      header (and docs H1 if pinned) — see [Versioning](#versioning--changelog)
-- [ ] `CHANGELOG.md` entry added under the tool's section
+- [ ] **Version bumped once per landing** (MAJOR/MINOR/PATCH) in `__version__` **and**
+      the docstring header (and docs H1 if pinned) — see [Versioning](#versioning--changelog);
+      if an uncommitted bump already exists for this tool, **coalesce** (same version,
+      extend the changelog entry) instead of incrementing again
+- [ ] `CHANGELOG.md` entry added or extended under the tool's section
 - [ ] Characterization tests still pass (or updated intentionally)
 - [ ] `venv/bin/python -m pytest` green

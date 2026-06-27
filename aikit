@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.4.0
+aikit — AI Coding Agent CLI Installer & Manager  v1.5.0
 Install, update, authenticate, and manage 16 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -24,6 +24,7 @@ Dependencies:
 import json
 import os
 import platform
+import re
 import shlex
 import shutil
 import signal
@@ -32,6 +33,8 @@ import sys
 import textwrap
 import time
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 try:
     import readchar
@@ -44,7 +47,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 import scriptkit as sk
 from scriptkit.style import (
@@ -77,8 +80,11 @@ DEFAULT_CONFIG = {
         "web_port": 8765,
         "web_host": "localhost",
         "auto_update_check": True,
+        "update_check_ttl": 3600,
     },
 }
+
+UPDATE_CHECK_CACHE: dict[str, dict] = {}
 
 # =============================================================================
 # Agent Registry — 16 coding agents, platform-aware install commands
@@ -100,6 +106,7 @@ AGENTS = {
         },
         "version_cmd": "claude --version",
         "update_cmd": "claude update",
+        "version_check": {"type": "url_text", "url": "https://downloads.claude.ai/latest"},
         "uninstall_cmd": None,
         "auth_type": "oauth_browser",
         "auth_env_vars": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
@@ -120,6 +127,7 @@ AGENTS = {
         },
         "version_cmd": "agy --version",
         "update_cmd": "agy update",
+        "version_check": {"type": "antigravity_manifest"},
         "uninstall_cmd": None,
         "auth_type": "oauth_browser",
         "auth_env_vars": [],
@@ -129,7 +137,9 @@ AGENTS = {
     },
     "cursor": {
         "name": "Cursor CLI",
-        "bin": "cursor",
+        "bin": "cursor-agent",
+        "bin_aliases": ["agent"],
+        "path_markers": ["cursor-agent"],
         "vendor": "Cursor",
         "homepage": "https://cursor.com/cli",
         "icon": "🖱️",
@@ -138,14 +148,15 @@ AGENTS = {
             "Darwin": "curl https://cursor.com/install -fsS | bash",
             "Windows": 'powershell -c "irm https://cursor.com/install.ps1 | iex"',
         },
-        "version_cmd": "cursor --version",
-        "update_cmd": None,
+        "version_cmd": "cursor-agent --version",
+        "update_cmd": "cursor-agent update",
+        "version_check": {"type": "cursor_install_script", "url": "https://cursor.com/install"},
         "uninstall_cmd": None,
         "auth_type": "oauth_browser",
         "auth_env_vars": [],
-        "auth_note": "Run 'cursor' and follow browser login with your Cursor account.",
+        "auth_note": "Run 'agent' or 'cursor-agent' and follow browser login with your Cursor account.",
         "requires": ["curl"],
-        "tags": ["cursor", "ide", "composer"],
+        "tags": ["cursor", "agent", "composer"],
     },
     "hermes": {
         "name": "Hermes Agent",
@@ -160,6 +171,11 @@ AGENTS = {
         },
         "version_cmd": "hermes --version",
         "update_cmd": "hermes update",
+        "version_check": {
+            "type": "cmd_text",
+            "cmd": "hermes update --check",
+            "available_substr": "Update available",
+        },
         "uninstall_cmd": None,
         "auth_type": "oauth_portal",
         "auth_env_vars": ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"],
@@ -179,7 +195,8 @@ AGENTS = {
             "Windows": 'powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"',
         },
         "version_cmd": "codex --version",
-        "update_cmd": None,
+        "update_cmd": "codex update",
+        "version_check": {"type": "github_release", "repo": "openai/codex", "tag_prefix": "rust-v"},
         "uninstall_cmd": None,
         "auth_type": "oauth_browser",
         "auth_env_vars": ["OPENAI_API_KEY"],
@@ -199,7 +216,9 @@ AGENTS = {
             "Windows": "npm install -g @kilocode/cli",
         },
         "version_cmd": "kilo --version",
-        "update_cmd": "npm install -g @kilocode/cli@latest",
+        "update_cmd": "kilo upgrade",
+        "path_markers": ["@kilocode/cli", "/.config/kilo"],
+        "version_check": {"type": "npm", "package": "@kilocode/cli"},
         "uninstall_cmd": "npm uninstall -g @kilocode/cli",
         "auth_type": "account_or_byok",
         "auth_env_vars": [],
@@ -219,7 +238,9 @@ AGENTS = {
             "Windows": "npm i -g opencode-ai@latest",
         },
         "version_cmd": "opencode --version",
-        "update_cmd": "npm i -g opencode-ai@latest",
+        "update_cmd": "opencode upgrade",
+        "path_markers": ["/.opencode/"],
+        "version_check": {"type": "npm", "package": "opencode-ai"},
         "uninstall_cmd": "npm uninstall -g opencode-ai",
         "auth_type": "provider_keys",
         "auth_env_vars": ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
@@ -234,12 +255,14 @@ AGENTS = {
         "homepage": "https://qwen.ai/qwencode",
         "icon": "🐉",
         "install": {
-            "Linux": "npm install -g @qwen-code/qwen-code@latest",
-            "Darwin": "npm install -g @qwen-code/qwen-code@latest",
-            "Windows": "npm install -g @qwen-code/qwen-code@latest",
+            "Linux": "curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash",
+            "Darwin": "curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash",
+            "Windows": 'powershell -c "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex"',
         },
         "version_cmd": "qwen --version",
-        "update_cmd": "npm install -g @qwen-code/qwen-code@latest",
+        "update_cmd": "qwen upgrade",
+        "path_markers": ["/.qwen/", "qwen-code"],
+        "version_check": {"type": "npm", "package": "@qwen-code/qwen-code"},
         "uninstall_cmd": "npm uninstall -g @qwen-code/qwen-code",
         "auth_type": "api_key",
         "auth_env_vars": ["BAILIAN_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY"],
@@ -260,6 +283,7 @@ AGENTS = {
         },
         "version_cmd": "copilot --version",
         "update_cmd": "curl -fsSL https://gh.io/copilot-install | bash",
+        "version_check": {"type": "github_release", "repo": "github/copilot-cli", "tag_prefix": "v"},
         "uninstall_cmd": None,
         "auth_type": "pat_or_oauth",
         "auth_env_vars": ["GH_TOKEN", "GITHUB_TOKEN"],
@@ -270,6 +294,8 @@ AGENTS = {
     "grok": {
         "name": "Grok Build",
         "bin": "grok",
+        "bin_aliases": ["agent"],
+        "path_markers": ["/.grok/"],
         "vendor": "xAI",
         "homepage": "https://x.ai/cli",
         "icon": "🚀",
@@ -279,13 +305,20 @@ AGENTS = {
             "Windows": 'powershell -c "irm https://x.ai/cli/install.ps1 | iex"',
         },
         "version_cmd": "grok --version",
-        "update_cmd": None,
+        "update_cmd": "grok update",
+        "version_check": {
+            "type": "cmd_json",
+            "cmd": "grok update --check --json",
+            "available_key": "updateAvailable",
+            "latest_key": "latestVersion",
+            "current_key": "currentVersion",
+        },
         "uninstall_cmd": None,
         "auth_type": "oauth_browser",
         "auth_env_vars": ["XAI_API_KEY"],
-        "auth_note": "Run 'grok' and authenticate via browser. Or set XAI_API_KEY for headless use.",
+        "auth_note": "Run 'grok' (preferred; 'agent' if unambiguous) and authenticate via browser. Or set XAI_API_KEY for headless use.",
         "requires": ["curl"],
-        "tags": ["grok", "xai", "multi-agent"],
+        "tags": ["grok", "xai", "multi-agent", "agent"],
     },
     "aider": {
         "name": "Aider",
@@ -300,6 +333,7 @@ AGENTS = {
         },
         "version_cmd": "aider --version",
         "update_cmd": "pip install --upgrade aider-chat --break-system-packages 2>/dev/null || pip install --upgrade aider-chat",
+        "version_check": {"type": "pip", "package": "aider-chat"},
         "uninstall_cmd": "pip uninstall -y aider-chat",
         "auth_type": "api_key",
         "auth_env_vars": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"],
@@ -320,6 +354,8 @@ AGENTS = {
         },
         "version_cmd": "kimi-code --version",
         "update_cmd": None,
+        "update_via_install": True,
+        "version_check": {"type": "url_text", "url": "https://code.kimi.com/kimi-code/latest"},
         "uninstall_cmd": None,
         "auth_type": "subscription",
         "auth_env_vars": ["MOONSHOT_API_KEY"],
@@ -329,7 +365,9 @@ AGENTS = {
     },
     "kiro": {
         "name": "Kiro CLI",
-        "bin": "kiro",
+        "bin": "kiro-cli",
+        "bin_aliases": ["kiro"],
+        "path_markers": ["kiro-cli"],
         "vendor": "Kiro",
         "homepage": "https://kiro.dev/cli",
         "icon": "🦅",
@@ -338,8 +376,9 @@ AGENTS = {
             "Darwin": "curl -fsSL https://cli.kiro.dev/install | bash",
             "Windows": 'powershell -c "irm https://cli.kiro.dev/install.ps1 | iex"',
         },
-        "version_cmd": "kiro --version",
+        "version_cmd": "kiro-cli --version",
         "update_cmd": None,
+        "update_via_install": True,
         "uninstall_cmd": None,
         "auth_type": "subscription",
         "auth_env_vars": [],
@@ -359,7 +398,9 @@ AGENTS = {
             "Windows": "npm install -g @earendil-works/pi-coding-agent",
         },
         "version_cmd": "pi --version",
-        "update_cmd": "npm install -g @earendil-works/pi-coding-agent@latest",
+        "update_cmd": "pi update --self",
+        "path_markers": ["pi-coding-agent", "/.pi/"],
+        "version_check": {"type": "npm", "package": "@earendil-works/pi-coding-agent"},
         "uninstall_cmd": "npm uninstall -g @earendil-works/pi-coding-agent",
         "auth_type": "provider_keys",
         "auth_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
@@ -394,12 +435,14 @@ AGENTS = {
         "homepage": "https://www.blackbox.ai",
         "icon": "⬛",
         "install": {
-            "Linux": "npm install -g @blackboxai/cli",
-            "Darwin": "npm install -g @blackboxai/cli",
-            "Windows": "npm install -g @blackboxai/cli",
+            "Linux": "curl -fsSL https://blackbox.ai/install.sh | bash",
+            "Darwin": "curl -fsSL https://blackbox.ai/install.sh | bash",
+            "Windows": 'powershell -c "iex (irm https://blackbox.ai/install.ps1)"',
         },
         "version_cmd": "blackbox --version",
-        "update_cmd": "npm install -g @blackboxai/cli@latest",
+        "update_cmd": "blackbox update",
+        "path_markers": ["blackbox", "/.blackbox"],
+        "version_check": {"type": "npm", "package": "@blackboxai/cli"},
         "uninstall_cmd": "npm uninstall -g @blackboxai/cli",
         "auth_type": "api_key",
         "auth_env_vars": ["BLACKBOX_API_KEY"],
@@ -478,26 +521,400 @@ def which(binary):
     return shutil.which(binary) is not None
 
 
-def detect_agent_bin(agent_key):
-    """Check if an agent's binary is available on PATH."""
+def _agent_bin_candidates(agent_key):
+    """Declared command names for an agent (primary first)."""
     agent = AGENTS.get(agent_key)
     if not agent:
+        return []
+    return [agent["bin"], *agent.get("bin_aliases", [])]
+
+
+def bin_path_belongs_to_agent(agent_key, bin_path):
+    """True when a resolved PATH entry belongs to this agent (not a name collision)."""
+    agent = AGENTS.get(agent_key)
+    if not agent or not bin_path:
         return False
-    return which(agent["bin"])
+    path = str(bin_path)
+    markers = agent.get("path_markers", [])
+    if markers:
+        return any(marker in path for marker in markers)
+    name = Path(path).name
+    return name in _agent_bin_candidates(agent_key)
+
+
+def resolve_agent_bin(agent_key):
+    """Return the on-PATH command name for an installed agent, or None."""
+    agent = AGENTS.get(agent_key)
+    if not agent:
+        return None
+    primary = agent["bin"]
+    if which(primary):
+        return primary
+    for alias in agent.get("bin_aliases", []):
+        alias_path = shutil.which(alias)
+        if alias_path and bin_path_belongs_to_agent(agent_key, alias_path):
+            return alias
+    return None
+
+
+def detect_agent_bin(agent_key):
+    """Check if an agent's binary is available on PATH."""
+    return resolve_agent_bin(agent_key) is not None
+
+
+def _version_command(agent_key, bin_name):
+    agent = AGENTS.get(agent_key, {})
+    template = agent.get("version_cmd")
+    if template:
+        parts = template.split(None, 1)
+        if len(parts) == 2:
+            return f"{bin_name} {parts[1]}"
+        return bin_name
+    return f"{bin_name} --version"
 
 
 def detect_agent_version(agent_key):
     """Try to get an agent's installed version."""
-    agent = AGENTS.get(agent_key)
-    if not agent:
+    bin_name = resolve_agent_bin(agent_key)
+    if not bin_name:
         return None
-    cmd = agent.get("version_cmd")
-    if not cmd or not detect_agent_bin(agent_key):
-        return None
-    exit_code, stdout, _ = run(cmd, timeout=10)
+    exit_code, stdout, _ = run(_version_command(agent_key, bin_name), timeout=10)
     if exit_code == 0 and stdout:
         return stdout.split("\n")[0].strip()
     return None
+
+
+def agent_bin_collision_warnings():
+    """Warnings when multiple agents share the ambiguous 'agent' command."""
+    if not (detect_agent_bin("cursor") and detect_agent_bin("grok")):
+        return []
+    agent_path = shutil.which("agent")
+    if not agent_path:
+        return []
+    if bin_path_belongs_to_agent("grok", agent_path):
+        winner = "Grok Build"
+    elif bin_path_belongs_to_agent("cursor", agent_path):
+        winner = "Cursor CLI"
+    else:
+        winner = "another tool"
+    return [
+        "Both Cursor CLI and Grok Build are installed; bare 'agent' currently runs "
+        f"{winner}. Use 'cursor-agent' or 'grok' to disambiguate."
+    ]
+
+
+def resolve_update_cmd(agent_key):
+    """Return the shell command to update an agent, or None."""
+    agent = AGENTS.get(agent_key)
+    if not agent:
+        return None
+    update_cmd = agent.get("update_cmd")
+    if update_cmd:
+        bin_name = resolve_agent_bin(agent_key) or agent["bin"]
+        primary = agent["bin"]
+        if update_cmd.startswith(f"{primary} "):
+            return f"{bin_name}{update_cmd[len(primary):]}"
+        if update_cmd == primary:
+            return bin_name
+        return update_cmd
+    if agent.get("update_via_install"):
+        return agent.get("install", {}).get(_CURRENT_PLATFORM)
+    return None
+
+
+def extract_version(text):
+    """Pull a comparable version token from CLI --version output."""
+    if not text:
+        return None
+    raw = str(text).strip()
+    grok_match = re.search(r"grok\s+(\d+\.\d+\.\d+)", raw, re.I)
+    if grok_match:
+        return grok_match.group(1)
+    match = re.search(r"(\d+(?:\.\d+)+(?:[-+][\w.-]+)?)", raw)
+    return match.group(1) if match else raw
+
+
+def _version_tuple(version):
+    parts = []
+    for piece in re.split(r"[.\-+]", version):
+        if not piece:
+            continue
+        if piece.isdigit():
+            parts.append((0, int(piece)))
+        else:
+            parts.append((1, piece))
+    return tuple(parts)
+
+
+def version_is_older(current, latest):
+    """Return True when current is strictly older than latest."""
+    if not current or not latest:
+        return None
+    if current == latest:
+        return False
+    try:
+        return _version_tuple(current) < _version_tuple(latest)
+    except (TypeError, ValueError):
+        return current != latest
+
+
+def _http_get_text(url, timeout=15):
+    req = Request(url, headers={"User-Agent": "aikit-version-check"})
+    with urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace").strip()
+
+
+def _antigravity_platform():
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    arch = "arm64" if machine in ("arm64", "aarch64") else "x64"
+    if system == "linux":
+        return f"linux_{arch}"
+    if system == "darwin":
+        return f"darwin_{arch}"
+    return f"{system}_{arch}"
+
+
+def fetch_latest_version(agent_key):
+    """Query upstream for the latest published version, or None on failure."""
+    agent = AGENTS.get(agent_key, {})
+    spec = agent.get("version_check")
+    if not spec:
+        return None
+    kind = spec.get("type")
+    try:
+        if kind == "npm":
+            exit_code, stdout, _ = run(f"npm view {spec['package']} version", timeout=20)
+            return stdout.strip() if exit_code == 0 and stdout else None
+        if kind == "pip":
+            data = json.loads(_http_get_text(f"https://pypi.org/pypi/{spec['package']}/json"))
+            return data.get("info", {}).get("version")
+        if kind == "url_text":
+            return _http_get_text(spec["url"]).splitlines()[0].strip()
+        if kind == "github_release":
+            data = json.loads(_http_get_text(f"https://api.github.com/repos/{spec['repo']}/releases/latest"))
+            tag = data.get("tag_name", "")
+            prefix = spec.get("tag_prefix", "")
+            if prefix and tag.startswith(prefix):
+                return tag[len(prefix):]
+            return tag.lstrip("v")
+        if kind == "cursor_install_script":
+            body = _http_get_text(spec["url"])
+            match = re.search(r"versions/([0-9][0-9.\-]+)", body)
+            return match.group(1) if match else None
+        if kind == "antigravity_manifest":
+            url = (
+                "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app"
+                f"/manifests/{_antigravity_platform()}.json"
+            )
+            data = json.loads(_http_get_text(url))
+            return data.get("version")
+        if kind == "cmd_json":
+            if not detect_agent_bin(agent_key):
+                return None
+            exit_code, stdout, _ = run(spec["cmd"], timeout=30)
+            if exit_code != 0 or not stdout:
+                return None
+            payload = json.loads(stdout)
+            if payload.get(spec.get("available_key", "updateAvailable")):
+                return payload.get(spec.get("latest_key", "latestVersion"))
+            return payload.get(spec.get("current_key", "currentVersion")) or payload.get(
+                spec.get("latest_key", "latestVersion")
+            )
+        if kind == "cmd_text":
+            if not detect_agent_bin(agent_key):
+                return None
+            exit_code, stdout, stderr = run(spec["cmd"], timeout=60)
+            if exit_code != 0:
+                return None
+            haystack = f"{stdout}\n{stderr}"
+            if spec.get("available_substr") and spec["available_substr"] in haystack:
+                return "latest"
+            return None
+    except (URLError, TimeoutError, json.JSONDecodeError, OSError, subprocess.SubprocessError):
+        return None
+    return None
+
+
+def check_update_status(agent_key, *, force=False, config=None):
+    """Check whether an installed agent has a newer upstream release.
+
+    Returns {available: bool|None, current, latest, checked_at}.
+    available=None means the check could not be completed.
+    """
+    config = config or load_config()
+    settings = config.get("settings", {})
+    if not settings.get("auto_update_check", True):
+        return {"available": None, "current": None, "latest": None, "checked_at": None}
+
+    if not detect_agent_bin(agent_key):
+        return {"available": None, "current": None, "latest": None, "checked_at": None}
+
+    ttl = int(settings.get("update_check_ttl", 3600))
+    cached = UPDATE_CHECK_CACHE.get(agent_key)
+    now = time.time()
+    if not force and cached and now - cached.get("checked_at", 0) < ttl:
+        return cached
+
+    current_raw = detect_agent_version(agent_key)
+    current = extract_version(current_raw)
+    agent = AGENTS.get(agent_key, {})
+    spec = agent.get("version_check")
+
+    if spec and spec.get("type") == "cmd_json":
+        try:
+            exit_code, stdout, _ = run(spec["cmd"], timeout=30)
+            if exit_code == 0 and stdout:
+                payload = json.loads(stdout)
+                latest = payload.get(spec.get("latest_key", "latestVersion"))
+                cur = payload.get(spec.get("current_key", "currentVersion")) or current
+                available = bool(payload.get(spec.get("available_key", "updateAvailable")))
+                result = {
+                    "available": available,
+                    "current": cur or current,
+                    "latest": latest,
+                    "checked_at": now,
+                }
+                UPDATE_CHECK_CACHE[agent_key] = result
+                return result
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if spec and spec.get("type") == "cmd_text":
+        try:
+            exit_code, stdout, stderr = run(spec["cmd"], timeout=60)
+            if exit_code == 0:
+                haystack = f"{stdout}\n{stderr}"
+                available = spec.get("available_substr", "") in haystack
+                result = {
+                    "available": available,
+                    "current": current,
+                    "latest": "latest" if available else current,
+                    "checked_at": now,
+                }
+                UPDATE_CHECK_CACHE[agent_key] = result
+                return result
+        except OSError:
+            pass
+
+    latest = fetch_latest_version(agent_key)
+    if spec and spec.get("type") == "cmd_text" and latest == "latest":
+        available = True
+    elif latest is None:
+        available = None
+    else:
+        available = version_is_older(current, latest)
+
+    result = {
+        "available": available,
+        "current": current,
+        "latest": latest,
+        "checked_at": now,
+    }
+    UPDATE_CHECK_CACHE[agent_key] = result
+    return result
+
+
+def format_update_status(agent_key, update_status):
+    """Human-readable update column text for list/doctor views."""
+    if not update_status:
+        return "—"
+    available = update_status.get("available")
+    latest = update_status.get("latest")
+    if available is True:
+        if latest and latest != "latest":
+            return f"↑ {latest}"
+        return "upgrade available"
+    if available is False:
+        return "up to date"
+    return "—"
+
+
+def classify_update_outcome(agent_key, *, old_version_raw, new_version_raw, exit_code, stderr=""):
+    """Classify the result of running an agent's update command."""
+    old_v = extract_version(old_version_raw)
+    new_v = extract_version(new_version_raw)
+
+    if exit_code != 0:
+        return {
+            "status": "failed",
+            "old": old_v,
+            "new": new_v,
+            "error": (stderr or "")[:200],
+        }
+
+    if old_v and new_v and old_v != new_v:
+        return {"status": "upgraded", "old": old_v, "new": new_v}
+
+    check = check_update_status(agent_key, force=True)
+    latest = check.get("latest")
+    if check.get("available") is True:
+        return {
+            "status": "unchanged_outdated",
+            "old": old_v or new_v,
+            "new": new_v or old_v,
+            "latest": latest,
+        }
+    if check.get("available") is False:
+        return {
+            "status": "up_to_date",
+            "old": old_v or new_v,
+            "new": new_v or old_v,
+            "latest": latest,
+        }
+    return {
+        "status": "unchanged",
+        "old": old_v or new_v,
+        "new": new_v or old_v,
+        "latest": latest,
+    }
+
+
+def should_skip_update(agent_key, *, force=False, config=None):
+    """Return (skip, check_status) when upstream reports the agent is current."""
+    if force:
+        return False, None
+    check = check_update_status(agent_key, force=True, config=config)
+    if check.get("available") is False:
+        return True, check
+    return False, check
+
+
+def execute_agent_update(agent_key):
+    """Run an agent's update command and classify the outcome."""
+    update_cmd = resolve_update_cmd(agent_key)
+    if not update_cmd:
+        return None, "", ""
+    old_version_raw = detect_agent_version(agent_key)
+    exit_code, stdout, stderr = run(update_cmd, timeout=300)
+    new_version_raw = detect_agent_version(agent_key)
+    UPDATE_CHECK_CACHE.pop(agent_key, None)
+    outcome = classify_update_outcome(
+        agent_key,
+        old_version_raw=old_version_raw,
+        new_version_raw=new_version_raw,
+        exit_code=exit_code,
+        stderr=stderr,
+    )
+    outcome["exit_code"] = exit_code
+    return outcome, stdout, stderr
+
+
+def _persist_agent_after_update(config, agent_key, new_version_raw=None):
+    """Refresh cached agent version and upgrade availability after an update attempt."""
+    new_version = new_version_raw or detect_agent_version(agent_key)
+    check = check_update_status(agent_key, force=True, config=config)
+    config["agents"][agent_key] = {
+        **config["agents"].get(agent_key, {}),
+        "installed": True,
+        "version": new_version,
+        "update_available": check.get("available") is True,
+        "latest_version": check.get("latest") or extract_version(new_version),
+    }
+
+
+def _agent_names(agent_keys):
+    return ", ".join(AGENTS[k]["name"] for k in agent_keys)
 
 
 def check_prerequisites(agent_key):
@@ -766,8 +1183,10 @@ def print_agent_table(agent_keys=None):
     table.add_column("Vendor")
     table.add_column("Status")
     table.add_column("Version")
+    table.add_column("Update", width=18)
     table.add_column("Auth")
 
+    upgrades = 0
     for i, key in enumerate(agent_keys, 1):
         agent = AGENTS[key]
         agent_cfg = config.get("agents", {}).get(key, {})
@@ -777,12 +1196,28 @@ def print_agent_table(agent_keys=None):
         if isinstance(version, str) and len(version) > 40:
             version = version[:37].rstrip() + "…"
         auth_done = agent_cfg.get("auth_configured", False)
+        update_status = {
+            "available": agent_cfg.get("update_available"),
+            "latest": agent_cfg.get("latest_version"),
+        } if installed else None
+        update_label = format_update_status(key, update_status)
         
         if installed:
             status = "[bold green]✓ installed[/bold green]"
         else:
             status = "[dim]not installed[/dim]"
             version = "—"
+
+        if installed and update_status and update_status.get("available") is True:
+            upgrades += 1
+            if update_label.startswith("↑"):
+                update_cell = f"[bold yellow]{update_label}[/bold yellow]"
+            else:
+                update_cell = "[bold yellow]upgrade available[/bold yellow]"
+        elif installed and update_status and update_status.get("available") is False:
+            update_cell = "[dim]up to date[/dim]"
+        else:
+            update_cell = "[dim]—[/dim]"
 
         if installed and auth_done:
             auth_status = "[green]configured[/green]"
@@ -797,10 +1232,15 @@ def print_agent_table(agent_keys=None):
             agent["vendor"],
             status,
             version,
+            update_cell,
             auth_status,
         )
 
     console.print(table)
+    if upgrades:
+        sk.info(f"{upgrades} upgrade(s) available — run [bold]aikit update[/bold]")
+    for warning in agent_bin_collision_warnings():
+        sk.warning(warning)
 
 
 # =============================================================================
@@ -917,17 +1357,20 @@ def do_install(agent_keys, yes=False):
         console.print(f"\n[bold yellow]🔑 Some agents need authentication:[/bold yellow] {', '.join(needs_auth)}")
         console.print("  Run [bold]aikit auth <agent>[/bold] for guided setup.")
 
+    for warning in agent_bin_collision_warnings():
+        sk.warning(warning)
 
-def do_update(agent_keys=None):
+
+def do_update(agent_keys=None, *, force=False):
     """Update installed agents."""
     try:
-        _do_update_impl(agent_keys)
+        _do_update_impl(agent_keys, force=force)
     except KeyboardInterrupt:
         console.print("\n[yellow]⏹ Update interrupted.[/yellow]")
         sys.exit(130)
 
 
-def _do_update_impl(agent_keys):
+def _do_update_impl(agent_keys, *, force=False):
     config = load_config()
 
     if agent_keys is None:
@@ -936,46 +1379,115 @@ def _do_update_impl(agent_keys):
             print_warning("No agents installed. Run 'aikit install' first.")
             return
 
-    console.print(f"[bold cyan]🔄 Updating {len(agent_keys)} agent(s)...[/bold cyan]\n")
-
-    updated = []
-    failed = []
-
-    for i, key in enumerate(agent_keys, 1):
+    candidates = []
+    for key in agent_keys:
         agent = AGENTS[key]
         icon = agent["icon"]
-
         if not detect_agent_bin(key):
             print_info(f"{icon} {agent['name']} — not installed, skipping")
             continue
-
-        update_cmd = agent.get("update_cmd")
-        if not update_cmd:
+        if not resolve_update_cmd(key):
             print_info(f"{icon} {agent['name']} — no update command available")
             continue
+        candidates.append(key)
 
-        print_step(i, len(agent_keys), f"Updating {icon} {agent['name']}")
-        exit_code, stdout, stderr = run(update_cmd, timeout=300)
+    if not candidates:
+        print_warning("Nothing to update.")
+        return
 
-        if exit_code == 0:
-            new_version = detect_agent_version(key)
-            print_success(f"{icon} {agent['name']} updated [dim]({new_version})[/dim]")
-            config["agents"][key] = {
-                **config["agents"].get(key, {}),
-                "installed": True,
-                "version": new_version,
-            }
-            updated.append(key)
+    to_run = []
+    already_current = []
+    for key in candidates:
+        skip, check = should_skip_update(key, force=force, config=config)
+        if skip:
+            already_current.append((key, check))
         else:
-            print_error(f"{icon} {agent['name']} update failed: {stderr[:100]}")
+            to_run.append(key)
+
+    for key, check in already_current:
+        agent = AGENTS[key]
+        ver = check.get("current") or "—"
+        print_info(f"{agent['icon']} {agent['name']} — already up to date [dim]({ver})[/dim]")
+
+    if not to_run:
+        if already_current:
+            console.print(
+                f"\n[dim]All {len(already_current)} agent(s) already up to date. "
+                "Use [bold]aikit update --force[/bold] to reinstall anyway.[/dim]"
+            )
+        return
+
+    if already_current:
+        console.print()
+    console.print(f"[bold cyan]🔄 Updating {len(to_run)} agent(s)...[/bold cyan]\n")
+
+    upgraded = []
+    up_to_date = []
+    unchanged = []
+    unchanged_outdated = []
+    failed = []
+
+    for i, key in enumerate(to_run, 1):
+        agent = AGENTS[key]
+        icon = agent["icon"]
+        name = agent["name"]
+
+        print_step(i, len(to_run), f"Updating {icon} {name}")
+        outcome, _stdout, stderr = execute_agent_update(key)
+        if not outcome:
+            print_error(f"{icon} {name} — no update command available")
+            failed.append(key)
+            continue
+
+        status = outcome["status"]
+        old_v = outcome.get("old")
+        new_v = outcome.get("new")
+
+        if status == "upgraded":
+            print_success(f"{icon} {name} upgraded [dim]({old_v} → {new_v})[/dim]")
+            _persist_agent_after_update(config, key)
+            upgraded.append(key)
+        elif status == "up_to_date":
+            ver = new_v or old_v or "—"
+            print_info(f"{icon} {name} — already up to date [dim]({ver})[/dim]")
+            _persist_agent_after_update(config, key)
+            up_to_date.append(key)
+        elif status == "unchanged_outdated":
+            latest = outcome.get("latest")
+            detail = f"still {new_v or old_v or 'unknown'}"
+            if latest and latest not in (new_v, old_v, "latest"):
+                detail += f", latest is {latest}"
+            print_warning(f"{icon} {name} — update ran but version unchanged ({detail})")
+            _persist_agent_after_update(config, key)
+            unchanged_outdated.append(key)
+        elif status == "unchanged":
+            ver = new_v or old_v or "—"
+            print_info(f"{icon} {name} — no version change detected [dim]({ver})[/dim]")
+            _persist_agent_after_update(config, key)
+            unchanged.append(key)
+        else:
+            err = outcome.get("error") or stderr[:100] or "unknown error"
+            print_error(f"{icon} {name} update failed: {err}")
             failed.append(key)
 
     save_config(config)
 
-    if updated:
-        console.print(f"\n[bold green]✅ Updated:[/bold green] {', '.join(updated)}")
+    console.print()
+    if upgraded:
+        console.print(f"[bold green]✅ Upgraded ({len(upgraded)}):[/bold green] {_agent_names(upgraded)}")
+    current = already_current + [(k, None) for k in up_to_date]
+    if current:
+        keys = [k for k, _ in current]
+        console.print(f"[dim]✓ Already up to date ({len(keys)}):[/dim] {_agent_names(keys)}")
+    if unchanged:
+        console.print(f"[dim]○ Unchanged ({len(unchanged)}):[/dim] {_agent_names(unchanged)}")
+    if unchanged_outdated:
+        console.print(
+            f"[bold yellow]⚠ Still outdated ({len(unchanged_outdated)}):[/bold yellow] "
+            f"{_agent_names(unchanged_outdated)}"
+        )
     if failed:
-        console.print(f"[bold red]❌ Failed:[/bold red] {', '.join(failed)}")
+        console.print(f"[bold red]❌ Failed ({len(failed)}):[/bold red] {_agent_names(failed)}")
 
 
 def do_uninstall(agent_keys, yes=False):
@@ -1022,7 +1534,8 @@ def _do_uninstall_impl(agent_keys, yes):
                 print_warning(f"{icon} {agent['name']} uninstall may be incomplete: {stderr[:100]}")
         else:
             print_info(f"{icon} {agent['name']} has no automated uninstall — remove manually")
-            print_info(f"  Typically: rm $(which {agent['bin']})")
+            bin_name = resolve_agent_bin(key) or agent["bin"]
+            print_info(f"  Typically: rm $(which {bin_name})")
 
         config["agents"].pop(key, None)
 
@@ -1281,6 +1794,7 @@ def discover_and_persist():
         installed = detect_agent_bin(key)
         version = detect_agent_version(key) if installed else None
         auth_result = discover_auth(key)
+        update_status = check_update_status(key, config=config) if installed else {}
         
         new_entry = {
             "installed": installed,
@@ -1290,6 +1804,9 @@ def discover_and_persist():
             "auth_source": auth_result.get("source", ""),
             "install_date": current.get("install_date", ""),
             "auth_date": current.get("auth_date", ""),
+            "latest_version": update_status.get("latest"),
+            "update_available": update_status.get("available"),
+            "update_checked_at": update_status.get("checked_at"),
         }
         
         # Merge: keep existing dates if we had them, merge auth info
@@ -1298,12 +1815,18 @@ def discover_and_persist():
         if not installed:
             merged["install_date"] = ""
             merged["version"] = None
+            merged["latest_version"] = None
+            merged["update_available"] = None
+            merged["update_checked_at"] = None
         if current.get("install_date") and installed:
             merged["install_date"] = current["install_date"]
         if current.get("auth_date") and auth_result.get("auth_configured"):
             merged["auth_date"] = current["auth_date"]
         
-        if merged != current:
+        def _without_check_ts(entry):
+            return {k: v for k, v in entry.items() if k != "update_checked_at"}
+
+        if _without_check_ts(merged) != _without_check_ts(current):
             agents_cfg[key] = merged
             changed = True
     
@@ -1362,11 +1885,12 @@ def _do_auth_impl(agent_key):
         console.print(f"\n  [bold yellow]📝 {auth_note}[/bold yellow]")
 
     if auth_type == "oauth_browser":
-        console.print(f"\n  [dim]This agent uses OAuth. Run '{agent['bin']}' and complete the browser login.[/dim]")
+        bin_name = resolve_agent_bin(agent_key) or agent["bin"]
+        console.print(f"\n  [dim]This agent uses OAuth. Run '{bin_name}' and complete the browser login.[/dim]")
         if _use_color() and sys.stdin.isatty():
             try:
-                if _prompt_yes_no(f"Launch '{agent['bin']}' now to authenticate?", True):
-                    os.system(agent["bin"])
+                if _prompt_yes_no(f"Launch '{bin_name}' now to authenticate?", True):
+                    os.system(bin_name)
             except KeyboardInterrupt:
                 raise
 
@@ -1450,7 +1974,7 @@ def do_doctor() -> int:
     ]
 
     agents: list = []
-    installed_count = auth_count = 0
+    installed_count = auth_count = upgrade_count = 0
     not_installed: list[str] = []
     for key in AGENTS:
         agent = AGENTS[key]
@@ -1462,17 +1986,33 @@ def do_doctor() -> int:
         installed_count += 1
         version = agent_cfg.get("version") or detect_agent_version(key)
         label = f"{agent['icon']} {agent['name']}"
+        update_note = format_update_status(key, {
+            "available": agent_cfg.get("update_available"),
+            "latest": agent_cfg.get("latest_version"),
+        })
+        if agent_cfg.get("update_available") is True:
+            upgrade_count += 1
         if agent_cfg.get("auth_configured", False):
             auth_count += 1
-            agents.append(sk.Check.ok(label, version or "installed"))
+            detail = version or "installed"
+            if agent_cfg.get("update_available") is True:
+                agents.append(sk.Check.warn(label, detail, f"upgrade available ({update_note})"))
+            else:
+                agents.append(sk.Check.ok(label, detail))
         else:
-            agents.append(sk.Check.warn(label, version or "installed", f"configure auth: aikit auth {key}"))
+            hint = f"configure auth: aikit auth {key}"
+            if agent_cfg.get("update_available") is True:
+                hint = f"{hint}; upgrade available ({update_note})"
+            agents.append(sk.Check.warn(label, version or "installed", hint))
     if not agents:
         agents.append(sk.Check.warn("agents", "none installed", "install one: aikit install"))
 
     tips = [f"{installed_count}/{len(AGENTS)} installed, {auth_count} authenticated"]
+    if upgrade_count:
+        tips.append(f"{upgrade_count} upgrade(s) available — run aikit update")
     if not_installed:
         tips.append("Not installed: " + ", ".join(not_installed) + "  (aikit install)")
+    tips.extend(agent_bin_collision_warnings())
 
     return sk.doctor(
         "aikit", __version__, TAGLINE, ICON,
@@ -1613,9 +2153,17 @@ def create_flask_app():
                 "homepage": agent["homepage"],
                 "installed": installed,
                 "version": version,
+                "latest_version": agent_cfg.get("latest_version"),
+                "update_available": agent_cfg.get("update_available"),
+                "update_status": format_update_status(key, {
+                    "available": agent_cfg.get("update_available"),
+                    "latest": agent_cfg.get("latest_version"),
+                }),
                 "auth_configured": agent_cfg.get("auth_configured", False),
                 "auth_type": agent.get("auth_type", "unknown"),
-                "bin": agent["bin"],
+                "bin": resolve_agent_bin(key) or agent["bin"],
+                "bin_aliases": agent.get("bin_aliases", []),
+                "update_cmd": resolve_update_cmd(key),
                 "tags": agent.get("tags", []),
             })
         return jsonify(result)
@@ -1629,6 +2177,7 @@ def create_flask_app():
         version = detect_agent_version(agent_key) if installed else None
         config = load_config()
         agent_cfg = config.get("agents", {}).get(agent_key, {})
+        update_status = check_update_status(agent_key, force=True) if installed else {}
         return jsonify({
             "key": agent_key,
             "name": agent["name"],
@@ -1638,11 +2187,16 @@ def create_flask_app():
             "install_cmd": agent["install"].get(_CURRENT_PLATFORM, ""),
             "installed": installed,
             "version": version,
+            "latest_version": update_status.get("latest"),
+            "update_available": update_status.get("available"),
+            "update_status": format_update_status(agent_key, update_status),
             "auth_configured": agent_cfg.get("auth_configured", False),
             "auth_type": agent.get("auth_type", "unknown"),
             "auth_env_vars": agent.get("auth_env_vars", []),
             "auth_note": agent.get("auth_note", ""),
-            "bin": agent["bin"],
+            "bin": resolve_agent_bin(agent_key) or agent["bin"],
+            "bin_aliases": agent.get("bin_aliases", []),
+            "update_cmd": resolve_update_cmd(agent_key),
             "tags": agent.get("tags", []),
             "requires": agent.get("requires", []),
         })
@@ -1680,26 +2234,39 @@ def create_flask_app():
     def api_update(agent_key):
         if agent_key not in AGENTS:
             return jsonify({"error": "Unknown agent"}), 404
-        agent = AGENTS[agent_key]
-        update_cmd = agent.get("update_cmd")
-        if not update_cmd:
+        if not resolve_update_cmd(agent_key):
             return jsonify({"error": "No update command"}), 400
+        if not detect_agent_bin(agent_key):
+            return jsonify({"error": "Agent not installed"}), 400
 
-        exit_code, stdout, stderr = run(update_cmd, timeout=300)
-        success = exit_code == 0
+        force = request.args.get("force", "").lower() in ("1", "true", "yes")
+        skip, check = should_skip_update(agent_key, force=force)
+        if skip:
+            return jsonify({
+                "success": True,
+                "status": "skipped_up_to_date",
+                "old_version": check.get("current"),
+                "new_version": check.get("current"),
+                "latest_version": check.get("latest"),
+            })
+
+        outcome, stdout, stderr = execute_agent_update(agent_key)
+        status = outcome["status"] if outcome else "failed"
+        success = status not in ("failed",)
         if success:
             config = load_config()
-            config["agents"][agent_key] = {
-                **config["agents"].get(agent_key, {}),
-                "version": detect_agent_version(agent_key),
-            }
+            _persist_agent_after_update(config, agent_key)
             save_config(config)
 
         return jsonify({
             "success": success,
-            "exit_code": exit_code,
+            "status": status,
+            "exit_code": outcome.get("exit_code") if outcome else -1,
+            "old_version": outcome.get("old") if outcome else None,
+            "new_version": outcome.get("new") if outcome else None,
+            "latest_version": outcome.get("latest") if outcome else None,
             "stdout": stdout[:500] if stdout else "",
-            "stderr": stderr[:500] if stderr else "",
+            "stderr": (outcome.get("error") or stderr)[:500] if (outcome or stderr) else "",
         })
 
     @app.route("/api/doctor")
@@ -1973,6 +2540,10 @@ def build_parser():
     # update
     update_p = sub.add_parser("update", help="Update installed agents")
     update_p.add_argument("agents", nargs="*", help="Agent keys to update (none = all installed)")
+    update_p.add_argument(
+        "--force", action="store_true",
+        help="Run update commands even when upstream reports up to date",
+    )
 
     # uninstall
     uninstall_p = sub.add_parser("uninstall", help="Remove agents")
@@ -2019,7 +2590,7 @@ def cmd_install(args):
 
 
 def cmd_update(args):
-    do_update(args.agents or None)
+    do_update(args.agents or None, force=args.force)
 
 
 def cmd_uninstall(args):

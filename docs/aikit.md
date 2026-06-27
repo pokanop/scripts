@@ -31,14 +31,14 @@ aikit setup
 |---|-------|---------|------|
 | 1 | 🧠 **Claude Code** | `curl` script | OAuth (browser) or `ANTHROPIC_API_KEY` |
 | 2 | 🛸 **Antigravity** | `curl` script | OAuth (Google account) |
-| 3 | 🖱️ **Cursor CLI** | `curl` script | OAuth (browser) |
+| 3 | 🖱️ **Cursor CLI** | `curl` script | OAuth (`agent` or `cursor-agent`) |
 | 4 | ☤ **Hermes Agent** | `curl` script | OAuth (Nous Portal) or API keys |
 | 5 | 📟 **Codex CLI** | `curl` script | OAuth (ChatGPT) or `OPENAI_API_KEY` |
 | 6 | ⚡ **Kilo CLI** | `npm` | Kilo account or BYOK |
 | 7 | 🔓 **OpenCode** | `npm` | Provider API keys |
 | 8 | 🐉 **Qwen Code** | `npm` | Alibaba Coding Plan or API keys |
 | 9 | 🐙 **GitHub Copilot CLI** | `curl` script | `GH_TOKEN` PAT or OAuth |
-| 10 | 🚀 **Grok Build** | `curl` script | OAuth (browser) or `XAI_API_KEY` |
+| 10 | 🚀 **Grok Build** | `curl` script | OAuth (`grok` or `agent`) or `XAI_API_KEY` |
 | 11 | 🤝 **Aider** | `pip`/`curl` | Provider API keys |
 | 12 | 🌙 **Kimi Code** | `curl` script | Kimi membership subscription |
 | 13 | 🦅 **Kiro CLI** | `curl` script | Kiro account subscription |

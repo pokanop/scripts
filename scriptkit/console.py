@@ -1,8 +1,10 @@
 """Console output: semantic message helpers, prompts, rules, and key/values.
 
-Messages are emitted with plain ``print`` + ANSI styling (deterministic and
-trivial to capture in tests). Richer rendering — tables, panels, progress,
-spinners — lives in sibling modules and uses ``rich`` when available.
+Semantic messages use ``rich`` when available so inline markup like
+``[dim]…[/dim]`` and ``[bold]…[/bold]`` renders correctly; they fall back to
+plain ``print`` + ANSI styling (markup tags stripped) when color is off or
+``rich`` is missing. Tables, panels, progress, and spinners also live in
+sibling modules.
 
 The visual contract (indent + emoji + color) is unified from aikit / keyferry
 / pluck / voxtract so every tool looks like it came from the same author.
@@ -10,12 +12,15 @@ The visual contract (indent + emoji + color) is unified from aikit / keyferry
 
 from __future__ import annotations
 
+import re
 import sys
 
 from . import style
 from .style import BOLD, CYAN, DIM, GREEN, RED, YELLOW
 
 INDENT = "  "
+_MARKUP_RE = re.compile(r"\[/?[^\]]+\]")
+
 
 # Optional rich consoles for advanced rendering. Stay importable without rich.
 try:  # pragma: no cover - exercised indirectly
@@ -30,35 +35,46 @@ except Exception:  # pragma: no cover
     HAS_RICH = False
 
 
-def _emit(text: str, *codes: str, stream=None) -> None:
+def _strip_markup(text: str) -> str:
+    """Remove Rich markup tags for plain / no-color output."""
+    return _MARKUP_RE.sub("", text)
+
+
+def _emit(text: str, *codes: str, rich_style: str | None = None, stream=None) -> None:
+    """Emit an indented line. ``rich_style`` enables nested Rich markup in ``text``."""
     stream = stream if stream is not None else sys.stdout
-    print(INDENT + style.styled(text, *codes, stream=stream), file=stream)
+    if rich_style and HAS_RICH and style.use_color(stream):
+        target = err_console if stream is sys.stderr else console
+        target.print(INDENT + text, style=rich_style)
+        return
+    plain = _strip_markup(text) if "[" in text else text
+    print(INDENT + style.styled(plain, *codes, stream=stream), file=stream)
 
 
 # --- Semantic messages -----------------------------------------------------
 def success(text: str) -> None:
     """A completed action. Green ✅ on stdout."""
-    _emit(f"✅ {text}", BOLD, GREEN)
+    _emit(f"✅ {text}", BOLD, GREEN, rich_style="bold green")
 
 
 def error(text: str) -> None:
     """A failure. Red ❌ on stderr."""
-    _emit(f"❌ {text}", BOLD, RED, stream=sys.stderr)
+    _emit(f"❌ {text}", BOLD, RED, stream=sys.stderr, rich_style="bold red")
 
 
 def warning(text: str) -> None:
     """A caution that did not stop the run. Yellow ⚠️ on stdout."""
-    _emit(f"⚠️  {text}", BOLD, YELLOW)
+    _emit(f"⚠️  {text}", BOLD, YELLOW, rich_style="bold yellow")
 
 
 def info(text: str) -> None:
     """Secondary, low-emphasis context. Dim ℹ️ on stdout."""
-    _emit(f"ℹ️  {text}", DIM, CYAN)
+    _emit(f"ℹ️  {text}", DIM, CYAN, rich_style="dim cyan")
 
 
 def detail(text: str) -> None:
     """A dim continuation/sub-line (no icon)."""
-    _emit(text, DIM)
+    _emit(text, DIM, rich_style="dim")
 
 
 def step(n: int, total: int, text: str) -> None:
@@ -81,7 +97,7 @@ def elapsed(label: str, seconds: float) -> None:
     """A dim timing line: ``⏱️  label: 1.2s``."""
     from .text import human_duration
 
-    _emit(f"⏱️  {label}: {human_duration(seconds)}", DIM)
+    _emit(f"⏱️  {label}: {human_duration(seconds)}", DIM, rich_style="dim")
 
 
 def kv(label: str, value, label_width: int = 0) -> None:

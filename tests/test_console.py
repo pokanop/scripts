@@ -29,6 +29,36 @@ def test_warning_and_info(no_color, capsys):
     assert "ℹ️" in out and "note" in out
 
 
+def test_success_renders_rich_markup(capsys):
+    import scriptkit.style as style
+
+    style.set_color(True)
+    console.success("done [dim](1.2.3)[/dim]")
+    out = style.strip_ansi(capsys.readouterr().out)
+    assert "✅ done (1.2.3)" in out
+    assert "[dim]" not in out
+    style.set_color(None)
+
+
+def test_info_renders_rich_markup(capsys):
+    import scriptkit.style as style
+
+    style.set_color(True)
+    console.info("run [bold]aikit update[/bold]")
+    out = style.strip_ansi(capsys.readouterr().out)
+    assert "ℹ️" in out
+    assert "aikit update" in out
+    assert "[bold]" not in out
+    style.set_color(None)
+
+
+def test_markup_stripped_when_color_off(no_color, capsys):
+    console.success("done [dim](1.2.3)[/dim]")
+    out = capsys.readouterr().out
+    assert "✅ done (1.2.3)" in out
+    assert "[dim]" not in out
+
+
 def test_step(no_color, capsys):
     console.step(2, 5, "building")
     assert "[2/5] building" in capsys.readouterr().out
@@ -61,7 +91,7 @@ def test_color_codes_present_when_enabled(capsys):
     style.set_color(True)
     console.success("x")
     out = capsys.readouterr().out
-    assert style.GREEN in out
+    assert out != style.strip_ansi(out)
     style.set_color(None)
 
 

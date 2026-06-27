@@ -10,6 +10,11 @@ Newest entries on top, within each tool.
 
 ## scriptkit
 
+### 1.1.1 — 2026-06-27
+- Message helpers (`success`, `error`, `warning`, `info`, `detail`, `elapsed`)
+  now render inline Rich markup (`[dim]`, `[bold]`, …) when `rich` is available;
+  tags are stripped on the plain/no-color fallback so they never leak literally.
+
 ### 1.1.0 — 2026-06-26
 - **New shared `doctor` renderer** (`scriptkit.doctor`): `sk.doctor(name, version,
   …, sections=…, tips=…)` plus `sk.Check` and `sk.check_binary` / `sk.check_python`.
@@ -37,6 +42,27 @@ Newest entries on top, within each tool.
 ---
 
 ## aikit
+
+### 1.5.0 — 2026-06-27
+- Fixed Rich markup (`[dim]`, `[bold]`, …) showing literally in success/info lines
+  after the scriptkit refactor — now rendered via shared message helpers.
+- Cursor CLI detection now tracks the agent binary (`cursor-agent`, alias `agent`)
+  instead of the IDE launcher (`cursor`); Grok Build documents its `agent` alias;
+  both warn when bare `agent` is ambiguous on PATH.
+- Fixed update commands for Cursor (`cursor-agent update`), Codex, and Grok; kimi/kiro
+  reinstall via their install scripts.
+- Proactive upstream version checks (npm, PyPI, GitHub releases, vendor manifests,
+  and built-in `--check` where available) with an **Update** column in `list`.
+- `doctor` and the web API now surface upgrade availability; results are cached
+  (`settings.update_check_ttl`, default 1h).
+- `update` now compares versions before/after each command and reports **upgraded**,
+  **already up to date**, **unchanged**, **still outdated**, or **failed** — instead of
+  labeling every successful exit as "updated". Skips current agents unless `--force`;
+  the end summary uses human-readable agent names with counts per outcome.
+- Corrected native update commands: `kilo upgrade`, `opencode upgrade`, `qwen upgrade`,
+  `pi update --self`, and `blackbox update` (replacing `npm install -g …` that could
+  target the wrong prefix). Kiro CLI now detects `kiro-cli` (alias `kiro`); Qwen and
+  Blackbox install scripts match upstream docs.
 
 ### 1.4.0 — 2026-06-26
 - **Bare `aikit` now runs `list`** (the agent table) after the identity banner,

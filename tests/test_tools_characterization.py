@@ -173,6 +173,198 @@ def test_aikit_config_set_nested_coercion(tool_loader):
     assert cfg["a"] == {"flag": True, "off": False, "n": None, "num": 42, "f": 3.5, "s": "hello"}
 
 
+def test_aikit_cursor_registry_uses_agent_cli(tool_loader):
+    m = tool_loader("aikit")
+    cursor = m.AGENTS["cursor"]
+    assert cursor["bin"] == "cursor-agent"
+    assert "agent" in cursor["bin_aliases"]
+
+
+def test_aikit_bin_path_belongs_to_cursor(tool_loader):
+    m = tool_loader("aikit")
+    cursor_bin = "/Users/x/.local/share/cursor-agent/versions/1/cursor-agent"
+    grok_bin = "/Users/x/.grok/bin/agent"
+    assert m.bin_path_belongs_to_agent("cursor", cursor_bin)
+    assert not m.bin_path_belongs_to_agent("cursor", grok_bin)
+
+
+def test_aikit_bin_path_belongs_to_grok(tool_loader):
+    m = tool_loader("aikit")
+    grok_bin = "/Users/x/.grok/bin/grok"
+    cursor_bin = "/Users/x/.local/bin/cursor-agent"
+    assert m.bin_path_belongs_to_agent("grok", grok_bin)
+    assert not m.bin_path_belongs_to_agent("grok", cursor_bin)
+
+
+def test_aikit_agent_bin_collision_warnings(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+
+    def fake_which(name):
+        paths = {
+            "cursor-agent": "/Users/x/.local/bin/cursor-agent",
+            "grok": "/Users/x/.grok/bin/grok",
+            "agent": "/Users/x/.grok/bin/agent",
+        }
+        return paths.get(name)
+
+    monkeypatch.setattr(m.shutil, "which", fake_which)
+    warnings = m.agent_bin_collision_warnings()
+    assert len(warnings) == 1
+    assert "Grok Build" in warnings[0]
+    assert "cursor-agent" in warnings[0]
+
+
+def test_aikit_extract_version(tool_loader):
+    m = tool_loader("aikit")
+    assert m.extract_version("grok 0.2.67 (03e13f) [stable]") == "0.2.67"
+    assert m.extract_version("codex-cli 0.141.0") == "0.141.0"
+    assert m.extract_version("2026.06.16-20-30-07-a07d3ac") == "2026.06.16-20-30-07-a07d3ac"
+
+
+def test_aikit_version_is_older(tool_loader):
+    m = tool_loader("aikit")
+    assert m.version_is_older("7.2.34", "7.3.54") is True
+    assert m.version_is_older("7.3.54", "7.3.54") is False
+    assert m.version_is_older("0.141.0", "0.142.3") is True
+
+
+def test_aikit_resolve_update_cmd_cursor(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "cursor-agent")
+    assert m.resolve_update_cmd("cursor") == "cursor-agent update"
+
+
+def test_aikit_resolve_update_cmd_kimi_reinstall(tool_loader):
+    m = tool_loader("aikit")
+    cmd = m.resolve_update_cmd("kimi")
+    assert cmd and "kimi-code/install.sh" in cmd
+
+
+def test_aikit_resolve_update_cmd_kilo(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "kilo")
+    assert m.resolve_update_cmd("kilo") == "kilo upgrade"
+
+
+def test_aikit_resolve_update_cmd_opencode(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "opencode")
+    assert m.resolve_update_cmd("opencode") == "opencode upgrade"
+
+
+def test_aikit_resolve_update_cmd_pi(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "pi")
+    assert m.resolve_update_cmd("pi") == "pi update --self"
+
+
+def test_aikit_resolve_update_cmd_qwen(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "qwen")
+    assert m.resolve_update_cmd("qwen") == "qwen upgrade"
+
+
+def test_aikit_resolve_update_cmd_blackbox(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "blackbox")
+    assert m.resolve_update_cmd("blackbox") == "blackbox update"
+
+
+def test_aikit_kiro_registry_uses_kiro_cli(tool_loader):
+    m = tool_loader("aikit")
+    kiro = m.AGENTS["kiro"]
+    assert kiro["bin"] == "kiro-cli"
+    assert "kiro" in kiro.get("bin_aliases", [])
+    assert kiro["version_cmd"] == "kiro-cli --version"
+
+
+def test_aikit_format_update_status(tool_loader):
+    m = tool_loader("aikit")
+    assert m.format_update_status("kilo", {"available": True, "latest": "7.3.54"}) == "↑ 7.3.54"
+    assert m.format_update_status("kilo", {"available": False, "latest": "7.3.54"}) == "up to date"
+
+
+def test_aikit_check_update_status_npm(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: True)
+    monkeypatch.setattr(m, "detect_agent_version", lambda _key: "7.2.34")
+    monkeypatch.setattr(m, "fetch_latest_version", lambda _key: "7.3.54")
+    m.UPDATE_CHECK_CACHE.clear()
+    status = m.check_update_status("kilo", force=True, config={"settings": {"auto_update_check": True}})
+    assert status["available"] is True
+    assert status["latest"] == "7.3.54"
+
+
+def test_aikit_classify_update_outcome_upgraded(tool_loader):
+    m = tool_loader("aikit")
+    outcome = m.classify_update_outcome(
+        "kilo",
+        old_version_raw="kilo 7.2.34",
+        new_version_raw="kilo 7.3.54",
+        exit_code=0,
+    )
+    assert outcome["status"] == "upgraded"
+    assert outcome["old"] == "7.2.34"
+    assert outcome["new"] == "7.3.54"
+
+
+def test_aikit_classify_update_outcome_up_to_date(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(
+        m,
+        "check_update_status",
+        lambda _key, **kwargs: {"available": False, "current": "7.3.54", "latest": "7.3.54"},
+    )
+    outcome = m.classify_update_outcome(
+        "kilo",
+        old_version_raw="kilo 7.3.54",
+        new_version_raw="kilo 7.3.54",
+        exit_code=0,
+    )
+    assert outcome["status"] == "up_to_date"
+
+
+def test_aikit_classify_update_outcome_unchanged_outdated(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(
+        m,
+        "check_update_status",
+        lambda _key, **kwargs: {"available": True, "current": "7.2.34", "latest": "7.3.54"},
+    )
+    outcome = m.classify_update_outcome(
+        "kilo",
+        old_version_raw="kilo 7.2.34",
+        new_version_raw="kilo 7.2.34",
+        exit_code=0,
+    )
+    assert outcome["status"] == "unchanged_outdated"
+    assert outcome["latest"] == "7.3.54"
+
+
+def test_aikit_should_skip_update_when_current(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(
+        m,
+        "check_update_status",
+        lambda _key, **kwargs: {"available": False, "current": "1.0.0", "latest": "1.0.0"},
+    )
+    skip, check = m.should_skip_update("claude")
+    assert skip is True
+    assert check["available"] is False
+
+
+def test_aikit_should_skip_update_force(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(
+        m,
+        "check_update_status",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not check")),
+    )
+    skip, check = m.should_skip_update("claude", force=True)
+    assert skip is False
+    assert check is None
+
+
 # --- medcat ----------------------------------------------------------------
 def test_medcat_format_structure(tool_loader):
     m = tool_loader("medcat")
