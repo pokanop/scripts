@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.5.0
-Install, update, authenticate, and manage 16 AI coding agent CLIs from one tool.
+aikit — AI Coding Agent CLI Installer & Manager  v1.6.0
+Install, update, authenticate, and manage 20 AI coding agent CLIs from one tool.
 
 Architecture:
     Agent registry → platform-aware install → auth multiplexing → web dashboard
@@ -21,6 +21,7 @@ Dependencies:
     pip install rich requests flask readchar
 """
 
+import difflib
 import json
 import os
 import platform
@@ -47,9 +48,13 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 import scriptkit as sk
+
+
+class AikitError(sk.CliError):
+    """Expected aikit failure (unknown agent, missing prerequisite, …)."""
 from scriptkit.style import (
     BOLD as _BOLD, DIM as _DIM, GREEN as _GREEN,
     CYAN as _CYAN, WHITE as _WHITE, BG_BLUE as _BG_BLUE,
@@ -87,7 +92,83 @@ DEFAULT_CONFIG = {
 UPDATE_CHECK_CACHE: dict[str, dict] = {}
 
 # =============================================================================
-# Agent Registry — 16 coding agents, platform-aware install commands
+# npm global install helpers — always target ~/.local (on PATH for most setups)
+# =============================================================================
+
+_NPM_INSTALL_PREFIX = Path.home() / ".local"
+
+
+def _npm_prefix_quoted():
+    return shlex.quote(str(_NPM_INSTALL_PREFIX))
+
+
+def npm_install_cmd(package):
+    """Install an npm package globally under ~/.local/bin."""
+    return f"npm install -g {package} --prefix {_npm_prefix_quoted()}"
+
+
+def _path_entry_on_path(dir_path):
+    """True when a directory is listed on PATH."""
+    try:
+        target = str(Path(dir_path).resolve())
+    except OSError:
+        return False
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        try:
+            if str(Path(entry).resolve()) == target:
+                return True
+        except OSError:
+            if entry == str(dir_path):
+                return True
+    return False
+
+
+def binary_uninstall_cmd(bin_name, *, extra_paths=()):
+    """Remove a curl-installed CLI binary from standard install locations."""
+    paths = [f"$HOME/.local/bin/{bin_name}", f"/usr/local/bin/{bin_name}", *extra_paths]
+    if _CURRENT_PLATFORM == "Windows":
+        win = f"{bin_name}.exe" if not bin_name.endswith(".exe") else bin_name
+        paths.extend([f"$USERPROFILE/.local/bin/{win}", f"$USERPROFILE/goose/{win}"])
+    return "rm -f " + " ".join(paths)
+
+
+def goose_uninstall_cmd():
+    """Goose has no official uninstall — remove the curl/brew-installed binary."""
+    parts = [binary_uninstall_cmd("goose")]
+    goose_path = shutil.which("goose")
+    if goose_path:
+        try:
+            goose_path = str(Path(goose_path).resolve())
+        except OSError:
+            goose_path = str(goose_path)
+        if "homebrew" in goose_path or "Cellar/block-goose" in goose_path:
+            parts.insert(0, "brew uninstall block-goose-cli 2>/dev/null")
+    return " ; ".join(parts)
+
+
+def openhands_uninstall_cmd():
+    """OpenHands: uv tool uninstall (docs) or remove the install-script binary."""
+    uv = "command -v uv >/dev/null 2>&1 && uv tool uninstall openhands 2>/dev/null; "
+    return uv + binary_uninstall_cmd("openhands")
+
+
+def resolve_uninstall_cmd(agent):
+    """Return the platform-specific uninstall command for an agent."""
+    version_check = agent.get("version_check", {})
+    if version_check.get("type") == "npm" and version_check.get("package"):
+        return npm_uninstall_cmd(version_check["package"])
+    cmd = agent.get("uninstall_cmd")
+    if isinstance(cmd, dict):
+        return cmd.get(_CURRENT_PLATFORM)
+    if callable(cmd):
+        return cmd()
+    return cmd
+
+
+# =============================================================================
+# Agent Registry — 20 coding agents, platform-aware install commands
 # =============================================================================
 
 _CURRENT_PLATFORM = platform.system()  # "Linux", "Darwin", "Windows"
@@ -211,15 +292,15 @@ AGENTS = {
         "homepage": "https://kilo.ai/cli",
         "icon": "⚡",
         "install": {
-            "Linux": "npm install -g @kilocode/cli",
-            "Darwin": "npm install -g @kilocode/cli",
-            "Windows": "npm install -g @kilocode/cli",
+            "Linux": npm_install_cmd("@kilocode/cli"),
+            "Darwin": npm_install_cmd("@kilocode/cli"),
+            "Windows": npm_install_cmd("@kilocode/cli"),
         },
         "version_cmd": "kilo --version",
-        "update_cmd": "kilo upgrade",
+        "update_cmd": npm_install_cmd("@kilocode/cli@latest"),
         "path_markers": ["@kilocode/cli", "/.config/kilo"],
         "version_check": {"type": "npm", "package": "@kilocode/cli"},
-        "uninstall_cmd": "npm uninstall -g @kilocode/cli",
+        "uninstall_cmd": None,
         "auth_type": "account_or_byok",
         "auth_env_vars": [],
         "auth_note": "Run 'kilo' and sign in with Kilo account, or bring your own API keys via settings.",
@@ -233,15 +314,15 @@ AGENTS = {
         "homepage": "https://opencode.ai",
         "icon": "🔓",
         "install": {
-            "Linux": "npm i -g opencode-ai@latest",
-            "Darwin": "npm i -g opencode-ai@latest",
-            "Windows": "npm i -g opencode-ai@latest",
+            "Linux": npm_install_cmd("opencode-ai@latest"),
+            "Darwin": npm_install_cmd("opencode-ai@latest"),
+            "Windows": npm_install_cmd("opencode-ai@latest"),
         },
         "version_cmd": "opencode --version",
         "update_cmd": "opencode upgrade",
         "path_markers": ["/.opencode/"],
         "version_check": {"type": "npm", "package": "opencode-ai"},
-        "uninstall_cmd": "npm uninstall -g opencode-ai",
+        "uninstall_cmd": None,
         "auth_type": "provider_keys",
         "auth_env_vars": ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
         "auth_note": "Run 'opencode auth list' to configure provider API keys.",
@@ -263,7 +344,7 @@ AGENTS = {
         "update_cmd": "qwen upgrade",
         "path_markers": ["/.qwen/", "qwen-code"],
         "version_check": {"type": "npm", "package": "@qwen-code/qwen-code"},
-        "uninstall_cmd": "npm uninstall -g @qwen-code/qwen-code",
+        "uninstall_cmd": None,
         "auth_type": "api_key",
         "auth_env_vars": ["BAILIAN_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY"],
         "auth_note": "Run '/auth' inside qwen session to configure provider and API key.",
@@ -393,15 +474,15 @@ AGENTS = {
         "homepage": "https://pi.dev",
         "icon": "π",
         "install": {
-            "Linux": "npm install -g @earendil-works/pi-coding-agent",
-            "Darwin": "npm install -g @earendil-works/pi-coding-agent",
-            "Windows": "npm install -g @earendil-works/pi-coding-agent",
+            "Linux": npm_install_cmd("@earendil-works/pi-coding-agent"),
+            "Darwin": npm_install_cmd("@earendil-works/pi-coding-agent"),
+            "Windows": npm_install_cmd("@earendil-works/pi-coding-agent"),
         },
         "version_cmd": "pi --version",
         "update_cmd": "pi update --self",
         "path_markers": ["pi-coding-agent", "/.pi/"],
         "version_check": {"type": "npm", "package": "@earendil-works/pi-coding-agent"},
-        "uninstall_cmd": "npm uninstall -g @earendil-works/pi-coding-agent",
+        "uninstall_cmd": None,
         "auth_type": "provider_keys",
         "auth_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
         "auth_note": "15+ providers supported. Configure API keys then run 'pi'.",
@@ -443,12 +524,101 @@ AGENTS = {
         "update_cmd": "blackbox update",
         "path_markers": ["blackbox", "/.blackbox"],
         "version_check": {"type": "npm", "package": "@blackboxai/cli"},
-        "uninstall_cmd": "npm uninstall -g @blackboxai/cli",
+        "uninstall_cmd": None,
         "auth_type": "api_key",
         "auth_env_vars": ["BLACKBOX_API_KEY"],
         "auth_note": "Get API key from https://app.blackbox.ai/dashboard then run 'blackbox configure'.",
         "requires": ["node", "npm"],
         "tags": ["blackbox", "multi-model", "judge", "chairman"],
+    },
+    "goose": {
+        "name": "Goose",
+        "bin": "goose",
+        "vendor": "Agentic AI Foundation",
+        "homepage": "https://goose-docs.ai",
+        "icon": "🪿",
+        "install": {
+            "Linux": "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash",
+            "Darwin": "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash",
+            "Windows": 'powershell -c "$env:CONFIGURE=\'false\'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex"',
+        },
+        "version_cmd": "goose --version",
+        "update_cmd": "goose update",
+        "path_markers": ["block-goose", "aaif-goose", "/.config/goose"],
+        "version_check": {"type": "github_release", "repo": "aaif-goose/goose", "tag_prefix": "v"},
+        "uninstall_cmd": goose_uninstall_cmd,
+        "auth_type": "provider_keys",
+        "auth_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GOOGLE_API_KEY", "OPENROUTER_API_KEY"],
+        "auth_note": "Run 'goose configure' on first use, or set provider API keys. Supports ACP subscription auth.",
+        "requires": ["curl"],
+        "tags": ["goose", "rust", "mcp", "open-source", "aaif"],
+    },
+    "cline": {
+        "name": "Cline",
+        "bin": "cline",
+        "vendor": "Cline Bot Inc.",
+        "homepage": "https://cline.bot",
+        "icon": "🌀",
+        "install": {
+            "Linux": npm_install_cmd("cline"),
+            "Darwin": npm_install_cmd("cline"),
+            "Windows": npm_install_cmd("cline"),
+        },
+        "version_cmd": "cline --version",
+        "update_cmd": "cline update",
+        "path_markers": ["/.cline/", "node_modules/cline"],
+        "version_check": {"type": "npm", "package": "cline"},
+        "uninstall_cmd": None,
+        "auth_type": "account_or_byok",
+        "auth_env_vars": ["CLINE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"],
+        "auth_note": "Run 'cline auth' for OAuth (Cline, ChatGPT) or provider API keys.",
+        "requires": ["node", "npm"],
+        "tags": ["cline", "headless", "mcp", "multi-agent", "open-source"],
+    },
+    "openhands": {
+        "name": "OpenHands CLI",
+        "bin": "openhands",
+        "vendor": "OpenHands",
+        "homepage": "https://docs.openhands.dev/openhands/usage/cli",
+        "icon": "🙌",
+        "install": {
+            "Linux": "curl -fsSL https://install.openhands.dev/install.sh | sh",
+            "Darwin": "curl -fsSL https://install.openhands.dev/install.sh | sh",
+            "Windows": 'wsl -d Ubuntu bash -lc "curl -fsSL https://install.openhands.dev/install.sh | sh"',
+        },
+        "version_cmd": "openhands --version",
+        "update_cmd": None,
+        "update_via_install": True,
+        "path_markers": ["/.openhands/"],
+        "version_check": {"type": "github_release", "repo": "OpenHands/OpenHands-CLI"},
+        "uninstall_cmd": openhands_uninstall_cmd(),
+        "auth_type": "provider_keys",
+        "auth_env_vars": ["LLM_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+        "auth_note": "First run configures LLM settings. Set LLM_API_KEY or run 'openhands login' for OpenHands Cloud.",
+        "requires": ["curl"],
+        "tags": ["openhands", "tui", "mcp", "headless", "open-source"],
+    },
+    "crush": {
+        "name": "Crush",
+        "bin": "crush",
+        "vendor": "Charmbracelet",
+        "homepage": "https://github.com/charmbracelet/crush",
+        "icon": "💘",
+        "install": {
+            "Linux": npm_install_cmd("@charmland/crush"),
+            "Darwin": npm_install_cmd("@charmland/crush"),
+            "Windows": npm_install_cmd("@charmland/crush"),
+        },
+        "version_cmd": "crush --version",
+        "update_cmd": npm_install_cmd("@charmland/crush@latest"),
+        "path_markers": ["/.config/crush", "/.local/share/crush", "@charmland/crush"],
+        "version_check": {"type": "npm", "package": "@charmland/crush"},
+        "uninstall_cmd": None,
+        "auth_type": "provider_keys",
+        "auth_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"],
+        "auth_note": "Run 'crush' and enter an API key on first use, or set provider env vars.",
+        "requires": ["node", "npm"],
+        "tags": ["crush", "charm", "tui", "lsp", "mcp", "multi-model"],
     },
 }
 
@@ -495,6 +665,16 @@ def _needs_setup():
     return not SETUP_MARKER.exists()
 
 
+def _npm_global_bin_dirs():
+    """npm global bin directories that are on PATH."""
+    dirs = []
+    for prefix in _npm_global_prefixes():
+        npm_bin = prefix / "bin"
+        if npm_bin.is_dir() and _path_entry_on_path(npm_bin) and npm_bin not in dirs:
+            dirs.append(npm_bin)
+    return dirs
+
+
 # =============================================================================
 # Subprocess helpers
 # =============================================================================
@@ -516,6 +696,62 @@ def run(cmd, timeout=300, shell=True, capture=True):
         return -1, "", str(e)
 
 
+def _npm_global_prefixes():
+    """npm global prefix directories aikit may install into or need to clean up."""
+    prefixes = []
+    seen = set()
+
+    def add(prefix):
+        try:
+            path = Path(prefix).expanduser().resolve()
+        except OSError:
+            return
+        if path in seen:
+            return
+        seen.add(path)
+        prefixes.append(path)
+
+    add(_NPM_INSTALL_PREFIX)
+    exit_code, prefix, _ = run("npm config get prefix", timeout=10)
+    if exit_code == 0 and prefix:
+        add(prefix.strip().strip('"'))
+
+    nvm_root = Path(os.environ.get("NVM_DIR", Path.home() / ".nvm"))
+    default_alias = nvm_root / "alias" / "default"
+    if default_alias.is_file():
+        add(nvm_root / "versions" / "node" / default_alias.read_text().strip())
+
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        if ".nvm/versions/node/" not in entry:
+            continue
+        try:
+            add(Path(entry).resolve().parent)
+        except OSError:
+            pass
+
+    node = shutil.which("node")
+    if node and ".nvm/versions/node/" in node:
+        add(Path(node).resolve().parent)
+
+    return prefixes
+
+
+def _npm_package_dir(prefix, package):
+    return Path(prefix) / "lib" / "node_modules" / package
+
+
+def npm_uninstall_cmd(package):
+    """Uninstall an npm global package from every prefix where it is present."""
+    cmds = []
+    for prefix in _npm_global_prefixes():
+        if not _npm_package_dir(prefix, package).exists():
+            continue
+        cmds.append(f"npm uninstall -g {package} --prefix {shlex.quote(str(prefix))}")
+    if not cmds:
+        cmds.append(f"npm uninstall -g {package} --prefix {_npm_prefix_quoted()}")
+    return " ; ".join(cmds)
+
+
 def which(binary):
     """Check if a command is on PATH."""
     return shutil.which(binary) is not None
@@ -529,31 +765,57 @@ def _agent_bin_candidates(agent_key):
     return [agent["bin"], *agent.get("bin_aliases", [])]
 
 
+def _agents_sharing_bin_name(bin_name):
+    """Agent keys that declare the same command name (e.g. cursor + grok → 'agent')."""
+    return [key for key, agent in AGENTS.items() if bin_name in _agent_bin_candidates(key)]
+
+
 def bin_path_belongs_to_agent(agent_key, bin_path):
     """True when a resolved PATH entry belongs to this agent (not a name collision)."""
     agent = AGENTS.get(agent_key)
     if not agent or not bin_path:
         return False
-    path = str(bin_path)
+    raw = str(bin_path)
+    try:
+        resolved = str(Path(bin_path).resolve())
+    except OSError:
+        resolved = raw
     markers = agent.get("path_markers", [])
-    if markers:
-        return any(marker in path for marker in markers)
-    name = Path(path).name
-    return name in _agent_bin_candidates(agent_key)
+    for check_path in (resolved, raw):
+        if markers and any(marker in check_path for marker in markers):
+            return True
+    candidates = _agent_bin_candidates(agent_key)
+    for check_path in (raw, resolved):
+        name = Path(check_path).name
+        if name not in candidates:
+            continue
+        owners = _agents_sharing_bin_name(name)
+        if len(owners) == 1:
+            return owners[0] == agent_key
+    return False
 
 
 def resolve_agent_bin(agent_key):
-    """Return the on-PATH command name for an installed agent, or None."""
+    """Return the command name (or absolute path) for an installed agent, or None."""
     agent = AGENTS.get(agent_key)
     if not agent:
         return None
     primary = agent["bin"]
-    if which(primary):
+    primary_path = shutil.which(primary)
+    if primary_path and bin_path_belongs_to_agent(agent_key, primary_path):
         return primary
     for alias in agent.get("bin_aliases", []):
         alias_path = shutil.which(alias)
         if alias_path and bin_path_belongs_to_agent(agent_key, alias_path):
             return alias
+    if "npm" in agent.get("requires", []):
+        for bin_dir in _npm_global_bin_dirs():
+            for name in _agent_bin_candidates(agent_key):
+                candidate = bin_dir / name
+                if not candidate.exists():
+                    continue
+                if bin_path_belongs_to_agent(agent_key, str(candidate)):
+                    return str(candidate)
     return None
 
 
@@ -917,6 +1179,23 @@ def _agent_names(agent_keys):
     return ", ".join(AGENTS[k]["name"] for k in agent_keys)
 
 
+def validate_agent_keys(agent_keys):
+    """Return agent_keys when every key is registered; raise AikitError otherwise."""
+    if not agent_keys:
+        return agent_keys
+    unknown = [k for k in agent_keys if k not in AGENTS]
+    if not unknown:
+        return agent_keys
+    parts = []
+    for key in unknown:
+        suggestions = difflib.get_close_matches(key, AGENTS.keys(), n=3, cutoff=0.5)
+        hint = f" (did you mean: {', '.join(suggestions)}?)" if suggestions else ""
+        parts.append(f"{key}{hint}")
+    listed = ", ".join(parts)
+    hint = "Run 'aikit list' for all agent keys."
+    raise AikitError(f"Unknown agent(s): {listed}. {hint}")
+
+
 def check_prerequisites(agent_key):
     """Check if required tools are available for an agent install."""
     agent = AGENTS.get(agent_key)
@@ -1268,6 +1547,8 @@ def do_install(agent_keys, yes=False):
         print_warning("No agents selected.")
         return
 
+    validate_agent_keys(agent_keys)
+
     # Check prerequisites first
     all_missing = set()
     for key in agent_keys:
@@ -1378,6 +1659,8 @@ def _do_update_impl(agent_keys, *, force=False):
         if not agent_keys:
             print_warning("No agents installed. Run 'aikit install' first.")
             return
+    else:
+        validate_agent_keys(agent_keys)
 
     candidates = []
     for key in agent_keys:
@@ -1514,21 +1797,39 @@ def _do_uninstall_impl(agent_keys, yes):
     if not agent_keys:
         return
 
+    validate_agent_keys(agent_keys)
+
     config = load_config()
 
     for i, key in enumerate(agent_keys, 1):
         agent = AGENTS[key]
         icon = agent["icon"]
 
-        if not detect_agent_bin(key):
+        installed = detect_agent_bin(key)
+        npm_package = agent.get("version_check", {}).get("package")
+        orphan_npm = (
+            not installed
+            and agent.get("version_check", {}).get("type") == "npm"
+            and npm_package
+            and any(_npm_package_dir(prefix, npm_package).exists() for prefix in _npm_global_prefixes())
+        )
+        if not installed and not orphan_npm:
             print_info(f"{icon} {agent['name']} — not installed")
             continue
+        if orphan_npm:
+            print_info(f"{icon} {agent['name']} — cleaning npm copies outside PATH")
 
-        uninstall_cmd = agent.get("uninstall_cmd")
+        uninstall_cmd = resolve_uninstall_cmd(agent)
         if uninstall_cmd:
             print_step(i, len(agent_keys), f"Uninstalling {icon} {agent['name']}")
             exit_code, stdout, stderr = run(uninstall_cmd, timeout=120)
-            if exit_code == 0:
+            if detect_agent_bin(key):
+                if exit_code != 0:
+                    detail = stderr[:100] or stdout[:100]
+                    print_warning(f"{icon} {agent['name']} uninstall may be incomplete: {detail}")
+                else:
+                    print_warning(f"{icon} {agent['name']} still detected after uninstall")
+            elif exit_code == 0:
                 print_success(f"{icon} {agent['name']} uninstalled")
             else:
                 print_warning(f"{icon} {agent['name']} uninstall may be incomplete: {stderr[:100]}")
@@ -1537,7 +1838,9 @@ def _do_uninstall_impl(agent_keys, yes):
             bin_name = resolve_agent_bin(key) or agent["bin"]
             print_info(f"  Typically: rm $(which {bin_name})")
 
-        config["agents"].pop(key, None)
+        if not detect_agent_bin(key):
+            config["agents"].pop(key, None)
+            UPDATE_CHECK_CACHE.pop(key, None)
 
     save_config(config)
     console.print(f"\n[bold green]✅ Uninstalled:[/bold green] {', '.join(agent_keys)}")
@@ -1760,6 +2063,35 @@ def discover_auth(agent_key):
         for cp in [home / ".openclaw", home / ".claw", home / ".config" / "openclaw"]:
             if cp.is_dir() or (cp.exists() and cp.stat().st_size > 0):
                 return {"auth_configured": True, "method": "config_path", "source": str(cp)}
+
+    # Goose: ~/.config/goose
+    if agent_key == "goose":
+        for gp in [home / ".config" / "goose", home / ".goose"]:
+            if gp.is_dir() or (gp.exists() and gp.stat().st_size > 0):
+                return {"auth_configured": True, "method": "config_path", "source": str(gp)}
+
+    # Cline: ~/.cline
+    if agent_key == "cline":
+        cline_dir = home / ".cline"
+        if cline_dir.is_dir():
+            return {"auth_configured": True, "method": "config_dir", "source": str(cline_dir)}
+
+    # OpenHands: ~/.openhands/settings.json or agent_settings.json
+    if agent_key == "openhands":
+        oh_dir = home / ".openhands"
+        for cfg_name in ("settings.json", "agent_settings.json", "cli_config.json"):
+            cfg_path = oh_dir / cfg_name
+            if cfg_path.exists() and cfg_path.stat().st_size > 0:
+                return {"auth_configured": True, "method": "config_file", "source": str(cfg_path)}
+
+    # Crush: ~/.config/crush/crush.json
+    if agent_key == "crush":
+        for cp in [
+            home / ".config" / "crush" / "crush.json",
+            home / ".local" / "share" / "crush" / "crush.json",
+        ]:
+            if cp.exists() and cp.stat().st_size > 0:
+                return {"auth_configured": True, "method": "config_file", "source": str(cp)}
     
     # For agents with auth_env_vars, check shell profile files
     if env_vars and not auth_type == "oauth_browser":
@@ -1845,10 +2177,8 @@ def do_auth(agent_key):
 
 
 def _do_auth_impl(agent_key):
-    agent = AGENTS.get(agent_key)
-    if not agent:
-        print_error(f"Unknown agent: {agent_key}")
-        return
+    validate_agent_keys([agent_key])
+    agent = AGENTS[agent_key]
 
     icon = agent["icon"]
 

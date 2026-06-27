@@ -149,7 +149,7 @@ Pluck values from config files by dot path — copy, merge, read, set, and diff 
 
 **AI coding agent CLI manager**
 
-Install, update, authenticate, and manage 16 AI coding agent CLIs from one tool — interactive picker, status dashboard, and web UI.
+Install, update, authenticate, and manage 20 AI coding agent CLIs from one tool — interactive picker, status dashboard, and web UI.
 
 `aikit` · Python 3 · `rich` · `flask` · `requests`
 

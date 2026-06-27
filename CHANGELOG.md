@@ -43,6 +43,35 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.6.0 — 2026-06-27
+- Added four new agent registry entries: **Goose** (curl/AAIF), **Cline** (npm),
+  **OpenHands CLI** (install script), and **Crush** (npm). Roo Code was investigated
+  but omitted — it is a VS Code extension only (shut down May 2026; community fork
+  Zoo Code is also extension-only).
+- Unknown agent keys (e.g. `clien` instead of `cline`) now fail fast with
+  did-you-mean suggestions instead of crashing mid-install with `KeyError`.
+- npm-based installs (Cline, Crush, and all other npm agents) now use
+  `--prefix ~/.local` so binaries land on PATH; also scans npm global bin dirs
+  when the active npm prefix is elsewhere (e.g. Hermes).
+- Fixed agent detection for curl-installed CLIs whose binaries live under
+  `~/.local/bin` (Goose, OpenHands) or as PATH symlinks (Claude Code).
+- Added uninstall commands for Goose (`rm` + Homebrew fallback) and OpenHands
+  (`uv tool uninstall` + binary removal); Cline/Crush continue via scoped
+  `npm uninstall -g`.
+- npm uninstall now removes packages from every global prefix where they exist
+  (`~/.local`, active `npm prefix`, nvm node prefix), not only `~/.local`.
+- npm agent detection no longer treats off-PATH global bins (e.g. Hermes
+  `~/.hermes/node/bin`) as installed; `aikit list` and uninstall stay in sync.
+- npm uninstall also discovers the active nvm node prefix from `PATH`/`NVM_DIR`
+  and removes orphan package copies even when they are not on PATH.
+- Kilo updates use `npm install -g @kilocode/cli@latest` instead of `kilo upgrade`,
+  which hangs in non-interactive use when the install method is not specified.
+- Goose install passes `CONFIGURE=false` so the upstream script does not require
+  `/dev/tty` for interactive `goose configure` during `aikit install`.
+- Goose uninstall no longer runs a slow `brew list` probe on every removal;
+  Homebrew cleanup only runs when the binary lives under Homebrew. Uninstall
+  also skips the full `discover_and_persist()` network sweep that added ~30s.
+
 ### 1.5.0 — 2026-06-27
 - Fixed Rich markup (`[dim]`, `[bold]`, …) showing literally in success/info lines
   after the scriptkit refactor — now rendered via shared message helpers.

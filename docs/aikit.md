@@ -1,6 +1,6 @@
 # 🤖 aikit — AI Coding Agent CLI Installer & Manager
 
-**Install, update, authenticate, and manage 16 AI coding agent CLIs from one tool.**
+**Install, update, authenticate, and manage 20 AI coding agent CLIs from one tool.**
 
 `aikit` · Python 3 · `rich` · `flask` · `requests`
 
@@ -25,7 +25,7 @@ aikit setup
 
 ---
 
-## Agents (16)
+## Agents (20)
 
 | # | Agent | Install | Auth |
 |---|-------|---------|------|
@@ -45,6 +45,10 @@ aikit setup
 | 14 | π **Pi Coding Agent** | `npm` | Provider API keys |
 | 15 | 🦞 **OpenClaw** | `curl` script | OAuth onboard flow |
 | 16 | ⬛ **Blackbox AI** | `npm` | API key from dashboard |
+| 17 | 🪿 **Goose** | `curl` script | `goose configure` or provider API keys |
+| 18 | 🌀 **Cline** | `npm` | `cline auth` OAuth or BYOK |
+| 19 | 🙌 **OpenHands CLI** | `curl` script | LLM settings on first run or `openhands login` |
+| 20 | 💘 **Crush** | `npm` | Provider API keys on first run |
 
 ---
 
@@ -56,7 +60,7 @@ aikit setup
 | `aikit install [agents...]` | Install agents (multi-select picker if none) |
 | `aikit update [agents...]` | Update agents (all installed if none) |
 | `aikit uninstall [agent...]` | Remove agents |
-| `aikit list` | Status table of all 16 agents |
+| `aikit list` | Status table of all 20 agents |
 | `aikit auth [agent]` | Guided authentication setup |
 | `aikit doctor` | Diagnose environment and agent health |
 | `aikit serve` | Start web dashboard |
@@ -74,7 +78,7 @@ Select agents to install
    2. [ ] 🛸 Antigravity
    3. [X] 🖱️ Cursor CLI
   ...
-  Selected: 1/16  cursor
+  Selected: 1/20  cursor
 ```
 
 Press `Space` or enter numbers to toggle. Press `Enter` to confirm. Press `q` to cancel.
@@ -133,7 +137,7 @@ aikit config set settings.web_port 9000  # Set a value
 
 ```
 aikit                          # Single-file Python script (~1,600 lines)
-├── Agent registry             # 16 agents, each with platform-aware install commands
+├── Agent registry             # 20 agents, each with platform-aware install commands
 ├── Subprocess runner          # Install/update/uninstall execution
 ├── Config system              # JSON-based, three-tier loading, env var overrides
 ├── Rich TUI                   # Tables, panels, interactive multi-select picker

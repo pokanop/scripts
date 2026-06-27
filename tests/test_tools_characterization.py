@@ -243,7 +243,9 @@ def test_aikit_resolve_update_cmd_kimi_reinstall(tool_loader):
 def test_aikit_resolve_update_cmd_kilo(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "kilo")
-    assert m.resolve_update_cmd("kilo") == "kilo upgrade"
+    cmd = m.resolve_update_cmd("kilo")
+    assert cmd and "npm install -g @kilocode/cli@latest" in cmd
+    assert "--prefix" in cmd and ".local" in cmd
 
 
 def test_aikit_resolve_update_cmd_opencode(tool_loader, monkeypatch):
@@ -276,6 +278,193 @@ def test_aikit_kiro_registry_uses_kiro_cli(tool_loader):
     assert kiro["bin"] == "kiro-cli"
     assert "kiro" in kiro.get("bin_aliases", [])
     assert kiro["version_cmd"] == "kiro-cli --version"
+
+
+def test_aikit_validate_agent_keys_unknown(tool_loader):
+    m = tool_loader("aikit")
+    with pytest.raises(m.AikitError, match="cline"):
+        m.validate_agent_keys(["goose", "clien"])
+
+
+def test_aikit_validate_agent_keys_ok(tool_loader):
+    m = tool_loader("aikit")
+    assert m.validate_agent_keys(["goose", "cline"]) == ["goose", "cline"]
+    assert m.validate_agent_keys([]) == []
+
+
+def test_aikit_new_agent_registry_entries(tool_loader):
+    m = tool_loader("aikit")
+    assert len(m.AGENTS) == 20
+    goose = m.AGENTS["goose"]
+    assert goose["bin"] == "goose"
+    assert goose["update_cmd"] == "goose update"
+    assert "aaif-goose/goose" in goose["install"]["Linux"]
+    assert "CONFIGURE=false" in goose["install"]["Linux"]
+    assert "CONFIGURE=false" in goose["install"]["Darwin"]
+    cline = m.AGENTS["cline"]
+    assert cline["bin"] == "cline"
+    assert cline["update_cmd"] == "cline update"
+    assert cline["version_check"]["package"] == "cline"
+    assert "--prefix" in cline["install"]["Linux"]
+    assert ".local" in cline["install"]["Linux"]
+    openhands = m.AGENTS["openhands"]
+    assert openhands["bin"] == "openhands"
+    assert openhands.get("update_via_install") is True
+    assert "install.openhands.dev" in openhands["install"]["Linux"]
+    crush = m.AGENTS["crush"]
+    assert crush["bin"] == "crush"
+    assert crush["version_check"]["package"] == "@charmland/crush"
+    assert "--prefix" in crush["install"]["Darwin"]
+
+
+def test_aikit_resolve_agent_bin_npm_global_fallback(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    npm_bin = tmp_path / "npm-bin"
+    npm_bin.mkdir()
+    cline_link = npm_bin / "cline"
+    cline_link.write_text("#!/bin/sh\necho cline\n")
+    cline_link.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{npm_bin}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(m, "_npm_global_bin_dirs", lambda: [npm_bin])
+    monkeypatch.setattr(m.shutil, "which", lambda _name: None)
+    resolved = m.resolve_agent_bin("cline")
+    assert resolved == str(cline_link)
+
+
+def test_aikit_npm_global_bin_dirs_skips_off_path_prefixes(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    off_path_bin = tmp_path / "off-path" / "bin"
+    on_path_bin = tmp_path / "on-path" / "bin"
+    off_path_bin.mkdir(parents=True)
+    on_path_bin.mkdir(parents=True)
+    monkeypatch.setattr(
+        m,
+        "_npm_global_prefixes",
+        lambda: [tmp_path / "off-path", tmp_path / "on-path"],
+    )
+    monkeypatch.setenv("PATH", str(on_path_bin))
+    dirs = m._npm_global_bin_dirs()
+    assert on_path_bin in dirs
+    assert off_path_bin not in dirs
+
+
+def test_aikit_resolve_agent_bin_none_when_not_on_path(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(m, "_npm_global_bin_dirs", lambda: [])
+    assert m.resolve_agent_bin("cline") is None
+
+
+def test_aikit_npm_global_prefixes_includes_nvm_from_path(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    nvm_bin = tmp_path / ".nvm" / "versions" / "node" / "v99.0.0" / "bin"
+    nvm_bin.mkdir(parents=True)
+    monkeypatch.setenv("PATH", f"{nvm_bin}{os.pathsep}")
+    prefixes = m._npm_global_prefixes()
+    assert (tmp_path / ".nvm" / "versions" / "node" / "v99.0.0") in prefixes
+
+
+def test_aikit_npm_uninstall_cmd_targets_all_prefixes(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    local_pkg = tmp_path / "local" / "lib" / "node_modules" / "cline"
+    hermes_pkg = tmp_path / "hermes" / "lib" / "node_modules" / "cline"
+    local_pkg.mkdir(parents=True)
+    hermes_pkg.mkdir(parents=True)
+    monkeypatch.setattr(m, "_npm_global_prefixes", lambda: [tmp_path / "local", tmp_path / "hermes"])
+    cmd = m.npm_uninstall_cmd("cline")
+    assert cmd.count("npm uninstall -g cline") == 2
+    assert str(tmp_path / "local") in cmd
+    assert str(tmp_path / "hermes") in cmd
+
+
+def test_aikit_bin_path_belongs_to_cline_resolves_symlink(tool_loader, tmp_path):
+    m = tool_loader("aikit")
+    pkg_bin = tmp_path / "lib" / "node_modules" / "cline" / "bin" / "cline"
+    pkg_bin.parent.mkdir(parents=True)
+    pkg_bin.write_text("#!/bin/sh\n")
+    pkg_bin.chmod(0o755)
+    wrapper = tmp_path / "bin" / "cline"
+    wrapper.parent.mkdir()
+    wrapper.symlink_to(pkg_bin)
+    assert m.bin_path_belongs_to_agent("cline", str(wrapper))
+
+
+def test_aikit_bin_path_belongs_to_goose_local_bin(tool_loader, tmp_path):
+    m = tool_loader("aikit")
+    goose_bin = tmp_path / ".local" / "bin" / "goose"
+    goose_bin.parent.mkdir(parents=True)
+    goose_bin.write_text("#!/bin/sh\necho goose\n")
+    goose_bin.chmod(0o755)
+    assert m.bin_path_belongs_to_agent("goose", str(goose_bin))
+
+
+def test_aikit_bin_path_belongs_to_openhands_local_bin(tool_loader, tmp_path):
+    m = tool_loader("aikit")
+    oh_bin = tmp_path / ".local" / "bin" / "openhands"
+    oh_bin.parent.mkdir(parents=True)
+    oh_bin.write_text("#!/bin/sh\necho openhands\n")
+    oh_bin.chmod(0o755)
+    assert m.bin_path_belongs_to_agent("openhands", str(oh_bin))
+
+
+def test_aikit_bin_path_belongs_to_symlink_wrapper_name(tool_loader, tmp_path):
+    m = tool_loader("aikit")
+    target = tmp_path / "versions" / "2.1.195"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\necho claude\n")
+    target.chmod(0o755)
+    wrapper = tmp_path / "bin" / "claude"
+    wrapper.parent.mkdir()
+    wrapper.symlink_to(target)
+    assert m.bin_path_belongs_to_agent("claude", str(wrapper))
+
+
+def test_aikit_agent_collision_still_requires_markers(tool_loader, tmp_path):
+    m = tool_loader("aikit")
+    agent_bin = tmp_path / "bin" / "agent"
+    agent_bin.parent.mkdir(parents=True)
+    agent_bin.write_text("#!/bin/sh\necho agent\n")
+    agent_bin.chmod(0o755)
+    assert not m.bin_path_belongs_to_agent("grok", str(agent_bin))
+    assert not m.bin_path_belongs_to_agent("cursor", str(agent_bin))
+
+
+def test_aikit_uninstall_cmds_for_new_agents(tool_loader):
+    m = tool_loader("aikit")
+    goose = m.resolve_uninstall_cmd(m.AGENTS["goose"])
+    assert goose and "rm -f" in goose and ".local/bin/goose" in goose
+    assert "brew uninstall" not in goose
+
+
+def test_aikit_goose_uninstall_uses_brew_only_for_homebrew_install(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    brew_bin = tmp_path / "opt" / "homebrew" / "bin" / "goose"
+    brew_bin.parent.mkdir(parents=True)
+    brew_bin.write_text("#!/bin/sh\necho goose\n")
+    brew_bin.chmod(0o755)
+    monkeypatch.setattr(m.shutil, "which", lambda name: str(brew_bin) if name == "goose" else None)
+    cmd = m.goose_uninstall_cmd()
+    assert "brew uninstall block-goose-cli" in cmd
+    assert "rm -f" in cmd
+    openhands = m.resolve_uninstall_cmd(m.AGENTS["openhands"])
+    assert openhands and "uv tool uninstall openhands" in openhands
+    assert "rm -f" in openhands and ".local/bin/openhands" in openhands
+    cline = m.resolve_uninstall_cmd(m.AGENTS["cline"])
+    assert cline and "npm uninstall -g cline" in cline
+    crush = m.resolve_uninstall_cmd(m.AGENTS["crush"])
+    assert crush and "npm uninstall -g @charmland/crush" in crush
+
+
+def test_aikit_resolve_update_cmd_openhands_reinstall(tool_loader):
+    m = tool_loader("aikit")
+    cmd = m.resolve_update_cmd("openhands")
+    assert cmd and "install.openhands.dev" in cmd
+
+
+def test_aikit_resolve_update_cmd_cline(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "cline")
+    assert m.resolve_update_cmd("cline") == "cline update"
 
 
 def test_aikit_format_update_status(tool_loader):
