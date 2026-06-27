@@ -43,6 +43,10 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.6.2 — 2026-06-27
+- **`aikit serve` dashboard:** moved the output log above the agent table so
+  install/update feedback is visible without scrolling past 20 rows.
+
 ### 1.6.1 — 2026-06-27
 - **`aikit list` is much faster:** parallel per-agent discovery, no duplicate
   `--version` subprocesses during discovery, and smarter multi-line version parsing.

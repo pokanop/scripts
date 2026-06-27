@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.6.1
+aikit — AI Coding Agent CLI Installer & Manager  v1.6.2
 Install, update, authenticate, and manage 20 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -48,7 +48,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.6.1"
+__version__ = "1.6.2"
 
 import scriptkit as sk
 
@@ -2897,7 +2897,7 @@ def create_flask_app():
         .btn:disabled {{ opacity: 0.4; cursor: not-allowed; }}
         .btn-install:not(:disabled) {{ background: #1a3a2a; border-color: #3fb950; color: #3fb950; }}
         .btn-install:not(:disabled):hover {{ background: #2a5a3a; }}
-        .log {{ background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-top: 20px; font-family: 'Menlo', 'Consolas', monospace; font-size: 13px; max-height: 300px; overflow-y: auto; white-space: pre-wrap; }}
+        .log {{ background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 20px; font-family: 'Menlo', 'Consolas', monospace; font-size: 13px; max-height: 300px; overflow-y: auto; white-space: pre-wrap; }}
         .log .success {{ color: #3fb950; }}
         .log .error {{ color: #f85149; }}
         .actions {{ margin-bottom: 20px; display: flex; gap: 10px; }}
@@ -2921,6 +2921,8 @@ def create_flask_app():
         <button class="refresh-btn" onclick="fetchDoctor()">🩺 Run Doctor</button>
     </div>
 
+    <div class="log" id="log">Ready. Click Install or Update to begin.</div>
+
     <table>
         <thead>
             <tr><th></th><th>Agent</th><th>Vendor</th><th>Status</th><th>Actions</th></tr>
@@ -2929,8 +2931,6 @@ def create_flask_app():
             {agent_rows}
         </tbody>
     </table>
-
-    <div class="log" id="log">Ready. Click Install or Update to begin.</div>
 </div>
 
 <script>
