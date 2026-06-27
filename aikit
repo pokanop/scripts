@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.6.0
+aikit — AI Coding Agent CLI Installer & Manager  v1.6.1
 Install, update, authenticate, and manage 20 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -48,7 +48,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 
 import scriptkit as sk
 
@@ -587,6 +587,8 @@ AGENTS = {
             "Windows": 'wsl -d Ubuntu bash -lc "curl -fsSL https://install.openhands.dev/install.sh | sh"',
         },
         "version_cmd": "openhands --version",
+        "version_timeout": 20,
+        "version_env": {"OPENHANDS_SUPPRESS_BANNER": "1"},
         "update_cmd": None,
         "update_via_install": True,
         "path_markers": ["/.openhands/"],
@@ -679,8 +681,9 @@ def _npm_global_bin_dirs():
 # Subprocess helpers
 # =============================================================================
 
-def run(cmd, timeout=300, shell=True, capture=True):
+def run(cmd, timeout=300, shell=True, capture=True, env=None):
     """Run a shell command. Returns (exit_code, stdout, stderr)."""
+    run_env = {**os.environ, **env} if env else None
     try:
         result = subprocess.run(
             cmd,
@@ -688,6 +691,7 @@ def run(cmd, timeout=300, shell=True, capture=True):
             capture_output=capture,
             text=True,
             timeout=timeout,
+            env=run_env,
         )
         return result.returncode, result.stdout.strip(), result.stderr.strip()
     except subprocess.TimeoutExpired:
@@ -835,14 +839,39 @@ def _version_command(agent_key, bin_name):
     return f"{bin_name} --version"
 
 
+def _version_timeout(agent_key):
+    return int(AGENTS.get(agent_key, {}).get("version_timeout", 10))
+
+
+def _version_env(agent_key):
+    return AGENTS.get(agent_key, {}).get("version_env") or None
+
+
+def _parse_version_stdout(stdout):
+    """Pick the best version line from multi-line CLI --version output."""
+    if not stdout:
+        return None
+    lines = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    for line in reversed(lines):
+        if re.search(r"\d+\.\d+", line):
+            return line
+    return lines[-1]
+
+
 def detect_agent_version(agent_key):
     """Try to get an agent's installed version."""
     bin_name = resolve_agent_bin(agent_key)
     if not bin_name:
         return None
-    exit_code, stdout, _ = run(_version_command(agent_key, bin_name), timeout=10)
+    exit_code, stdout, _ = run(
+        _version_command(agent_key, bin_name),
+        timeout=_version_timeout(agent_key),
+        env=_version_env(agent_key),
+    )
     if exit_code == 0 and stdout:
-        return stdout.split("\n")[0].strip()
+        return _parse_version_stdout(stdout)
     return None
 
 
@@ -998,7 +1027,7 @@ def fetch_latest_version(agent_key):
     return None
 
 
-def check_update_status(agent_key, *, force=False, config=None):
+def check_update_status(agent_key, *, config=None, current_raw=None):
     """Check whether an installed agent has a newer upstream release.
 
     Returns {available: bool|None, current, latest, checked_at}.
@@ -1012,16 +1041,12 @@ def check_update_status(agent_key, *, force=False, config=None):
     if not detect_agent_bin(agent_key):
         return {"available": None, "current": None, "latest": None, "checked_at": None}
 
-    ttl = int(settings.get("update_check_ttl", 3600))
-    cached = UPDATE_CHECK_CACHE.get(agent_key)
     now = time.time()
-    if not force and cached and now - cached.get("checked_at", 0) < ttl:
-        return cached
-
-    current_raw = detect_agent_version(agent_key)
-    current = extract_version(current_raw)
     agent = AGENTS.get(agent_key, {})
     spec = agent.get("version_check")
+    if current_raw is None and not (spec and spec.get("type") == "cmd_json"):
+        current_raw = detect_agent_version(agent_key)
+    current = extract_version(current_raw) if current_raw else None
 
     if spec and spec.get("type") == "cmd_json":
         try:
@@ -1108,7 +1133,7 @@ def classify_update_outcome(agent_key, *, old_version_raw, new_version_raw, exit
     if old_v and new_v and old_v != new_v:
         return {"status": "upgraded", "old": old_v, "new": new_v}
 
-    check = check_update_status(agent_key, force=True)
+    check = check_update_status(agent_key)
     latest = check.get("latest")
     if check.get("available") is True:
         return {
@@ -1136,7 +1161,7 @@ def should_skip_update(agent_key, *, force=False, config=None):
     """Return (skip, check_status) when upstream reports the agent is current."""
     if force:
         return False, None
-    check = check_update_status(agent_key, force=True, config=config)
+    check = check_update_status(agent_key, config=config)
     if check.get("available") is False:
         return True, check
     return False, check
@@ -1165,7 +1190,7 @@ def execute_agent_update(agent_key):
 def _persist_agent_after_update(config, agent_key, new_version_raw=None):
     """Refresh cached agent version and upgrade availability after an update attempt."""
     new_version = new_version_raw or detect_agent_version(agent_key)
-    check = check_update_status(agent_key, force=True, config=config)
+    check = check_update_status(agent_key, config=config)
     config["agents"][agent_key] = {
         **config["agents"].get(agent_key, {}),
         "installed": True,
@@ -1451,7 +1476,6 @@ def print_agent_table(agent_keys=None):
     if agent_keys is None:
         agent_keys = list(AGENTS.keys())
 
-    # Run full discovery to ensure fresh state
     discover_and_persist()
 
     config = load_config()
@@ -1469,8 +1493,8 @@ def print_agent_table(agent_keys=None):
     for i, key in enumerate(agent_keys, 1):
         agent = AGENTS[key]
         agent_cfg = config.get("agents", {}).get(key, {})
-        installed = agent_cfg.get("installed", False) or detect_agent_bin(key)
-        version = agent_cfg.get("version") or detect_agent_version(key) or "—"
+        installed = agent_cfg.get("installed", False)
+        version = agent_cfg.get("version") or "—"
         # Keep version short for table display — one line max
         if isinstance(version, str) and len(version) > 40:
             version = version[:37].rstrip() + "…"
@@ -2114,54 +2138,72 @@ def discover_auth(agent_key):
     return {"auth_configured": False, "method": "", "source": ""}
 
 
+def _agent_entry_changed(current, merged):
+    omit = "update_checked_at"
+    return {k: v for k, v in merged.items() if k != omit} != {
+        k: v for k, v in current.items() if k != omit
+    }
+
+
+def _discover_agent_entry(key, config):
+    """Discover install/version/auth/update state for one agent."""
+    agents_cfg = config.get("agents", {})
+    current = agents_cfg.get(key, {})
+    installed = detect_agent_bin(key)
+    version = detect_agent_version(key) if installed else None
+    auth_result = discover_auth(key)
+    update_status = (
+        check_update_status(key, config=config, current_raw=version)
+        if installed else {}
+    )
+
+    new_entry = {
+        "installed": installed,
+        "version": version,
+        "auth_configured": auth_result.get("auth_configured", False),
+        "auth_method": auth_result.get("method", ""),
+        "auth_source": auth_result.get("source", ""),
+        "install_date": current.get("install_date", ""),
+        "auth_date": current.get("auth_date", ""),
+        "latest_version": update_status.get("latest"),
+        "update_available": update_status.get("available"),
+        "update_checked_at": update_status.get("checked_at"),
+    }
+
+    merged = {**current, **new_entry}
+    if not installed:
+        merged["install_date"] = ""
+        merged["version"] = None
+        merged["latest_version"] = None
+        merged["update_available"] = None
+        merged["update_checked_at"] = None
+    if current.get("install_date") and installed:
+        merged["install_date"] = current["install_date"]
+    if current.get("auth_date") and auth_result.get("auth_configured"):
+        merged["auth_date"] = current["auth_date"]
+
+    return key, merged, _agent_entry_changed(current, merged)
+
+
 def discover_and_persist():
     """Run full system discovery: detect installed agents, versions, and auth state.
     Persists all findings to config. Called automatically by doctor, list, and install."""
     config = load_config()
-    agents_cfg = config.get("agents", {})
+    agents_cfg = dict(config.get("agents", {}))
     changed = False
-    
-    for key in AGENTS:
-        current = agents_cfg.get(key, {})
-        installed = detect_agent_bin(key)
-        version = detect_agent_version(key) if installed else None
-        auth_result = discover_auth(key)
-        update_status = check_update_status(key, config=config) if installed else {}
-        
-        new_entry = {
-            "installed": installed,
-            "version": version,
-            "auth_configured": auth_result.get("auth_configured", False),
-            "auth_method": auth_result.get("method", ""),
-            "auth_source": auth_result.get("source", ""),
-            "install_date": current.get("install_date", ""),
-            "auth_date": current.get("auth_date", ""),
-            "latest_version": update_status.get("latest"),
-            "update_available": update_status.get("available"),
-            "update_checked_at": update_status.get("checked_at"),
-        }
-        
-        # Merge: keep existing dates if we had them, merge auth info
-        merged = {**current, **new_entry}
-        # Preserve previous install_date if we had one and bin is still there
-        if not installed:
-            merged["install_date"] = ""
-            merged["version"] = None
-            merged["latest_version"] = None
-            merged["update_available"] = None
-            merged["update_checked_at"] = None
-        if current.get("install_date") and installed:
-            merged["install_date"] = current["install_date"]
-        if current.get("auth_date") and auth_result.get("auth_configured"):
-            merged["auth_date"] = current["auth_date"]
-        
-        def _without_check_ts(entry):
-            return {k: v for k, v in entry.items() if k != "update_checked_at"}
 
-        if _without_check_ts(merged) != _without_check_ts(current):
+    results = sk.parallel_map(
+        lambda key: _discover_agent_entry(key, config),
+        list(AGENTS.keys()),
+        "Discovering agents",
+        max_workers=8,
+    )
+
+    for key, merged, entry_changed in results:
+        if entry_changed:
             agents_cfg[key] = merged
             changed = True
-    
+
     if changed:
         config["agents"] = agents_cfg
         save_config(config)
@@ -2507,7 +2549,7 @@ def create_flask_app():
         version = detect_agent_version(agent_key) if installed else None
         config = load_config()
         agent_cfg = config.get("agents", {}).get(agent_key, {})
-        update_status = check_update_status(agent_key, force=True) if installed else {}
+        update_status = check_update_status(agent_key) if installed else {}
         return jsonify({
             "key": agent_key,
             "name": agent["name"],

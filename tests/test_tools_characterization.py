@@ -479,9 +479,36 @@ def test_aikit_check_update_status_npm(tool_loader, monkeypatch):
     monkeypatch.setattr(m, "detect_agent_version", lambda _key: "7.2.34")
     monkeypatch.setattr(m, "fetch_latest_version", lambda _key: "7.3.54")
     m.UPDATE_CHECK_CACHE.clear()
-    status = m.check_update_status("kilo", force=True, config={"settings": {"auto_update_check": True}})
+    status = m.check_update_status("kilo", config={"settings": {"auto_update_check": True}})
     assert status["available"] is True
     assert status["latest"] == "7.3.54"
+
+
+def test_aikit_check_update_status_reuses_current_raw(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    calls = {"version": 0}
+
+    def _detect(_key):
+        calls["version"] += 1
+        return "7.2.34"
+
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: True)
+    monkeypatch.setattr(m, "detect_agent_version", _detect)
+    monkeypatch.setattr(m, "fetch_latest_version", lambda _key: "7.3.54")
+    m.UPDATE_CHECK_CACHE.clear()
+    status = m.check_update_status(
+        "kilo",
+        current_raw="kilo 7.2.34",
+        config={"settings": {"auto_update_check": True}},
+    )
+    assert calls["version"] == 0
+    assert status["available"] is True
+
+
+def test_aikit_parse_version_stdout_multiline(tool_loader):
+    m = tool_loader("aikit")
+    stdout = "+------+\n| banner |\n+------+\n\nOpenHands CLI 1.14.0"
+    assert m._parse_version_stdout(stdout) == "OpenHands CLI 1.14.0"
 
 
 def test_aikit_classify_update_outcome_upgraded(tool_loader):

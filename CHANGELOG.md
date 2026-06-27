@@ -43,6 +43,14 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.6.1 — 2026-06-27
+- **`aikit list` is much faster:** parallel per-agent discovery, no duplicate
+  `--version` subprocesses during discovery, and smarter multi-line version parsing.
+- OpenHands version detection: 20s timeout, `OPENHANDS_SUPPRESS_BANNER=1`, and
+  multi-line `--version` parsing (was timing out at 10s and re-probed every list).
+- `list` always runs a full fresh scan — install count drives wall time; more
+  installed agents means more version/update probes (parallelized, up to 8 workers).
+
 ### 1.6.0 — 2026-06-27
 - Added four new agent registry entries: **Goose** (curl/AAIF), **Cline** (npm),
   **OpenHands CLI** (install script), and **Crush** (npm). Roo Code was investigated
