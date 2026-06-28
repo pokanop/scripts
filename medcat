@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-medcat — Media Stack Ingest Tool  v2.3.0
+medcat — Media Stack Ingest Tool  v2.3.1
 Ingest media files into your media stack with metadata enrichment.
 
 Supported types: books (EPUB/PDF), comics (CBZ/CBR), audiobooks (M4B/MP3),
@@ -95,7 +95,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
 
-__version__ = "2.3.0"
+__version__ = "2.3.1"
 
 import scriptkit as sk
 
@@ -2557,7 +2557,7 @@ def _archive_search(query: str, media_type: str = None, limit: int = 20) -> list
 
             r = SearchResult(
                 title=title,
-                source="archive.org",
+                source="archive",
                 size=doc.get("size"),
                 guid=doc.get("identifier"),
                 identifier=doc.get("identifier"),
@@ -3448,7 +3448,7 @@ def cmd_grab(args):
             creator = meta.get("metadata", {}).get("creator", "")
             result = SearchResult(
                 title=title,
-                source="archive.org",
+                source="archive",
                 identifier=identifier,
                 guid=identifier,
                 info_url=f"https://archive.org/details/{identifier}",
@@ -3461,7 +3461,7 @@ def cmd_grab(args):
         except Exception:
             result = SearchResult(
                 title=identifier,
-                source="archive.org",
+                source="archive",
                 identifier=identifier,
                 guid=identifier,
                 download_url=f"https://archive.org/download/{identifier}",
@@ -3715,9 +3715,17 @@ def cmd_search(args):
     # Let user pick results to download
     console.print()
     while True:
-        choice = console.input(
-            "[bold cyan]Download[/] (number, range, 'a'll, 'q'uit): "
-        ).strip().lower()
+        try:
+            choice = console.input(
+                "[bold cyan]Download[/] (number, range, 'a'll, 'q'uit): "
+            ).strip().lower()
+        except EOFError:
+            # Ctrl-D / closed stdin: quit the menu cleanly, matching the EOF
+            # handling in _prompt* and sk.ask. KeyboardInterrupt is deliberately
+            # NOT caught here — it propagates to sk.run_cli, the single place
+            # graceful termination lives (⏹ Interrupted., exit 130), per AGENTS.md.
+            console.print()
+            break
 
         if choice in ("q", "quit", ""):
             break
@@ -3752,6 +3760,9 @@ def cmd_search(args):
             console.print(f"\n[bold]  → {escape(r.title[:60])}[/] ({r.source})")
             src = SEARCH_SOURCES.get(r.source)
             if not src:
+                # Don't silently swallow the selection — surface the mismatch
+                # so a bad source name is visible instead of a no-op menu.
+                console.print(f"[yellow]  ⚠ No handler for source '{escape(str(r.source))}', skipping.[/]")
                 continue
 
             # Determine download destination

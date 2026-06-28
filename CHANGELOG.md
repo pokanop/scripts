@@ -163,6 +163,19 @@ Newest entries on top, within each tool.
 
 ## medcat
 
+### 2.3.1 — 2026-06-28
+- **Fixed `search` download menu doing nothing on selection.** Internet Archive
+  results were tagged with the source name `archive.org` while the dispatch table
+  (`SEARCH_SOURCES`) and every comparison key on `archive`, so picking a result hit
+  `SEARCH_SOURCES.get(...) is None` and was silently skipped (and the results table
+  showed a `?` icon). Archive results now use the canonical `archive` source name,
+  so selections download and the 🏛️ icon renders.
+- **Fixed `EOFError` traceback at the download menu.** Ctrl-D / closed stdin now
+  exits the menu cleanly, matching the EOF handling in the other prompts. (Ctrl-C
+  continues to exit gracefully via `sk.run_cli` — the single termination point.)
+- The menu now warns instead of silently skipping a result whose source has no
+  registered handler, so a future name mismatch can't fail silently.
+
 ### 2.3.0 — 2026-06-26
 - **Added a `doctor` command** (previously none) on the shared `sk.doctor` renderer:
   media tools (ffmpeg/yt-dlp/ia/wget), Python packages, and config, with tips
