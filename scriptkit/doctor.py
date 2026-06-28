@@ -200,6 +200,7 @@ def doctor(
         if warns:
             parts.append(f"{warns} warning{'s' if warns != 1 else ''}")
         glyph, color = (("❌", RED) if fails else ("⚠️", YELLOW))
-        print(f"{INDENT}{style.styled(f'{glyph} {", ".join(parts)}', BOLD, color)}")
+        summary = ", ".join(parts)
+        print(f"{INDENT}{style.styled(f'{glyph} {summary}', BOLD, color)}")
 
     return 1 if fails else 0

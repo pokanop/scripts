@@ -60,6 +60,23 @@ def test_doctor_fail_returns_one_and_lists_issue(no_color, capsys):
     out = capsys.readouterr().out
     assert rc == 1
     assert "Issues" in out and "install dep" in out
+    assert "1 error" in out
+
+
+def test_doctor_mixed_fail_and_warn_summary(no_color, capsys):
+    rc = sk.doctor(
+        "mytool",
+        "1.0.0",
+        sections={
+            "Checks": [
+                sk.Check.fail("dep", "missing", "install dep"),
+                sk.Check.warn("opt", "missing", "optional"),
+            ]
+        },
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "1 error, 1 warning" in out
 
 
 def test_doctor_warn_only_returns_zero(no_color, capsys):

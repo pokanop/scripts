@@ -10,6 +10,10 @@ Newest entries on top, within each tool.
 
 ## scriptkit
 
+### 1.1.2 — 2026-06-27
+- Fix `doctor` verdict line f-string syntax error on Python 3.9–3.11 (PEP 701
+  nested quotes are 3.12+ only).
+
 ### 1.1.1 — 2026-06-27
 - Message helpers (`success`, `error`, `warning`, `info`, `detail`, `elapsed`)
   now render inline Rich markup (`[dim]`, `[bold]`, …) when `rich` is available;
