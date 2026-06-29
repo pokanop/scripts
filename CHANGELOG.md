@@ -201,6 +201,12 @@ Newest entries on top, within each tool.
 
 ## netsy
 
+### 1.3.1 — 2026-06-29
+- Fix a blank trailing column that appeared after **Vendor** in single-pass scans
+  (and any table without the `Seen` stability column). `print_table` always passed
+  a fifth empty row value, so rich auto-created a headerless extra column; the value
+  is now only added when stability tracking is on.
+
 ### 1.3.0 — 2026-06-26
 - ⚠ **Ctrl-C no longer throws a traceback** — interrupts now exit cleanly (130) via
   the shared `sk.run_cli`. (`__main__` previously called `main()` directly.)

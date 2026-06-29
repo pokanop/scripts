@@ -1,4 +1,4 @@
-# 📡 netsy — LAN Discovery Tool · v1.3.0
+# 📡 netsy — LAN Discovery Tool · v1.3.1
 
 **Ping-scan the local subnet and list live hosts with hostname, IP, MAC address, and vendor.**
 
