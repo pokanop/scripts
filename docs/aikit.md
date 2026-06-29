@@ -40,7 +40,7 @@ aikit setup
 | 9 | 🐙 **GitHub Copilot CLI** | `curl` script | `copilot login` OAuth or `COPILOT_GITHUB_TOKEN` / fine-grained PAT |
 | 10 | 🚀 **Grok Build** | `curl` script | `grok login` OAuth or `XAI_API_KEY` |
 | 11 | 🤝 **Aider** | `pip`/`curl` | Provider API keys |
-| 12 | 🌙 **Kimi Code** | `curl` script | `/login` in `kimi-code` (membership OAuth) or Kimi Code Console API key |
+| 12 | 🌙 **Kimi Code** | `curl` script | `/login` in `kimi` (membership OAuth) or Kimi Code Console API key |
 | 13 | 🦅 **Kiro CLI** | `curl` script | `kiro-cli login` OAuth or `KIRO_API_KEY` (Pro+) |
 | 14 | π **Pi Coding Agent** | `npm` | `/login` in `pi` (subscription OAuth) or provider API keys |
 | 15 | 🦞 **OpenClaw** | `curl` script | `openclaw onboard` guided setup |
