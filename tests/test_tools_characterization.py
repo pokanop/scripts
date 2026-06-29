@@ -132,6 +132,56 @@ def test_netsy_parse_nmap_output(tool_loader):
     assert hosts[1]["ip"] == "192.168.1.50"
 
 
+def test_netsy_print_table_no_extra_column(tool_loader):
+    """A plain scan must render exactly four columns — no blank trailing column.
+
+    Regression for POK-55: print_table used to always pass five row values
+    (including an empty `seen`), so rich auto-created a headerless fifth
+    column after Vendor whenever stability tracking was off.
+    """
+    m = tool_loader("netsy")
+    hosts = [
+        {
+            "hostname": "router.local",
+            "ip": "192.168.1.1",
+            "mac": "AA:BB:CC:DD:EE:FF",
+            "vendor": "Acme Corp",
+        }
+    ]
+
+    with m.console.capture() as capture:
+        m.print_table(hosts, "192.168.1.0/24", show_stability=False)
+    output = capture.get()
+
+    header_line = next(line for line in output.splitlines() if "Hostname" in line)
+    # Four columns ⇒ five vertical separators in the header row.
+    assert header_line.count("┃") == 5
+    assert "Vendor" in header_line
+
+
+def test_netsy_print_table_shows_seen_column_when_stable(tool_loader):
+    """Multi-pass scans keep the fifth 'Seen' column (show_stability=True)."""
+    m = tool_loader("netsy")
+    hosts = [
+        {
+            "hostname": "router.local",
+            "ip": "192.168.1.1",
+            "mac": "AA:BB:CC:DD:EE:FF",
+            "vendor": "Acme Corp",
+            "passes_seen": "3",
+            "pass_total": "3",
+        }
+    ]
+
+    with m.console.capture() as capture:
+        m.print_table(hosts, "192.168.1.0/24", show_stability=True)
+    output = capture.get()
+
+    header_line = next(line for line in output.splitlines() if "Hostname" in line)
+    assert header_line.count("┃") == 6  # five columns
+    assert "Seen" in header_line
+
+
 # --- keyferry --------------------------------------------------------------
 def test_keyferry_config_nested(tool_loader):
     m = tool_loader("keyferry")

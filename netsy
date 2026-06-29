@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-netsy — LAN Discovery Tool  v1.3.0
+netsy — LAN Discovery Tool  v1.3.1
 Ping-scan the local subnet and list live hosts with hostname, IP, MAC, and vendor.
 
 Architecture:
@@ -41,7 +41,7 @@ from rich.table import Table
 
 import scriptkit as sk
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 # Share the toolkit's consoles for consistent styling across tools.
 console = sk.rich_console
@@ -516,17 +516,16 @@ def print_table(
         table.add_column("Seen", style="dim")
 
     for host in hosts:
-        seen = ""
-        if show_stability:
-            seen = f"{host.get('passes_seen', '1')}/{host.get('pass_total', '1')}"
-
-        table.add_row(
+        row = [
             host.get("hostname") or "—",
             host.get("ip", ""),
             host.get("mac", ""),
             host.get("vendor", ""),
-            seen,
-        )
+        ]
+        if show_stability:
+            row.append(f"{host.get('passes_seen', '1')}/{host.get('pass_total', '1')}")
+
+        table.add_row(*row)
 
     console.print(table)
     console.print(f"\n[dim]{len(hosts)} host(s) shown[/dim]")
