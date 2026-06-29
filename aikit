@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.6.2
-Install, update, authenticate, and manage 20 AI coding agent CLIs from one tool.
+aikit — AI Coding Agent CLI Installer & Manager  v1.7.0
+Install, update, authenticate, and manage 21 AI coding agent CLIs from one tool.
 
 Architecture:
     Agent registry → platform-aware install → auth multiplexing → web dashboard
@@ -48,7 +48,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.6.2"
+__version__ = "1.7.0"
 
 import scriptkit as sk
 
@@ -168,7 +168,7 @@ def resolve_uninstall_cmd(agent):
 
 
 # =============================================================================
-# Agent Registry — 20 coding agents, platform-aware install commands
+# Agent Registry — 21 coding agents, platform-aware install commands
 # =============================================================================
 
 _CURRENT_PLATFORM = platform.system()  # "Linux", "Darwin", "Windows"
@@ -626,6 +626,29 @@ AGENTS = {
         "auth_note": "Run 'crush login' for OAuth providers, or set provider env vars. Crush prompts on first run if no key is set.",
         "requires": ["node", "npm"],
         "tags": ["crush", "charm", "tui", "lsp", "mcp", "multi-model"],
+    },
+    "amp": {
+        "name": "Amp",
+        "bin": "amp",
+        "vendor": "Sourcegraph",
+        "homepage": "https://ampcode.com",
+        "icon": "🔊",
+        "install": {
+            "Linux": "curl -fsSL https://ampcode.com/install.sh | bash",
+            "Darwin": "curl -fsSL https://ampcode.com/install.sh | bash",
+            "Windows": 'powershell -c "irm https://ampcode.com/install.ps1 | iex"',
+        },
+        "version_cmd": "amp --version",
+        "update_cmd": "amp update",
+        "path_markers": ["/.config/amp", "@ampcode/cli"],
+        "version_check": {"type": "npm", "package": "@ampcode/cli"},
+        "uninstall_cmd": None,
+        "auth_type": "oauth_browser",
+        "auth_env_vars": ["AMP_API_KEY"],
+        "auth_cmd": "amp login",
+        "auth_note": "Run 'amp login' for browser sign-in (free or pay-as-you-go credits). Or set AMP_API_KEY from ampcode.com/settings for scripts/CI.",
+        "requires": ["curl"],
+        "tags": ["amp", "sourcegraph", "agentic", "oracle", "mcp"],
     },
 }
 
@@ -2251,7 +2274,16 @@ def discover_auth(agent_key):
         ]:
             if cp.exists() and cp.stat().st_size > 0:
                 return {"auth_configured": True, "method": "config_file", "source": str(cp)}
-    
+
+    # Amp: ~/.config/amp/settings.json (or .jsonc) after 'amp login' / API key
+    if agent_key == "amp":
+        for ap in [
+            home / ".config" / "amp" / "settings.json",
+            home / ".config" / "amp" / "settings.jsonc",
+        ]:
+            if ap.exists() and ap.stat().st_size > 0:
+                return {"auth_configured": True, "method": "config_file", "source": str(ap)}
+
     # For agents with auth_env_vars, check shell profile files
     if env_vars and not auth_type == "oauth_browser":
         for profile in [home / ".bashrc", home / ".zshrc", home / ".profile"]:

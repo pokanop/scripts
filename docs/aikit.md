@@ -1,6 +1,6 @@
 # 🤖 aikit — AI Coding Agent CLI Installer & Manager
 
-**Install, update, authenticate, and manage 20 AI coding agent CLIs from one tool.**
+**Install, update, authenticate, and manage 21 AI coding agent CLIs from one tool.**
 
 `aikit` · Python 3 · `rich` · `flask` · `requests`
 
@@ -25,7 +25,7 @@ aikit setup
 
 ---
 
-## Agents (20)
+## Agents (21)
 
 | # | Agent | Install | Auth |
 |---|-------|---------|------|
@@ -49,6 +49,7 @@ aikit setup
 | 18 | 🌀 **Cline** | `npm` | `cline auth` OAuth (Cline, ChatGPT) or BYOK |
 | 19 | 🙌 **OpenHands CLI** | `curl` script | First-run LLM settings; `openhands login` for Cloud only |
 | 20 | 💘 **Crush** | `npm` | `crush login` OAuth or provider env vars |
+| 21 | 🔊 **Amp** | `curl` script | `amp login` (browser sign-in) or `AMP_API_KEY` |
 
 ---
 
@@ -60,7 +61,7 @@ aikit setup
 | `aikit install [agents...]` | Install agents (multi-select picker if none) |
 | `aikit update [agents...]` | Update agents (all installed if none) |
 | `aikit uninstall [agent...]` | Remove agents |
-| `aikit list` | Status table of all 20 agents |
+| `aikit list` | Status table of all 21 agents |
 | `aikit auth [agent]` | Guided authentication setup |
 | `aikit doctor` | Diagnose environment and agent health |
 | `aikit serve` | Start web dashboard |
@@ -78,7 +79,7 @@ Select agents to install
    2. [ ] 🛸 Antigravity
    3. [X] 🖱️ Cursor CLI
   ...
-  Selected: 1/20  cursor
+  Selected: 1/21  cursor
 ```
 
 Press `Space` or enter numbers to toggle. Press `Enter` to confirm. Press `q` to cancel.
@@ -137,7 +138,7 @@ aikit config set settings.web_port 9000  # Set a value
 
 ```
 aikit                          # Single-file Python script (~1,600 lines)
-├── Agent registry             # 20 agents, each with platform-aware install commands
+├── Agent registry             # 21 agents, each with platform-aware install commands
 ├── Subprocess runner          # Install/update/uninstall execution
 ├── Config system              # JSON-based, three-tier loading, env var overrides
 ├── Rich TUI                   # Tables, panels, interactive multi-select picker

@@ -47,6 +47,13 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.7.0 — 2026-06-28
+- Added a new agent registry entry: **Amp** (Sourcegraph) — the agentic coding
+  tool from `ampcode.com`. Installs via the official `curl` script (PowerShell on
+  Windows), updates with `amp update`, tracks releases through the `@ampcode/cli`
+  npm package, and authenticates with `amp login` (browser sign-in) or `AMP_API_KEY`
+  for scripts/CI. Auth discovery recognizes `~/.config/amp/settings.json`.
+
 ### 1.6.2 — 2026-06-27
 - **`aikit serve` dashboard:** moved the output log above the agent table so
   install/update feedback is visible without scrolling past 20 rows.

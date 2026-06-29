@@ -306,7 +306,7 @@ def test_aikit_validate_agent_keys_ok(tool_loader):
 
 def test_aikit_new_agent_registry_entries(tool_loader):
     m = tool_loader("aikit")
-    assert len(m.AGENTS) == 20
+    assert len(m.AGENTS) == 21
     goose = m.AGENTS["goose"]
     assert goose["bin"] == "goose"
     assert goose["update_cmd"] == "goose update"
@@ -327,6 +327,27 @@ def test_aikit_new_agent_registry_entries(tool_loader):
     assert crush["bin"] == "crush"
     assert crush["version_check"]["package"] == "@charmland/crush"
     assert "--prefix" in crush["install"]["Darwin"]
+
+
+def test_aikit_amp_registry_entry(tool_loader):
+    m = tool_loader("aikit")
+    amp = m.AGENTS["amp"]
+    assert amp["bin"] == "amp"
+    assert amp["vendor"] == "Sourcegraph"
+    assert amp["update_cmd"] == "amp update"
+    assert amp["auth_cmd"] == "amp login"
+    assert amp["auth_type"] == "oauth_browser"
+    assert "AMP_API_KEY" in amp["auth_env_vars"]
+    assert amp["version_check"]["package"] == "@ampcode/cli"
+    assert "ampcode.com/install.sh" in amp["install"]["Linux"]
+    assert "ampcode.com/install.sh" in amp["install"]["Darwin"]
+    assert "install.ps1" in amp["install"]["Windows"]
+
+
+def test_aikit_resolve_update_cmd_amp(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "amp")
+    assert m.resolve_update_cmd("amp") == "amp update"
 
 
 def test_aikit_resolve_agent_bin_npm_global_fallback(tool_loader, monkeypatch, tmp_path):
