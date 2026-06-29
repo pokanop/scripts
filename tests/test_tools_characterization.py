@@ -823,6 +823,109 @@ def test_medcat_config_nested(tool_loader):
     assert m._config_get_nested(cfg, "services.kavita.url") == "http://x"
 
 
+class _FakeArchiveResp:
+    """Minimal stand-in for the Internet Archive advancedsearch.php response."""
+
+    status_code = 200
+
+    @staticmethod
+    def json():
+        return {"response": {"docs": [
+            {"identifier": "abc", "title": "A Book", "creator": "Ann", "date": "1999"},
+        ]}}
+
+
+class _SearchArgs:
+    """Namespace mimicking argparse for cmd_search (archive-only, no ingest)."""
+
+    query = "q"
+    type = "books"
+    source = "archive"
+    limit = 5
+    list_only = False
+    no_ingest = True
+    audio = False
+    dest = None
+
+
+def test_medcat_archive_search_source_is_dispatchable(tool_loader, monkeypatch):
+    """Archive results must carry a source key SEARCH_SOURCES can dispatch.
+
+    Regression: results were tagged ``"archive.org"`` while the dispatch table
+    keys on ``"archive"``, so every selection silently no-op'd.
+    """
+    m = tool_loader("medcat")
+    monkeypatch.setattr(m.requests, "get", lambda *a, **k: _FakeArchiveResp())
+    results = m._archive_search("query", "books", 5)
+    assert results, "archive search returned no results"
+    assert results[0].source == "archive"
+    assert results[0].source in m.SEARCH_SOURCES
+
+
+def test_medcat_search_selection_dispatches_download(tool_loader, monkeypatch):
+    """Picking a result actually triggers its source's download handler."""
+    m = tool_loader("medcat")
+    monkeypatch.setattr(m.requests, "get", lambda *a, **k: _FakeArchiveResp())
+    monkeypatch.setattr(m, "load_config", lambda: {"services": {}, "destinations": {}})
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
+
+    downloaded = []
+    monkeypatch.setattr(
+        m, "_archive_download",
+        lambda r, dest_dir=None: (downloaded.append(r), True)[1],
+    )
+
+    answers = iter(["1"])  # pick #1; _prompt_yes_no=False ends the loop after
+
+    def fake_input(*a, **k):
+        try:
+            return next(answers)
+        except StopIteration:  # safety net — shouldn't be reached
+            raise EOFError
+
+    monkeypatch.setattr(m.console, "input", fake_input)
+    monkeypatch.setattr(m, "_prompt_yes_no", lambda *a, **k: False)
+
+    m.cmd_search(_SearchArgs())
+    assert len(downloaded) == 1, "selection did not dispatch an archive download"
+
+
+def test_medcat_search_menu_eof_quits_cleanly(tool_loader, monkeypatch):
+    """Ctrl-D / closed stdin at the menu exits cleanly, no EOFError traceback."""
+    m = tool_loader("medcat")
+    monkeypatch.setattr(m, "load_config", lambda: {"services": {}, "destinations": {}})
+    monkeypatch.setattr(
+        m, "_archive_search",
+        lambda q, mt=None, lim=20: [m.SearchResult(title="X", source="archive", media_type="books")],
+    )
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
+
+    def eof(*a, **k):
+        raise EOFError
+
+    monkeypatch.setattr(m.console, "input", eof)
+    assert m.cmd_search(_SearchArgs()) is None
+
+
+def test_medcat_search_menu_ctrl_c_propagates(tool_loader, monkeypatch):
+    """KeyboardInterrupt is left for sk.run_cli (the one termination point),
+    not swallowed in the tool — per AGENTS.md."""
+    m = tool_loader("medcat")
+    monkeypatch.setattr(m, "load_config", lambda: {"services": {}, "destinations": {}})
+    monkeypatch.setattr(
+        m, "_archive_search",
+        lambda q, mt=None, lim=20: [m.SearchResult(title="X", source="archive", media_type="books")],
+    )
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
+
+    def boom(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(m.console, "input", boom)
+    with pytest.raises(KeyboardInterrupt):
+        m.cmd_search(_SearchArgs())
+
+
 # --- voxtract --------------------------------------------------------------
 def test_voxtract_parse_time(tool_loader):
     m = tool_loader("voxtract")
