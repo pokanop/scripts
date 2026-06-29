@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.7.1
+aikit — AI Coding Agent CLI Installer & Manager  v1.7.2
 Install, update, authenticate, and manage 21 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -48,7 +48,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.7.1"
+__version__ = "1.7.2"
 
 import scriptkit as sk
 
@@ -152,6 +152,14 @@ def openhands_uninstall_cmd():
     """OpenHands: uv tool uninstall (docs) or remove the install-script binary."""
     uv = "command -v uv >/dev/null 2>&1 && uv tool uninstall openhands 2>/dev/null; "
     return uv + binary_uninstall_cmd("openhands")
+
+
+def kimi_uninstall_cmd():
+    """Kimi Code: remove curl-installed binary from ~/.kimi-code and PATH shims."""
+    return " ; ".join([
+        "rm -f $HOME/.kimi-code/bin/kimi $HOME/.kimi-code/bin/kimi.bak",
+        binary_uninstall_cmd("kimi"),
+    ])
 
 
 def resolve_uninstall_cmd(agent):
@@ -428,7 +436,9 @@ AGENTS = {
     },
     "kimi": {
         "name": "Kimi Code",
-        "bin": "kimi-code",
+        "bin": "kimi",
+        "path_markers": ["/.kimi-code/"],
+        "install_paths": ["~/.kimi-code/bin/kimi"],
         "vendor": "Moonshot AI",
         "homepage": "https://www.kimi.com/code",
         "icon": "🌙",
@@ -437,14 +447,14 @@ AGENTS = {
             "Darwin": "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
             "Windows": 'powershell -c "irm https://code.kimi.com/kimi-code/install.ps1 | iex"',
         },
-        "version_cmd": "kimi-code --version",
+        "version_cmd": "kimi --version",
         "update_cmd": None,
         "update_via_install": True,
         "version_check": {"type": "url_text", "url": "https://code.kimi.com/kimi-code/latest"},
-        "uninstall_cmd": None,
+        "uninstall_cmd": kimi_uninstall_cmd,
         "auth_type": "oauth_browser",
         "auth_env_vars": [],
-        "auth_note": "Run 'kimi-code' then '/login' for Kimi Code membership (OAuth). Or '/setup' with an API key from the Kimi Code Console. Requires Kimi membership.",
+        "auth_note": "Run 'kimi' then '/login' for Kimi Code membership (OAuth). Or '/setup' with an API key from the Kimi Code Console. Requires Kimi membership.",
         "requires": ["curl"],
         "tags": ["kimi", "moonshot", "k2.7"],
     },
@@ -848,6 +858,10 @@ def resolve_agent_bin(agent_key):
                     continue
                 if bin_path_belongs_to_agent(agent_key, str(candidate)):
                     return str(candidate)
+    for rel_path in agent.get("install_paths", []):
+        candidate = Path(os.path.expanduser(rel_path))
+        if candidate.exists() and bin_path_belongs_to_agent(agent_key, str(candidate)):
+            return str(candidate)
     return None
 
 

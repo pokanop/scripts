@@ -302,6 +302,22 @@ def test_aikit_resolve_update_cmd_kimi_reinstall(tool_loader):
     assert cmd and "kimi-code/install.sh" in cmd
 
 
+def test_aikit_kimi_bin_and_uninstall(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    assert m.AGENTS["kimi"]["bin"] == "kimi"
+    kimi_bin = tmp_path / ".kimi-code" / "bin" / "kimi"
+    kimi_bin.parent.mkdir(parents=True)
+    kimi_bin.write_text("#!/bin/sh\necho 0.20.2\n")
+    kimi_bin.chmod(0o755)
+    kimi_agent = {**m.AGENTS["kimi"], "install_paths": [str(kimi_bin)]}
+    monkeypatch.setitem(m.AGENTS, "kimi", kimi_agent)
+    monkeypatch.setattr(m.shutil, "which", lambda name: None)
+    assert m.detect_agent_bin("kimi")
+    uninstall = m.resolve_uninstall_cmd(kimi_agent)
+    assert uninstall and ".kimi-code/bin/kimi" in uninstall
+    assert ".local/bin/kimi" in uninstall
+
+
 def test_aikit_resolve_update_cmd_kilo(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "kilo")
@@ -536,6 +552,8 @@ def test_aikit_goose_uninstall_uses_brew_only_for_homebrew_install(tool_loader, 
     assert cline and "npm uninstall -g cline" in cline
     crush = m.resolve_uninstall_cmd(m.AGENTS["crush"])
     assert crush and "npm uninstall -g @charmland/crush" in crush
+    kimi = m.resolve_uninstall_cmd(m.AGENTS["kimi"])
+    assert kimi and ".kimi-code/bin/kimi" in kimi
 
 
 def test_aikit_resolve_update_cmd_openhands_reinstall(tool_loader):

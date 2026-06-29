@@ -51,6 +51,11 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.7.2 — 2026-06-29
+- **Kimi Code:** fix install detection — official installer ships the `kimi`
+  binary under `~/.kimi-code/bin/` (not `kimi-code`); detect that path before
+  shell PATH is refreshed; add automated uninstall.
+
 ### 1.7.1 — 2026-06-29
 - **`aikit uninstall`:** prune stale config entries when the binary is already
   gone (fixes "not fully removed" on ghost records).
