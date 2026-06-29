@@ -26,10 +26,22 @@ _MARKUP_RE = re.compile(r"\[/?[^\]]+\]")
 try:  # pragma: no cover - exercised indirectly
     from rich.console import Console as _RichConsole
 
-    console = _RichConsole()
-    err_console = _RichConsole(stderr=True)
+    def _rich_console_for(stream=None):
+        """Rich Console honoring scriptkit color resolution (FORCE_COLOR, override, TTY)."""
+        stream = stream if stream is not None else sys.stdout
+        color = style.use_color(stream)
+        return _RichConsole(
+            stderr=(stream is sys.stderr),
+            force_terminal=color,
+            no_color=not color,
+        )
+
+    console = _rich_console_for(sys.stdout)
+    err_console = _rich_console_for(sys.stderr)
     HAS_RICH = True
 except Exception:  # pragma: no cover
+    _rich_console_for = None  # type: ignore[misc, assignment]
+
     console = None
     err_console = None
     HAS_RICH = False
@@ -43,9 +55,14 @@ def _strip_markup(text: str) -> str:
 def _emit(text: str, *codes: str, rich_style: str | None = None, stream=None) -> None:
     """Emit an indented line. ``rich_style`` enables nested Rich markup in ``text``."""
     stream = stream if stream is not None else sys.stdout
-    if rich_style and HAS_RICH and style.use_color(stream):
-        target = err_console if stream is sys.stderr else console
-        target.print(INDENT + text, style=rich_style)
+    use_rich = rich_style and HAS_RICH and style.use_color(stream)
+    if use_rich:
+        try:
+            use_rich = stream.isatty()
+        except Exception:
+            use_rich = False
+    if use_rich:
+        _rich_console_for(stream).print(INDENT + text, style=rich_style)
         return
     plain = _strip_markup(text) if "[" in text else text
     print(INDENT + style.styled(plain, *codes, stream=stream), file=stream)

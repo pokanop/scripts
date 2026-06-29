@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.7.0
+aikit — AI Coding Agent CLI Installer & Manager  v1.7.1
 Install, update, authenticate, and manage 21 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -48,7 +48,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 
 import scriptkit as sk
 
@@ -1914,6 +1914,8 @@ def _do_uninstall_impl(agent_keys, yes):
             and any(_npm_package_dir(prefix, npm_package).exists() for prefix in _npm_global_prefixes())
         )
         if not installed and not orphan_npm:
+            if config["agents"].pop(key, None) is not None:
+                removed.append(key)
             print_info(f"{icon} {agent['name']} — not installed")
             continue
         if orphan_npm:

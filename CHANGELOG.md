@@ -10,6 +10,10 @@ Newest entries on top, within each tool.
 
 ## scriptkit
 
+### 1.1.3 — 2026-06-29
+- Message helpers emit ANSI color on non-TTY streams when color is forced
+  (`FORCE_COLOR`, `set_color(True)`); Rich rendering stays on real TTYs.
+
 ### 1.1.2 — 2026-06-27
 - Fix `doctor` verdict line f-string syntax error on Python 3.9–3.11 (PEP 701
   nested quotes are 3.12+ only).
@@ -46,6 +50,10 @@ Newest entries on top, within each tool.
 ---
 
 ## aikit
+
+### 1.7.1 — 2026-06-29
+- **`aikit uninstall`:** prune stale config entries when the binary is already
+  gone (fixes "not fully removed" on ghost records).
 
 ### 1.7.0 — 2026-06-28
 - Added a new agent registry entry: **Amp** (Sourcegraph) — the agentic coding
