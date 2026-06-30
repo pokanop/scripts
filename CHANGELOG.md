@@ -62,6 +62,23 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.11.0 — 2026-06-30
+- **Added `aikit gateway purge`** — the explicit "forget" for the saved gateway
+  credentials. `on`/`off` is a **fast, zero-input toggle**: `off` returns your agent
+  runtimes to pristine (rc block, tool configs, `gateway.env`/`gateway.json`, manifest)
+  but **keeps** aikit's own `0600` credential store (`~/.aikit/gateway/config.json`), so
+  flipping back `on` needs no input. `purge` removes that store (deactivating first if
+  active) and prunes `~/.aikit/gateway/`, so re-enabling needs `-u`/`-k` again. Confirms
+  before acting (`-y` to skip); `--dry-run` previews; friendly no-op when nothing is
+  saved. `aikit gateway off --purge` does both in one shot.
+- **Clarified the toggle model** — "pristine" refers to your **agent runtimes** (shell rc
+  + tool configs), not aikit's private `~/.aikit/` state dir; the `0600` credential store
+  persists across `off` (like `~/.aws/credentials`) and is removed only by `purge`.
+  `status` now reads *inactive (credentials saved)* while OFF-but-configured, with a hint
+  to `on`/`purge`. Security invariant: while OFF the virtual key lives **only** in the
+  `0600` store — never in an agent-runtime file — and is absent from the machine entirely
+  after `purge`. (POK-63)
+
 ### 1.10.0 — 2026-06-30
 - **Native per-tool gateway config (`aikit gateway on`)** — beyond the env layer,
   `on` now generates each tool's config in its own native schema (populated with the
