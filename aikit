@@ -2741,7 +2741,14 @@ OPENAI_COMPATIBLE_TOOLS = [
 ]
 
 # Universal OpenAI-compatible vars set for every activation (provider-independent).
+# Key vars take the virtual key; base vars take the gateway URL plus the given suffix
+# (the OpenAI-compatible endpoint is at /v1; the LiteLLM proxy base is the root).
 GATEWAY_UNIVERSAL_KEY_VARS = ("OPENAI_API_KEY", "LITELLM_PROXY_API_KEY")
+GATEWAY_UNIVERSAL_BASE_VARS = (
+    ("OPENAI_BASE_URL", "/v1"),
+    ("OPENAI_API_BASE", "/v1"),
+    ("LITELLM_PROXY_API_BASE", ""),
+)
 
 GATEWAY_DIR = CONFIG_DIR / "gateway"
 GATEWAY_CONFIG_FILE = GATEWAY_DIR / "config.json"   # credential store: base_url + virtual key
@@ -2916,13 +2923,9 @@ def build_env_pairs(base_url, key, only_providers=None):
     vars; ``None`` means all providers.
     """
     base = base_url.rstrip("/")
-    pairs = [
-        ("OPENAI_API_KEY", key),
-        ("OPENAI_BASE_URL", f"{base}/v1"),
-        ("OPENAI_API_BASE", f"{base}/v1"),
-        ("LITELLM_PROXY_API_BASE", base),
-        ("LITELLM_PROXY_API_KEY", key),
-    ]
+    # Universal block, single-sourced from the tables above.
+    pairs = [(var, key) for var in GATEWAY_UNIVERSAL_KEY_VARS]
+    pairs += [(var, f"{base}{suffix}") for var, suffix in GATEWAY_UNIVERSAL_BASE_VARS]
     for pid, name, prefix, key_envs, base_envs, route, bins, pys in GATEWAY_PROVIDERS:
         if pid == "openai":
             continue  # already covered by the universal block

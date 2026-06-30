@@ -18,6 +18,8 @@ Newest entries on top, within each tool.
   intact (the inverse of the insert). `ManagedBlock.apply` snapshots a `.bak` once
   before the first write; `clear` takes it back out. Built for shell rc env blocks
   and any managed config stanza a tool must add and later remove cleanly.
+  `upsert`→`remove` round-trips **byte-for-byte**, preserving the file's original
+  trailing-newline state (files with or without a final newline both restore exactly).
 
 ### 1.1.3 — 2026-06-29
 - Message helpers emit ANSI color on non-TTY streams when color is forced

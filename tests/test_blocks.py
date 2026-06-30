@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 import scriptkit as sk
 from scriptkit.blocks import (
     find_block,
@@ -79,6 +81,29 @@ def test_remove_missing_block_is_noop():
     restored, removed = remove_block("nothing here\n", BEGIN, END)
     assert removed is False
     assert restored == "nothing here\n"
+
+
+@pytest.mark.parametrize("original", ["", "x", "x\n", "x\n\n", "a\nb", "a\nb\n"])
+def test_upsert_remove_roundtrip_is_byte_for_byte(original):
+    """create → remove restores the original exactly, regardless of trailing newline.
+
+    The no-trailing-newline shapes (``"x"``, ``"a\\nb"``) are the ones that
+    falsified the pristine guarantee before the paired upsert/remove fix.
+    """
+    inserted, action = upsert_block(original, BEGIN, END, BODY)
+    assert action == "create"
+    assert has_block(inserted, BEGIN, END)
+    restored, removed = remove_block(inserted, BEGIN, END)
+    assert removed is True
+    assert restored == original  # byte-for-byte, trailing-newline state preserved
+
+
+@pytest.mark.parametrize("original", ["x", "x\n", "a\nb"])
+def test_upsert_distinguishes_trailing_newline(original):
+    """A no-newline file and its newline-terminated sibling produce distinct output."""
+    with_nl, _ = upsert_block(original.rstrip("\n") + "\n", BEGIN, END, BODY)
+    without_nl, _ = upsert_block(original.rstrip("\n"), BEGIN, END, BODY)
+    assert with_nl != without_nl
 
 
 def test_indented_marker_still_matched():

@@ -77,10 +77,14 @@ aikit gateway on -u https://gw.example.com [-k sk-…]
 |------|--------|
 | `-u, --url` | Gateway base URL. Prompted if omitted and not saved. |
 | `-k, --key` | Virtual key (`sk-…`). **Hidden prompt** if omitted and not saved. |
-| `--dry-run` | Print the env block (key masked) and the targeted providers; write nothing. |
+| `--dry-run` | Print the env block (key masked) and the targeted providers; write nothing locally. |
 | `-y, --yes` | Skip the confirmation prompt. |
 | `--only-discovered` | Only set env vars for providers actually backing the discovered models. |
 | `--shell {zsh,bash,fish}` | Override shell detection. |
+
+> **`--dry-run` is not offline-safe.** It still validates the key by calling the
+> gateway's `/v1/models` first (matching the reference's validate-then-preview), so it
+> needs a reachable gateway and a valid key — it just doesn't write any local files.
 
 The URL and virtual key are saved to `~/.aikit/gateway/config.json` (`0600`), so later
 runs don't need the flags again.

@@ -67,10 +67,12 @@ def upsert_block(text: str, begin: str, end: str, body: str) -> tuple[str, str]:
     """Insert or replace the managed block. Returns ``(new_text, action)``.
 
     ``action`` is ``"update"`` when an existing block was replaced (surrounding
-    content untouched) or ``"create"`` when the block was appended. Appending to
-    a non-empty file inserts one blank separator line before the block; that
-    separator is exactly what :func:`remove_block` takes back out, so
-    ``upsert`` then ``remove`` round-trips.
+    content untouched) or ``"create"`` when the block was appended. Appending
+    inserts exactly one separating ``\\n`` before the block — a lone newline when
+    the file had no trailing newline, a blank line when it already ended in one.
+    Either way that separator is exactly what :func:`remove_block` takes back out,
+    so ``upsert`` then ``remove`` round-trips **byte-for-byte** (the file's
+    original trailing-newline state is preserved, not normalized).
     """
     block = render_block(begin, end, body)
     span = find_block(text, begin, end)
@@ -79,15 +81,17 @@ def upsert_block(text: str, begin: str, end: str, body: str) -> tuple[str, str]:
         return text[:start] + block + text[stop:], "update"
     if not text:
         return block, "create"
-    base = text if text.endswith("\n") else text + "\n"
-    return base + "\n" + block, "create"
+    # Insert a single separator newline — do NOT normalize the file's own trailing
+    # newline. A no-newline file gets one separator \n; a newline-terminated file
+    # gets a blank-line separator. remove_block strips exactly that one \n back out.
+    return text + "\n" + block, "create"
 
 
 def remove_block(text: str, begin: str, end: str) -> tuple[str, bool]:
     """Strip the managed block. Returns ``(new_text, removed)``.
 
-    Removes the block's lines and the single blank separator an appended block
-    carries, leaving the rest of the file intact — the inverse of
+    Removes the block's lines and the single separator ``\\n`` an appended block
+    carries, leaving the rest of the file intact — the exact inverse of
     :func:`upsert_block`. ``removed`` is ``False`` when no block was present.
     """
     span = find_block(text, begin, end)
@@ -95,7 +99,10 @@ def remove_block(text: str, begin: str, end: str) -> tuple[str, bool]:
         return text, False
     start, stop = span
     pre, post = text[:start], text[stop:]
-    if start > 0 and pre.endswith("\n\n"):
+    # An appended block (start > 0) always carries one separator newline that
+    # upsert_block inserted; strip exactly that one \n so the original text — with
+    # or without its own trailing newline — is restored byte-for-byte.
+    if start > 0 and pre.endswith("\n"):
         pre = pre[:-1]
     return pre + post, True
 

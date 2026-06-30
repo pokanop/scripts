@@ -246,6 +246,20 @@ def test_gateway_on_off_roundtrip_is_pristine(aikit, isolated_gateway):
     assert rc.read_text() == original
 
 
+def test_gateway_on_off_pristine_when_rc_has_no_trailing_newline(aikit, isolated_gateway):
+    """`off` restores an rc that did not end in a newline byte-for-byte (no stray \\n)."""
+    rc = isolated_gateway
+    rc.write_text("# rc without trailing newline\nalias g=git")  # no final \n
+    original = rc.read_text()
+    assert not original.endswith("\n")
+
+    aikit.do_gateway_on("https://gw.example.com", "sk-key-1234567890", yes=True)
+    assert aikit.GATEWAY_BLOCK.present_in(rc.read_text())
+
+    aikit.do_gateway_off()
+    assert rc.read_text() == original  # pristine — no trailing newline introduced
+
+
 def test_gateway_on_dry_run_writes_nothing_and_masks_key(aikit, isolated_gateway, capsys):
     rc = isolated_gateway
     original = rc.read_text()
