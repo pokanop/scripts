@@ -70,6 +70,7 @@ aikit setup
 | `aikit doctor` | Diagnose environment and agent health |
 | `aikit serve` | Start web dashboard |
 | `aikit config get/set/list` | Manage `~/.aikit/config.json` |
+| `aikit gateway on/off/status/models` | Route AI tools through a LiteLLM gateway — see **[gateway docs](aikit-gateway.md)** |
 
 ### Multi-Select Picker
 
@@ -135,6 +136,26 @@ aikit config list                    # Show all (secrets masked)
 aikit config get settings.web_port   # Get a specific value
 aikit config set settings.web_port 9000  # Set a value
 ```
+
+---
+
+## Gateway
+
+Route every OpenAI-compatible tool/SDK through a single LiteLLM-style gateway with
+one virtual key — and switch back, leaving your machine **pristine**. Full guide:
+**[aikit-gateway.md](aikit-gateway.md)**.
+
+```bash
+aikit gateway on --dry-run -u https://gw.example.com   # preview, write nothing
+aikit gateway on -u https://gw.example.com             # write the managed env block + manifest
+aikit gateway status                                   # active? URL, masked key, model count, drift
+aikit gateway off                                      # remove the block, restore rc pristine
+```
+
+It's idempotent both ways: `on` then `on` is a no-op; `on` then `off` returns the rc
+file and environment-affecting state to exactly where they were. The gateway URL and
+virtual key live at `~/.aikit/gateway/config.json` (`0600`); the key is always masked
+in output and never logged.
 
 ---
 

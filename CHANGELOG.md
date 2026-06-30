@@ -10,6 +10,15 @@ Newest entries on top, within each tool.
 
 ## scriptkit
 
+### 1.2.0 — 2026-06-30
+- **New `blocks` module** (`scriptkit.blocks`): `sk.ManagedBlock(begin, end)` plus
+  the pure helpers `render_block` / `find_block` / `has_block` / `upsert_block` /
+  `remove_block`. A reversible, idempotent managed-text-region primitive — insert
+  or replace a marker-fenced block, then remove it leaving the surrounding file
+  intact (the inverse of the insert). `ManagedBlock.apply` snapshots a `.bak` once
+  before the first write; `clear` takes it back out. Built for shell rc env blocks
+  and any managed config stanza a tool must add and later remove cleanly.
+
 ### 1.1.3 — 2026-06-29
 - Message helpers emit ANSI color on non-TTY streams when color is forced
   (`FORCE_COLOR`, `set_color(True)`); Rich rendering stays on real TTYs.
@@ -50,6 +59,32 @@ Newest entries on top, within each tool.
 ---
 
 ## aikit
+
+### 1.9.0 — 2026-06-30
+- **New `aikit gateway` command group** — wrap every OpenAI-compatible tool/SDK to
+  route through a single LiteLLM-style gateway with one virtual key, and unwrap again
+  leaving the machine **pristine** (idempotent both directions):
+  - `gateway on` — discover models, write a managed shell env block (zsh/bash/fish)
+    between aikit-owned markers, and record a `~/.aikit/gateway/state.json` manifest.
+    Confirms before applying (`--yes` to skip); `--dry-run` previews and writes nothing;
+    `--only-discovered` restricts to providers backing visible models; `--shell` override.
+  - `gateway off` — remove the env block, restore the rc file pristine, clear the
+    manifest. Friendly no-op (exit 0) when nothing is active. `--dry-run`.
+  - `gateway status` — active/inactive, gateway URL, **masked** key, model count,
+    shell + rc path, and drift detection (managed block hand-edited or removed).
+  - `gateway models` — read-only listing of the models the key can see.
+  - `aikit doctor` gains a **Gateway** section (configured? reachable? active?).
+- **Table-driven provider registry** — all 65 LiteLLM providers ship as data
+  (`GATEWAY_PROVIDERS`: prefix, key/base env vars, route, detection) plus
+  `OPENAI_COMPATIBLE_TOOLS`. Routing is data, not per-provider branches. Native
+  per-tool config files are a follow-up (Stage 3).
+- Gateway URL + virtual key persist at `~/.aikit/gateway/config.json` (`0600`,
+  honoring `AIKIT_CONFIG`); the key is masked in all output and never logged.
+- **Safety:** only inference-scoped vars are set — `AWS_ACCESS_KEY_ID`,
+  `GITHUB_TOKEN`, `GOOGLE_APPLICATION_CREDENTIALS`, `HF_TOKEN`, … are left untouched
+  so gateway routing never clobbers your git / cloud / hub auth.
+- Reversible env block built on scriptkit's new `ManagedBlock`; no new dependencies
+  (`requests` already shipped). New doc: `docs/aikit-gateway.md`.
 
 ### 1.8.0 — 2026-06-30
 - Added four new agent registry entries for gateway tooling coverage: **Gemini CLI**

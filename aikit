@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.8.0
+aikit — AI Coding Agent CLI Installer & Manager  v1.9.0
 Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -16,6 +16,7 @@ Usage:
     aikit serve                     Start web dashboard (http://localhost:8765)
     aikit doctor                    Diagnose environment and agents
     aikit config get/set/list       Manage configuration
+    aikit gateway on/off/status     Route AI tools through a LiteLLM gateway
 
 Dependencies:
     pip install rich requests flask readchar
@@ -33,6 +34,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -48,7 +50,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.8.0"
+__version__ = "1.9.0"
 
 import scriptkit as sk
 
@@ -2624,6 +2626,602 @@ def _save_env_var(var, value):
 
 
 # =============================================================================
+# Gateway — route AI tools through a LiteLLM gateway (reversible, idempotent)
+# =============================================================================
+# `aikit gateway` wraps every OpenAI-compatible tool/SDK so it talks to a single
+# LiteLLM-style gateway with one virtual key, and unwraps again leaving the
+# machine pristine. "Support for each provider" ships as *data*: the table below
+# drives env routing for ~60 providers — adding a provider is adding a row, not
+# a branch. Stage 3 layers native per-tool config files on top of this engine.
+#
+# Each row is (id, display, prefix, key_envs, base_envs, route, bins, py):
+#   prefix    — LiteLLM provider prefix used in model names (provider/model)
+#   key_envs  — env vars SDKs read for that provider's API key; all set to the
+#               one virtual key so wherever a tool looks, it finds the gateway key
+#   base_envs — env vars SDKs read to override the API base URL; pointed at the gateway
+#   route     — path appended to the gateway base ("/anthropic" = native pass-through;
+#               "/v1" = the gateway's OpenAI-compatible endpoint)
+#   bins / py — how to detect the tool/SDK locally (PATH binaries / importable modules)
+#
+# SAFETY: key_envs deliberately exclude general-purpose credentials other tooling
+# relies on (AWS_ACCESS_KEY_ID, GITHUB_TOKEN/GH_TOKEN, HF_TOKEN,
+# GOOGLE_APPLICATION_CREDENTIALS, DATABRICKS_TOKEN, …). Only inference-scoped vars
+# (AWS_BEARER_TOKEN_BEDROCK, GITHUB_API_KEY) are set, so routing never clobbers
+# your git / cloud / hub auth.
+
+GATEWAY_PROVIDERS = [
+    # id                  display name             prefix              key_envs                                              base_envs                                        route          bins                  py
+    ("openai",           "OpenAI",                "openai",           ["OPENAI_API_KEY"],                                   ["OPENAI_BASE_URL", "OPENAI_API_BASE"],          "/v1",         ["openai"],           ["openai"]),
+    ("azure",            "Azure OpenAI",          "azure",            ["AZURE_API_KEY", "AZURE_OPENAI_API_KEY"],            ["AZURE_API_BASE", "AZURE_OPENAI_ENDPOINT"],     "/azure",      [],                   ["openai"]),
+    ("azure_ai",         "Azure AI Foundry",      "azure_ai",         ["AZURE_AI_API_KEY"],                                 ["AZURE_AI_API_BASE"],                           "/v1",         [],                   []),
+    ("anthropic",        "Anthropic",             "anthropic",        ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],        ["ANTHROPIC_BASE_URL"],                          "/anthropic",  ["claude"],           ["anthropic"]),
+    ("gemini",           "Google AI Studio",      "gemini",           ["GEMINI_API_KEY", "GOOGLE_API_KEY"],                 ["GEMINI_API_BASE", "GOOGLE_GEMINI_BASE_URL"],   "/gemini",     ["gemini"],           ["google.genai", "google.generativeai"]),
+    ("vertex_ai",        "Google Vertex AI",      "vertex_ai",        ["VERTEXAI_API_KEY"],                                 ["VERTEXAI_API_BASE"],                           "/vertex_ai",  [],                   ["google.cloud.aiplatform"]),
+    ("bedrock",          "AWS Bedrock",           "bedrock",          ["AWS_BEARER_TOKEN_BEDROCK"],                         ["BEDROCK_BASE_URL"],                            "/bedrock",    [],                   ["boto3"]),
+    ("cohere",           "Cohere",                "cohere",           ["COHERE_API_KEY", "CO_API_KEY"],                     ["COHERE_API_BASE", "CO_API_URL"],               "/cohere",     ["cohere"],           ["cohere"]),
+    ("mistral",          "Mistral AI",            "mistral",          ["MISTRAL_API_KEY"],                                  ["MISTRAL_API_BASE"],                            "/v1",         ["mistral"],          ["mistralai"]),
+    ("codestral",        "Codestral",             "codestral",        ["CODESTRAL_API_KEY"],                                ["CODESTRAL_API_BASE"],                          "/v1",         [],                   []),
+    ("groq",             "Groq",                  "groq",             ["GROQ_API_KEY"],                                     ["GROQ_API_BASE"],                               "/v1",         [],                   ["groq"]),
+    ("deepseek",         "DeepSeek",              "deepseek",         ["DEEPSEEK_API_KEY"],                                 ["DEEPSEEK_API_BASE"],                           "/v1",         [],                   []),
+    ("xai",              "xAI (Grok)",            "xai",              ["XAI_API_KEY"],                                      ["XAI_API_BASE"],                                "/v1",         [],                   []),
+    ("openrouter",       "OpenRouter",            "openrouter",       ["OPENROUTER_API_KEY", "OR_API_KEY"],                 ["OPENROUTER_API_BASE"],                         "/v1",         [],                   []),
+    ("perplexity",       "Perplexity",            "perplexity",       ["PERPLEXITYAI_API_KEY"],                             ["PERPLEXITY_API_BASE"],                         "/v1",         [],                   []),
+    ("together_ai",      "Together AI",           "together_ai",      ["TOGETHERAI_API_KEY", "TOGETHER_API_KEY"],           ["TOGETHERAI_API_BASE"],                         "/v1",         [],                   ["together"]),
+    ("fireworks_ai",     "Fireworks AI",          "fireworks_ai",     ["FIREWORKS_AI_API_KEY", "FIREWORKS_API_KEY"],        ["FIREWORKS_AI_API_BASE"],                       "/v1",         ["firectl"],          []),
+    ("deepinfra",        "DeepInfra",             "deepinfra",        ["DEEPINFRA_API_KEY"],                                ["DEEPINFRA_API_BASE"],                          "/v1",         [],                   []),
+    ("cerebras",         "Cerebras",              "cerebras",         ["CEREBRAS_API_KEY"],                                 ["CEREBRAS_API_BASE"],                           "/v1",         [],                   ["cerebras.cloud.sdk"]),
+    ("sambanova",        "SambaNova",             "sambanova",        ["SAMBANOVA_API_KEY"],                                ["SAMBANOVA_API_BASE"],                          "/v1",         [],                   []),
+    ("ai21",             "AI21 Labs",             "ai21",             ["AI21_API_KEY"],                                     ["AI21_API_BASE"],                               "/v1",         [],                   ["ai21"]),
+    ("nvidia_nim",       "NVIDIA NIM",            "nvidia_nim",       ["NVIDIA_NIM_API_KEY", "NVIDIA_API_KEY"],             ["NVIDIA_NIM_API_BASE"],                         "/v1",         [],                   []),
+    ("databricks",       "Databricks",            "databricks",       ["DATABRICKS_API_KEY"],                               ["DATABRICKS_API_BASE"],                         "/v1",         [],                   ["databricks"]),
+    ("anyscale",         "Anyscale",              "anyscale",         ["ANYSCALE_API_KEY"],                                 ["ANYSCALE_API_BASE"],                           "/v1",         [],                   []),
+    ("voyage",           "Voyage AI",             "voyage",           ["VOYAGE_API_KEY"],                                   ["VOYAGE_API_BASE"],                             "/v1",         [],                   ["voyageai"]),
+    ("jina_ai",          "Jina AI",               "jina_ai",          ["JINA_AI_API_KEY"],                                  ["JINA_AI_API_BASE"],                            "/v1",         [],                   []),
+    ("replicate",        "Replicate",             "replicate",        ["REPLICATE_API_KEY", "REPLICATE_API_TOKEN"],         ["REPLICATE_API_BASE"],                          "/v1",         ["replicate"],        ["replicate"]),
+    ("huggingface",      "Hugging Face",          "huggingface",      ["HUGGINGFACE_API_KEY"],                              ["HUGGINGFACE_API_BASE"],                        "/v1",         ["huggingface-cli"],  ["huggingface_hub"]),
+    ("nebius",           "Nebius AI Studio",      "nebius",           ["NEBIUS_API_KEY"],                                   ["NEBIUS_API_BASE"],                             "/v1",         [],                   []),
+    ("novita",           "Novita AI",             "novita",           ["NOVITA_API_KEY"],                                   ["NOVITA_API_BASE"],                             "/v1",         [],                   []),
+    ("moonshot",         "Moonshot AI (Kimi)",    "moonshot",         ["MOONSHOT_API_KEY", "KIMI_API_KEY"],                 ["MOONSHOT_API_BASE"],                           "/v1",         [],                   []),
+    ("volcengine",       "Volcano Engine",        "volcengine",       ["VOLCENGINE_API_KEY"],                               ["VOLCENGINE_API_BASE"],                         "/v1",         [],                   []),
+    ("zai",              "Z.AI (Zhipu / GLM)",    "zai",              ["ZHIPUAI_API_KEY", "ZAI_API_KEY", "GLM_API_KEY"],    ["ZAI_API_BASE", "GLM_BASE_URL"],                "/v1",         [],                   ["zhipuai"]),
+    ("dashscope",        "Alibaba DashScope",     "dashscope",        ["DASHSCOPE_API_KEY"],                                ["DASHSCOPE_API_BASE"],                          "/v1",         [],                   ["dashscope"]),
+    ("minimax",          "MiniMax",               "minimax",          ["MINIMAX_API_KEY"],                                  ["MINIMAX_API_BASE"],                            "/v1",         [],                   []),
+    ("xiaomi_mimo",      "Xiaomi MiMo",           "xiaomi_mimo",      ["XIAOMI_API_KEY"],                                   ["XIAOMI_API_BASE"],                             "/v1",         [],                   []),
+    ("baseten",          "Baseten",               "baseten",          ["BASETEN_API_KEY"],                                  ["BASETEN_API_BASE"],                            "/v1",         ["truss"],            []),
+    ("hyperbolic",       "Hyperbolic",            "hyperbolic",       ["HYPERBOLIC_API_KEY"],                               ["HYPERBOLIC_API_BASE"],                         "/v1",         [],                   []),
+    ("featherless_ai",   "Featherless AI",        "featherless_ai",   ["FEATHERLESS_AI_API_KEY"],                           ["FEATHERLESS_AI_API_BASE"],                     "/v1",         [],                   []),
+    ("friendliai",       "FriendliAI",            "friendliai",       ["FRIENDLIAI_API_KEY", "FRIENDLI_TOKEN"],             ["FRIENDLIAI_API_BASE"],                         "/v1",         [],                   []),
+    ("lambda_ai",        "Lambda AI",             "lambda_ai",        ["LAMBDA_API_KEY"],                                   ["LAMBDA_API_BASE"],                             "/v1",         [],                   []),
+    ("nscale",           "Nscale (EU)",           "nscale",           ["NSCALE_API_KEY"],                                   ["NSCALE_API_BASE"],                             "/v1",         [],                   []),
+    ("inception",        "Inception",             "inception",        ["INCEPTION_API_KEY"],                                ["INCEPTION_API_BASE"],                          "/v1",         [],                   []),
+    ("scaleway",         "Scaleway",              "scaleway",         ["SCALEWAY_API_KEY"],                                 ["SCALEWAY_API_BASE"],                           "/v1",         [],                   []),
+    ("ovhcloud",         "OVHcloud AI",           "ovhcloud",         ["OVHCLOUD_API_KEY"],                                 ["OVHCLOUD_API_BASE"],                           "/v1",         [],                   []),
+    ("sarvam",           "Sarvam AI",             "sarvam",           ["SARVAM_API_KEY"],                                   ["SARVAM_API_BASE"],                             "/v1",         [],                   []),
+    ("github",           "GitHub Models",         "github",           ["GITHUB_API_KEY"],                                   ["GITHUB_API_BASE"],                             "/v1",         [],                   []),
+    ("cloudflare",       "Cloudflare Workers",    "cloudflare",       ["CLOUDFLARE_API_KEY"],                               ["CLOUDFLARE_API_BASE"],                         "/v1",         [],                   []),
+    ("clarifai",         "Clarifai",              "clarifai",         ["CLARIFAI_API_KEY"],                                 ["CLARIFAI_API_BASE"],                           "/v1",         [],                   ["clarifai"]),
+    ("watsonx",          "IBM watsonx",           "watsonx",          ["WATSONX_API_KEY", "WATSONX_APIKEY"],                ["WATSONX_API_BASE", "WATSONX_URL"],             "/v1",         [],                   ["ibm_watsonx_ai"]),
+    ("snowflake",        "Snowflake Cortex",      "snowflake",        ["SNOWFLAKE_JWT"],                                    ["SNOWFLAKE_API_BASE"],                          "/v1",         [],                   []),
+    ("gradient_ai",      "DigitalOcean Gradient", "gradient_ai",      ["GRADIENT_AI_API_KEY"],                              ["GRADIENT_AI_API_BASE"],                        "/v1",         [],                   []),
+    ("vercel_ai_gateway", "Vercel AI Gateway",    "vercel_ai_gateway", ["VERCEL_AI_GATEWAY_API_KEY", "AI_GATEWAY_API_KEY"], ["VERCEL_AI_GATEWAY_API_BASE"],                 "/v1",         [],                   []),
+    ("aiml",             "AI/ML API",             "aiml",             ["AIML_API_KEY"],                                     ["AIML_API_BASE"],                               "/v1",         [],                   []),
+    ("gmi",              "GMI Cloud",             "gmi",              ["GMI_API_KEY"],                                      ["GMI_API_BASE"],                                "/v1",         [],                   []),
+    ("galadriel",        "Galadriel",             "galadriel",        ["GALADRIEL_API_KEY"],                                ["GALADRIEL_API_BASE"],                          "/v1",         [],                   []),
+    ("meta_llama",       "Meta Llama API",        "meta_llama",       ["LLAMA_API_KEY"],                                    ["LLAMA_API_BASE"],                              "/v1",         [],                   []),
+    ("nlp_cloud",        "NLP Cloud",             "nlp_cloud",        ["NLP_CLOUD_API_KEY"],                                ["NLP_CLOUD_API_BASE"],                          "/v1",         [],                   []),
+    ("aleph_alpha",      "Aleph Alpha",           "aleph_alpha",      ["ALEPHALPHA_API_KEY", "ALEPH_ALPHA_API_KEY"],        ["ALEPHALPHA_API_BASE"],                         "/v1",         [],                   []),
+    ("predibase",        "Predibase",             "predibase",        ["PREDIBASE_API_KEY"],                                ["PREDIBASE_API_BASE"],                          "/v1",         [],                   []),
+    ("v0",               "Vercel v0",             "v0",               ["V0_API_KEY"],                                       ["V0_API_BASE"],                                 "/v1",         [],                   []),
+    ("morph",            "Morph",                 "morph",            ["MORPH_API_KEY"],                                    ["MORPH_API_BASE"],                              "/v1",         [],                   []),
+    ("vllm",             "vLLM (self-hosted)",    "hosted_vllm",      ["HOSTED_VLLM_API_KEY"],                              ["HOSTED_VLLM_API_BASE"],                        "/vllm",       ["vllm"],             ["vllm"]),
+    ("lm_studio",        "LM Studio (local)",     "lm_studio",        ["LM_STUDIO_API_KEY"],                                ["LM_STUDIO_API_BASE"],                          "/v1",         ["lms"],              []),
+    ("ollama",           "Ollama (local)",        "ollama",           [],                                                   ["OLLAMA_API_BASE"],                             "/v1",         ["ollama"],           ["ollama"]),
+]
+
+# Tools that aren't tied to one provider but speak the OpenAI-compatible API and
+# therefore just need OPENAI_BASE_URL + OPENAI_API_KEY pointed at the gateway.
+OPENAI_COMPATIBLE_TOOLS = [
+    # id              bins           py
+    ("aider",        ["aider"],     ["aider"]),
+    ("llm",          ["llm"],       ["llm"]),
+    ("opencode",     ["opencode"],  []),
+    ("pi",           ["pi"],        []),
+    ("hermes-agent", ["hermes"],    []),
+    ("codex",        ["codex"],     []),
+    ("crush",        ["crush"],     []),
+    ("goose",        ["goose"],     []),
+    ("continue",     ["cn"],        []),
+    ("cursor",       ["cursor"],    []),
+    ("sgpt",         ["sgpt"],      ["shell_gpt"]),
+    ("chatblade",    ["chatblade"], []),
+    ("mods",         ["mods"],      []),
+    ("langchain",    [],            ["langchain", "langchain_openai"]),
+    ("llamaindex",   [],            ["llama_index"]),
+    ("litellm",      ["litellm"],   ["litellm"]),
+]
+
+# Universal OpenAI-compatible vars set for every activation (provider-independent).
+GATEWAY_UNIVERSAL_KEY_VARS = ("OPENAI_API_KEY", "LITELLM_PROXY_API_KEY")
+
+GATEWAY_DIR = CONFIG_DIR / "gateway"
+GATEWAY_CONFIG_FILE = GATEWAY_DIR / "config.json"   # credential store: base_url + virtual key
+GATEWAY_STATE_FILE = GATEWAY_DIR / "state.json"     # manifest: what `on` changed
+GATEWAY_RC_BACKUP_SUFFIX = ".aikit-gateway.bak"
+
+# aikit-owned markers. The body header is constant (no timestamp) so re-running
+# `on` with the same args produces a byte-identical block — true idempotency.
+GATEWAY_BLOCK = sk.ManagedBlock(
+    "# >>> aikit gateway (managed — run 'aikit gateway off' to remove) >>>",
+    "# <<< aikit gateway <<<",
+)
+_GATEWAY_BODY_HEADER = "# Managed by aikit — do not edit; run 'aikit gateway off' to remove."
+
+
+# --- credential config (url + virtual key), stored 0600 --------------------
+def _gateway_config():
+    # No env_prefix: the virtual key must never be injected from AIKIT_* env.
+    return sk.Config(GATEWAY_CONFIG_FILE)
+
+
+def load_gateway_config():
+    """Return the saved gateway credentials ({} when unconfigured)."""
+    return _gateway_config().load()
+
+
+def save_gateway_config(base_url, key):
+    """Persist gateway URL + virtual key at 0600 (sk.Config.save chmods 0600)."""
+    _gateway_config().save({"base_url": base_url, "key": key})
+
+
+def _mask_secret(value):
+    """Mask a secret for display — only a short prefix survives, never the body."""
+    if not value:
+        return ""
+    return (value[:5] + "…") if len(value) > 8 else "***"
+
+
+def _normalize_gateway_url(url):
+    """Trim, default to https://, and drop any trailing slash."""
+    url = (url or "").strip().rstrip("/")
+    if url and not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
+
+
+# --- model discovery client ------------------------------------------------
+def _gateway_get_json(url, key, timeout=20):
+    """GET ``url`` with gateway auth headers; return parsed JSON.
+
+    Raises :class:`AikitError` with a clean message for an unreachable host, a
+    rejected key (401/403), a non-2xx status, or a non-JSON body.
+    """
+    import requests
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "x-api-key": key,
+        "Accept": "application/json",
+        "User-Agent": f"aikit/{__version__}",
+    }
+    try:
+        resp = requests.get(url, headers=headers, timeout=timeout)
+    except requests.exceptions.RequestException as e:
+        raise AikitError(f"could not reach gateway at {url} — {e}")
+    if resp.status_code in (401, 403):
+        raise AikitError(
+            f"gateway rejected the key (HTTP {resp.status_code}) at {url} — check your virtual key"
+        )
+    if not resp.ok:
+        raise AikitError(f"gateway returned HTTP {resp.status_code} on {url}")
+    try:
+        return resp.json()
+    except ValueError:
+        raise AikitError(f"gateway returned a non-JSON response from {url}")
+
+
+def parse_models_list(data):
+    """Parse an OpenAI-compatible ``/v1/models`` payload → (models, detail)."""
+    models, detail = [], {}
+    for m in (data or {}).get("data", []) if isinstance(data, dict) else []:
+        mid = m.get("id")
+        if mid:
+            models.append(mid)
+            detail.setdefault(mid, {})
+    return models, detail
+
+
+def merge_model_info(info, models, detail):
+    """Fold richer ``/model/info`` metadata (provider, context) into detail."""
+    if isinstance(info, list):
+        items = info
+    elif isinstance(info, dict):
+        items = info.get("data", [])
+    else:
+        items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        mid = item.get("model_name") or item.get("id")
+        if not mid:
+            continue
+        li = item.get("litellm_params", {}) or {}
+        mi = item.get("model_info", {}) or {}
+        model_field = li.get("model", "") or ""
+        provider = li.get("custom_llm_provider") or (
+            model_field.split("/")[0] if "/" in model_field else None
+        )
+        detail[mid] = {
+            "provider": provider,
+            "max_tokens": mi.get("max_tokens") or mi.get("max_input_tokens"),
+        }
+        if mid not in models:
+            models.append(mid)
+
+
+def discover_models(base_url, key, *, getter=_gateway_get_json):
+    """Ask the gateway which models this key can see.
+
+    ``/v1/models`` is required (any valid key); ``/model/info`` is privileged and
+    its failure is ignored. Returns ``(sorted_model_ids, detail)``. ``getter`` is
+    injectable so tests can supply canned JSON without real network.
+    """
+    base = base_url.rstrip("/")
+    data = getter(f"{base}/v1/models", key)
+    models, detail = parse_models_list(data)
+    try:
+        info = getter(f"{base}/model/info", key)
+    except AikitError:
+        info = None
+    if info is not None:
+        merge_model_info(info, models, detail)
+    return sorted(set(models)), detail
+
+
+def providers_in_use(models, detail):
+    """Best-effort set of provider prefixes that actually back the listed models."""
+    seen = set()
+    known = {p[2] for p in GATEWAY_PROVIDERS}
+    for mid in models:
+        prov = (detail.get(mid) or {}).get("provider")
+        if prov and prov in known:
+            seen.add(prov)
+        elif "/" in mid and mid.split("/")[0] in known:
+            seen.add(mid.split("/")[0])
+    return seen
+
+
+# --- shell detection + env block -------------------------------------------
+def detect_shell(explicit=None):
+    """Return (shell_name, rc_path), mirroring the reference script's logic."""
+    name = explicit or Path(os.environ.get("SHELL", "/bin/bash")).name
+    home = Path.home()
+    if name == "zsh":
+        rc = home / ".zshrc"
+    elif name == "fish":
+        rc = home / ".config" / "fish" / "config.fish"
+    elif name == "bash":
+        # macOS login shells read ~/.bash_profile; prefer it if it exists.
+        bp = home / ".bash_profile"
+        rc = bp if bp.exists() else home / ".bashrc"
+    else:
+        rc = home / f".{name}rc"
+    return name, rc
+
+
+def build_env_pairs(base_url, key, only_providers=None):
+    """Ordered, de-duped (VAR, VALUE) env pairs routing tools through the gateway.
+
+    A universal OpenAI-compatible block first, then per-provider key + base-URL
+    overrides. ``only_providers`` (a set of prefixes) restricts the per-provider
+    vars; ``None`` means all providers.
+    """
+    base = base_url.rstrip("/")
+    pairs = [
+        ("OPENAI_API_KEY", key),
+        ("OPENAI_BASE_URL", f"{base}/v1"),
+        ("OPENAI_API_BASE", f"{base}/v1"),
+        ("LITELLM_PROXY_API_BASE", base),
+        ("LITELLM_PROXY_API_KEY", key),
+    ]
+    for pid, name, prefix, key_envs, base_envs, route, bins, pys in GATEWAY_PROVIDERS:
+        if pid == "openai":
+            continue  # already covered by the universal block
+        if only_providers is not None and prefix not in only_providers:
+            continue
+        target = f"{base}{route}"
+        for ke in key_envs:
+            pairs.append((ke, key))
+        for be in base_envs:
+            pairs.append((be, target))
+
+    seen, out = set(), []
+    for k, v in pairs:
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append((k, v))
+    return out
+
+
+def render_env_block_body(shell, pairs):
+    """Render the env-block body (no markers, no timestamp → deterministic)."""
+    lines = [_GATEWAY_BODY_HEADER]
+    if shell == "fish":
+        lines += [f'set -gx {k} "{v}"' for k, v in pairs]
+    else:
+        lines += [f'export {k}="{v}"' for k, v in pairs]
+    return "\n".join(lines)
+
+
+def _redact_block(text, key):
+    """Replace every occurrence of the secret with its mask for safe display."""
+    return text.replace(key, _mask_secret(key)) if key else text
+
+
+# --- state manifest --------------------------------------------------------
+def _utc_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _sha256(text):
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def read_manifest(path=None):
+    """Read the gateway state manifest ({} when absent or unreadable)."""
+    path = Path(path or GATEWAY_STATE_FILE)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def write_manifest(data, path=None):
+    """Write the manifest at 0600."""
+    path = Path(path or GATEWAY_STATE_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+def clear_manifest(path=None):
+    """Delete the manifest (idempotent — missing file is fine)."""
+    path = Path(path or GATEWAY_STATE_FILE)
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def build_manifest(base_url, shell, rc, block, *, model_count, only_discovered):
+    """Assemble the manifest describing what `on` changed (no secrets)."""
+    rc = Path(rc)
+    return {
+        "active": True,
+        "gateway_url": base_url,
+        "applied_at": _utc_now(),
+        "shell": shell,
+        "rc_path": str(rc),
+        "markers": {"begin": GATEWAY_BLOCK.begin, "end": GATEWAY_BLOCK.end},
+        "backup_path": str(rc.with_name(rc.name + GATEWAY_RC_BACKUP_SUFFIX)),
+        "block_sha256": _sha256(block),
+        "model_count": model_count,
+        "only_discovered": bool(only_discovered),
+        "config_files": [],  # Stage 3 slot: native per-tool config files written by `on`
+    }
+
+
+def _undo_config_file(entry):
+    """Reverse one manifest config-file entry (Stage 3 populates the list).
+
+    Deletes a file aikit created and/or restores one it backed up — keyed purely
+    by the manifest so `off` removes exactly what `on` wrote.
+    """
+    try:
+        path = Path(entry["path"])
+    except (KeyError, TypeError):
+        return
+    if entry.get("created_by_aikit"):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    backup = entry.get("backup")
+    if backup and Path(backup).exists():
+        try:
+            shutil.copy2(backup, path)
+        except OSError:
+            pass
+
+
+def _resolve_gateway_credentials(url, key, *, prompt_missing=True):
+    """Resolve (url, key) from flags → saved config → prompt. Key prompt is hidden."""
+    cfg = load_gateway_config()
+    url = _normalize_gateway_url(url or cfg.get("base_url"))
+    key = key or cfg.get("key")
+    if prompt_missing and not url:
+        url = _normalize_gateway_url(_prompt("Gateway base URL (e.g. https://gw.example.com)"))
+    if prompt_missing and not key:
+        import getpass
+
+        key = getpass.getpass("  Virtual key (input hidden): ").strip()
+    if not url or not key:
+        raise AikitError(
+            "gateway URL and virtual key are required — pass --url/--key or run 'aikit gateway on'."
+        )
+    return url, key
+
+
+# --- commands --------------------------------------------------------------
+def do_gateway_on(url=None, key=None, *, shell=None, only_discovered=False,
+                  yes=False, dry_run=False):
+    """Discover models → render the managed env block → write it + the manifest."""
+    url, key = _resolve_gateway_credentials(url, key)
+
+    # Validate url+key and learn what the key can see (also used for --only-discovered).
+    models, detail = discover_models(url, key)
+    only = providers_in_use(models, detail) if only_discovered else None
+
+    shell_name, rc = detect_shell(shell)
+    pairs = build_env_pairs(url, key, only_providers=only)
+    body = render_env_block_body(shell_name, pairs)
+    block = GATEWAY_BLOCK.render(body)
+
+    print_info(f"Gateway: {url}")
+    print_info(f"Models visible to this key: {len(models)}")
+    if only_discovered:
+        targets = ", ".join(sorted(only)) or "(none detected)"
+        print_info(f"Targeting providers in use: {targets}")
+    else:
+        print_info(f"Targeting all {len(GATEWAY_PROVIDERS)} providers at the env layer")
+    sk.kv("Shell", shell_name)
+    sk.kv("rc file", str(rc))
+    print_info(f"{len(pairs)} environment variable(s) in the managed block")
+
+    if dry_run:
+        print_info("Dry run — nothing will be written. Managed block preview:")
+        for line in _redact_block(block, key).splitlines():
+            sk.detail("    " + line)
+        return
+
+    if not yes and not sk.confirm(f"Apply the managed gateway block to {rc}?", default=True):
+        print_warning("Aborted — nothing written.")
+        return
+
+    action = GATEWAY_BLOCK.apply(rc, body, backup_suffix=GATEWAY_RC_BACKUP_SUFFIX)
+    save_gateway_config(url, key)
+    write_manifest(build_manifest(
+        url, shell_name, rc, block,
+        model_count=len(models), only_discovered=only_discovered,
+    ))
+    verb = "updated" if action == "update" else "enabled"
+    print_success(f"Gateway {verb} — {len(pairs)} vars route through {url}")
+    print_info(f"Reload your shell to pick up the changes:  source {rc}")
+
+
+def do_gateway_off(*, shell=None, dry_run=False):
+    """Read the manifest → remove the env block → restore rc → clear the manifest."""
+    manifest = read_manifest()
+    if not manifest or not manifest.get("active"):
+        print_info("Gateway is not active — nothing to undo.")
+        return
+
+    rc = Path(manifest.get("rc_path") or detect_shell(shell)[1])
+    markers = manifest.get("markers") or {}
+    block_mgr = sk.ManagedBlock(
+        markers.get("begin", GATEWAY_BLOCK.begin),
+        markers.get("end", GATEWAY_BLOCK.end),
+    )
+    present = rc.exists() and block_mgr.present_in(rc.read_text())
+
+    if dry_run:
+        where = f"the managed block from {rc}" if present else f"the manifest (no block found in {rc})"
+        print_info(f"Dry run — would remove {where} and clear gateway state.")
+        return
+
+    for entry in manifest.get("config_files", []):
+        _undo_config_file(entry)
+    removed = block_mgr.clear(rc, backup_suffix=GATEWAY_RC_BACKUP_SUFFIX, remove_backup=True)
+    clear_manifest()
+
+    if removed:
+        print_success(f"Gateway disabled — managed block removed from {rc}; rc restored.")
+    else:
+        print_success("Gateway disabled — state cleared (managed block was already gone).")
+    print_info("Open a new shell (or unset the vars) to drop the gateway env.")
+
+
+def do_gateway_status():
+    """Show active/inactive, URL, masked key, model count, shell/rc, and drift."""
+    manifest = read_manifest()
+    cfg = load_gateway_config()
+
+    if not manifest or not manifest.get("active"):
+        print_info("Gateway: inactive")
+        if cfg.get("base_url"):
+            sk.kv("Configured URL", cfg.get("base_url"))
+            sk.kv("Key", _mask_secret(cfg.get("key", "")))
+        print_info("Run 'aikit gateway on' to route tools through the gateway.")
+        return
+
+    url = manifest.get("gateway_url") or cfg.get("base_url", "")
+    rc = Path(manifest.get("rc_path", ""))
+    print_success("Gateway: active")
+    sk.kv("URL", url)
+    sk.kv("Key", _mask_secret(cfg.get("key", "")))
+    sk.kv("Models", manifest.get("model_count", "?"))
+    sk.kv("Shell", manifest.get("shell", "?"))
+    sk.kv("rc file", str(rc))
+    sk.kv("Applied", manifest.get("applied_at", "?"))
+
+    # Drift detection — has the managed block been hand-edited or removed?
+    markers = manifest.get("markers") or {}
+    block_mgr = sk.ManagedBlock(
+        markers.get("begin", GATEWAY_BLOCK.begin),
+        markers.get("end", GATEWAY_BLOCK.end),
+    )
+    if not str(rc) or not rc.exists():
+        print_warning(f"Drift: rc file {rc} not found.")
+        return
+    current = block_mgr.block_in(rc.read_text())
+    if current is None:
+        print_warning(
+            "Drift: managed block missing from rc (removed by hand?). "
+            "Run 'aikit gateway off' to clear state, or 'on' to reapply."
+        )
+    elif manifest.get("block_sha256") and _sha256(current) != manifest["block_sha256"]:
+        print_warning(
+            "Drift: managed block was edited by hand. Run 'aikit gateway on' to restore it."
+        )
+    else:
+        print_info("Managed block matches the manifest (no drift).")
+
+
+def do_gateway_models(url=None, key=None):
+    """Read-only listing of the models this key can see (provider tag when known)."""
+    url, key = _resolve_gateway_credentials(url, key)
+    models, detail = discover_models(url, key)
+    if not models:
+        print_info("No models visible to this key.")
+        return
+    rows = [[m, (detail.get(m) or {}).get("provider") or ""] for m in models]
+    sk.table([{"name": "Model"}, {"name": "Provider"}], rows,
+             title=f"{len(models)} model(s) via {url}")
+
+
+def _gateway_doctor_checks():
+    """Checks for the Gateway section of `aikit doctor` (configured / reachable / active)."""
+    cfg = load_gateway_config()
+    manifest = read_manifest()
+    checks = []
+    if cfg.get("base_url") and cfg.get("key"):
+        checks.append(sk.Check.ok("Configured", cfg.get("base_url")))
+        try:
+            models, _ = discover_models(
+                cfg["base_url"], cfg["key"],
+                getter=lambda u, k: _gateway_get_json(u, k, timeout=5),
+            )
+            checks.append(sk.Check.ok("Reachable", f"{len(models)} model(s) via /v1/models"))
+        except AikitError as e:
+            checks.append(sk.Check.warn("Reachable", "no", str(e)))
+    else:
+        checks.append(sk.Check.warn("Configured", "no", "run 'aikit gateway on'"))
+    if manifest.get("active"):
+        checks.append(sk.Check.ok("Active", manifest.get("gateway_url", "")))
+    else:
+        checks.append(sk.Check.warn("Active", "inactive", "run 'aikit gateway on' to activate"))
+    return checks
+
+
+# =============================================================================
 # Doctor
 # =============================================================================
 
@@ -2688,7 +3286,8 @@ def do_doctor() -> int:
 
     return sk.doctor(
         "aikit", __version__, TAGLINE, ICON,
-        sections={"Prerequisites": prereq, "Agents": agents},
+        sections={"Prerequisites": prereq, "Agents": agents,
+                  "Gateway": _gateway_doctor_checks()},
         tips=tips,
     )
 
@@ -3253,6 +3852,29 @@ def build_parser():
     config_set.add_argument("config_key", metavar="key", help="Dot-path key")
     config_set.add_argument("value", help="Value to set")
 
+    # gateway
+    gw_p = sub.add_parser("gateway", help="Route AI tools through a LiteLLM gateway")
+    gw_sub = gw_p.add_subparsers(dest="gateway_action")
+
+    gw_on = gw_sub.add_parser("on", help="Wrap tools: write the managed env block + manifest")
+    gw_on.add_argument("-u", "--url", help="Gateway base URL (e.g. https://gw.example.com)")
+    gw_on.add_argument("-k", "--key", help="Virtual key (sk-…). Hidden prompt if omitted.")
+    gw_on.add_argument("--shell", choices=["zsh", "bash", "fish"], help="Override shell detection")
+    gw_on.add_argument("--only-discovered", action="store_true",
+                       help="Only set vars for providers actually backing discovered models")
+    gw_on.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
+    gw_on.add_argument("--dry-run", action="store_true", help="Preview the block; write nothing")
+
+    gw_off = gw_sub.add_parser("off", help="Unwrap: remove the env block, restore rc pristine")
+    gw_off.add_argument("--shell", choices=["zsh", "bash", "fish"], help="Override shell detection")
+    gw_off.add_argument("--dry-run", action="store_true", help="Preview the removal; write nothing")
+
+    gw_sub.add_parser("status", help="Show gateway state, masked key, and drift")
+
+    gw_models = gw_sub.add_parser("models", help="List models the key can see (read-only)")
+    gw_models.add_argument("-u", "--url", help="Gateway base URL override")
+    gw_models.add_argument("-k", "--key", help="Virtual key override")
+
     # -v/--version is added by sk.make_parser
     return parser
 
@@ -3319,10 +3941,24 @@ def cmd_config(args):
         do_config_list()
 
 
+def cmd_gateway(args):
+    action = getattr(args, "gateway_action", None)
+    if action == "on":
+        do_gateway_on(args.url, args.key, shell=args.shell,
+                      only_discovered=args.only_discovered, yes=args.yes, dry_run=args.dry_run)
+    elif action == "off":
+        do_gateway_off(shell=args.shell, dry_run=args.dry_run)
+    elif action == "models":
+        do_gateway_models(args.url, args.key)
+    else:  # "status" or no sub-action — the at-a-glance default
+        do_gateway_status()
+
+
 HANDLERS = {
     "install": cmd_install, "update": cmd_update, "uninstall": cmd_uninstall,
     "list": cmd_list, "auth": cmd_auth, "serve": cmd_serve,
     "doctor": cmd_doctor, "setup": cmd_setup, "config": cmd_config,
+    "gateway": cmd_gateway,
 }
 
 # Bare `aikit` shows the agent table — the at-a-glance default.

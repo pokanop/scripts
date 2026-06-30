@@ -930,6 +930,36 @@ def test_aikit_discover_does_not_add_never_installed_agents(tool_loader, monkeyp
     assert saved.get("agents") == {}
 
 
+# --- aikit gateway ---------------------------------------------------------
+def test_aikit_gateway_registry_table_driven(tool_loader):
+    m = tool_loader("aikit")
+    ids = [p[0] for p in m.GATEWAY_PROVIDERS]
+    assert len(ids) == 65 and len(ids) == len(set(ids))
+    routes = {p[0]: p[5] for p in m.GATEWAY_PROVIDERS}
+    assert routes["anthropic"] == "/anthropic"   # native pass-through
+    assert routes["openai"] == "/v1"             # OpenAI-compatible endpoint
+
+
+def test_aikit_gateway_env_pairs_universal_and_safe(tool_loader):
+    m = tool_loader("aikit")
+    d = dict(m.build_env_pairs("https://gw.example.com/", "sk-x"))
+    assert d["OPENAI_BASE_URL"] == "https://gw.example.com/v1"
+    assert d["ANTHROPIC_BASE_URL"] == "https://gw.example.com/anthropic"
+    # general-purpose credentials are never set (safety invariant)
+    assert "AWS_ACCESS_KEY_ID" not in d and "GITHUB_TOKEN" not in d
+
+
+def test_aikit_gateway_help_runs():
+    """`aikit gateway --help` exits 0 and lists the subcommands."""
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "aikit"), "gateway", "--help"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    for sub in ("on", "off", "status", "models"):
+        assert sub in proc.stdout
+
+
 # --- medcat ----------------------------------------------------------------
 def test_medcat_format_structure(tool_loader):
     m = tool_loader("medcat")
