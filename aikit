@@ -672,7 +672,7 @@ AGENTS = {
             "Windows": npm_install_cmd("@google/gemini-cli"),
         },
         "version_cmd": "gemini --version",
-        "update_cmd": "gemini update",
+        "update_cmd": npm_install_cmd("@google/gemini-cli@latest"),
         "path_markers": ["@google/gemini-cli", "/.gemini/"],
         "version_check": {"type": "npm", "package": "@google/gemini-cli"},
         "uninstall_cmd": None,

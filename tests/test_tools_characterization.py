@@ -420,7 +420,7 @@ def test_aikit_gateway_cli_registry_entries(tool_loader):
     m = tool_loader("aikit")
     gemini = m.AGENTS["gemini"]
     assert gemini["bin"] == "gemini"
-    assert gemini["update_cmd"] == "gemini update"
+    assert "@google/gemini-cli@latest" in gemini["update_cmd"]
     assert gemini["version_check"]["package"] == "@google/gemini-cli"
     assert "GEMINI_API_KEY" in gemini["auth_env_vars"]
     assert "--prefix" in gemini["install"]["Linux"]
@@ -443,7 +443,8 @@ def test_aikit_gateway_cli_registry_entries(tool_loader):
 def test_aikit_resolve_update_cmd_gemini(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "gemini")
-    assert m.resolve_update_cmd("gemini") == "gemini update"
+    cmd = m.resolve_update_cmd("gemini")
+    assert cmd and "@google/gemini-cli@latest" in cmd
 
 
 def test_aikit_resolve_update_cmd_continue(tool_loader, monkeypatch):

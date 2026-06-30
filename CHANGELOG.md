@@ -55,7 +55,7 @@ Newest entries on top, within each tool.
 - Added four new agent registry entries for gateway tooling coverage: **Gemini CLI**
   (`@google/gemini-cli`), **LLM** (Simon Willison's `llm`), **Continue CLI** (`cn`),
   and **Shell GPT** (`sgpt`). Evaluated **mods** (Charm) and **chatblade** but skipped
-  both — repos are archived / no longer maintained.
+  both — `mods` archived; `chatblade` stale/unmaintained.
 - Agent count updated to 25 across docs and README.
 
 ### 1.7.2 — 2026-06-29
