@@ -108,6 +108,18 @@ cfg.save(data)                    # pretty JSON, chmod 0600
 `coerce_env`/`coerce=True` turns scalar strings (`"true"`, `"9000"`, `"3.5"`)
 into their natural types — handy for env-var overrides.
 
+### Managed blocks (`scriptkit.blocks`)
+```python
+block = sk.ManagedBlock("# >>> mytool >>>", "# <<< mytool <<<")
+block.apply(rc_path, 'export FOO="bar"')   # insert/replace; .bak'd once before first write
+block.clear(rc_path)                        # remove it, leaving the rest of the file intact
+```
+A reversible, idempotent managed-text-region primitive: write the same body twice
+and it's a no-op; `clear` is the exact inverse of `apply`. Pure helpers
+(`upsert_block` / `remove_block` / `find_block` / `has_block` / `render_block`) do
+the splicing if you'd rather operate on strings. Built for shell rc env blocks and
+any managed config stanza a tool must add and later take back out cleanly.
+
 ### Subprocess (`scriptkit.proc`)
 ```python
 res = sk.run(["git", "rev-parse", "HEAD"])   # Result(code, out, err); res.ok / bool(res)

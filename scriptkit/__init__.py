@@ -20,8 +20,16 @@ Typical use::
 
 from __future__ import annotations
 
-from . import app, config, console, proc, progress, style, tables, text
+from . import app, blocks, config, console, proc, progress, style, tables, text
 from .app import banner, examples_block, make_parser
+from .blocks import (
+    ManagedBlock,
+    find_block,
+    has_block,
+    remove_block,
+    render_block,
+    upsert_block,
+)
 from .cli import (
     EXIT_ERROR,
     EXIT_INTERRUPT,
@@ -61,13 +69,16 @@ from .text import (
     truncate,
 )
 
-__version__ = "1.1.3"
+__version__ = "1.2.0"
 
 __all__ = [
     # submodules
-    "app", "config", "console", "proc", "progress", "style", "tables", "text",
+    "app", "blocks", "config", "console", "proc", "progress", "style", "tables", "text",
     # app / identity
     "banner", "examples_block", "make_parser",
+    # blocks (managed, reversible text regions)
+    "ManagedBlock", "render_block", "find_block", "has_block",
+    "upsert_block", "remove_block",
     # doctor
     "doctor", "Check", "check_binary", "check_python",
     # style
