@@ -372,7 +372,7 @@ def test_aikit_validate_agent_keys_ok(tool_loader):
 
 def test_aikit_new_agent_registry_entries(tool_loader):
     m = tool_loader("aikit")
-    assert len(m.AGENTS) == 21
+    assert len(m.AGENTS) == 25
     goose = m.AGENTS["goose"]
     assert goose["bin"] == "goose"
     assert goose["update_cmd"] == "goose update"
@@ -414,6 +414,44 @@ def test_aikit_resolve_update_cmd_amp(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "amp")
     assert m.resolve_update_cmd("amp") == "amp update"
+
+
+def test_aikit_gateway_cli_registry_entries(tool_loader):
+    m = tool_loader("aikit")
+    gemini = m.AGENTS["gemini"]
+    assert gemini["bin"] == "gemini"
+    assert "@google/gemini-cli@latest" in gemini["update_cmd"]
+    assert gemini["version_check"]["package"] == "@google/gemini-cli"
+    assert "GEMINI_API_KEY" in gemini["auth_env_vars"]
+    assert "--prefix" in gemini["install"]["Linux"]
+    llm = m.AGENTS["llm"]
+    assert llm["bin"] == "llm"
+    assert llm["version_check"]["package"] == "llm"
+    assert "pip install llm" in llm["install"]["Linux"]
+    assert llm["uninstall_cmd"] == "pip uninstall -y llm"
+    continue_cli = m.AGENTS["continue"]
+    assert continue_cli["bin"] == "cn"
+    assert continue_cli["auth_cmd"] == "cn login"
+    assert continue_cli["version_check"]["package"] == "@continuedev/cli"
+    assert "continuedev/continue" in continue_cli["install"]["Linux"]
+    sgpt = m.AGENTS["sgpt"]
+    assert sgpt["bin"] == "sgpt"
+    assert sgpt["version_check"]["package"] == "shell-gpt"
+    assert "OPENAI_API_KEY" in sgpt["auth_env_vars"]
+
+
+def test_aikit_resolve_update_cmd_gemini(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "gemini")
+    cmd = m.resolve_update_cmd("gemini")
+    assert cmd and "@google/gemini-cli@latest" in cmd
+
+
+def test_aikit_resolve_update_cmd_continue(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "cn")
+    cmd = m.resolve_update_cmd("continue")
+    assert cmd and "@continuedev/cli@latest" in cmd
 
 
 def test_aikit_resolve_agent_bin_npm_global_fallback(tool_loader, monkeypatch, tmp_path):
