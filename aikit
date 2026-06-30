@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.7.2
-Install, update, authenticate, and manage 21 AI coding agent CLIs from one tool.
+aikit — AI Coding Agent CLI Installer & Manager  v1.8.0
+Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.
 
 Architecture:
     Agent registry → platform-aware install → auth multiplexing → web dashboard
@@ -48,7 +48,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.7.2"
+__version__ = "1.8.0"
 
 import scriptkit as sk
 
@@ -176,7 +176,7 @@ def resolve_uninstall_cmd(agent):
 
 
 # =============================================================================
-# Agent Registry — 21 coding agents, platform-aware install commands
+# Agent Registry — 25 coding agents, platform-aware install commands
 # =============================================================================
 
 _CURRENT_PLATFORM = platform.system()  # "Linux", "Darwin", "Windows"
@@ -659,6 +659,93 @@ AGENTS = {
         "auth_note": "Run 'amp login' for browser sign-in (free or pay-as-you-go credits). Or set AMP_API_KEY from ampcode.com/settings for scripts/CI.",
         "requires": ["curl"],
         "tags": ["amp", "sourcegraph", "agentic", "oracle", "mcp"],
+    },
+    "gemini": {
+        "name": "Gemini CLI",
+        "bin": "gemini",
+        "vendor": "Google",
+        "homepage": "https://geminicli.com",
+        "icon": "✨",
+        "install": {
+            "Linux": npm_install_cmd("@google/gemini-cli"),
+            "Darwin": npm_install_cmd("@google/gemini-cli"),
+            "Windows": npm_install_cmd("@google/gemini-cli"),
+        },
+        "version_cmd": "gemini --version",
+        "update_cmd": "gemini update",
+        "path_markers": ["@google/gemini-cli", "/.gemini/"],
+        "version_check": {"type": "npm", "package": "@google/gemini-cli"},
+        "uninstall_cmd": None,
+        "auth_type": "account_or_byok",
+        "auth_env_vars": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        "auth_note": "Run 'gemini' for Google account OAuth, or set GEMINI_API_KEY (AI Studio) / GOOGLE_API_KEY (Vertex AI).",
+        "requires": ["node", "npm"],
+        "tags": ["gemini", "google", "agentic", "mcp", "headless"],
+    },
+    "llm": {
+        "name": "LLM",
+        "bin": "llm",
+        "vendor": "Simon Willison",
+        "homepage": "https://llm.datasette.io",
+        "icon": "🔮",
+        "install": {
+            "Linux": "pip install llm --break-system-packages 2>/dev/null || pip install llm",
+            "Darwin": "pip install llm --break-system-packages 2>/dev/null || pip install llm",
+            "Windows": "pip install llm",
+        },
+        "version_cmd": "llm --version",
+        "update_cmd": "pip install --upgrade llm --break-system-packages 2>/dev/null || pip install --upgrade llm",
+        "version_check": {"type": "pip", "package": "llm"},
+        "uninstall_cmd": "pip uninstall -y llm",
+        "auth_type": "api_key",
+        "auth_env_vars": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"],
+        "auth_note": "Run 'llm keys set openai' (or provider name) to store keys, or set provider env vars.",
+        "requires": ["python3", "pip"],
+        "tags": ["llm", "datasette", "plugins", "open-source"],
+    },
+    "continue": {
+        "name": "Continue CLI",
+        "bin": "cn",
+        "vendor": "Continue",
+        "homepage": "https://docs.continue.dev/cli",
+        "icon": "▶️",
+        "install": {
+            "Linux": "curl -fsSL https://raw.githubusercontent.com/continuedev/continue/main/extensions/cli/scripts/install.sh | bash",
+            "Darwin": "curl -fsSL https://raw.githubusercontent.com/continuedev/continue/main/extensions/cli/scripts/install.sh | bash",
+            "Windows": 'powershell -c "irm https://raw.githubusercontent.com/continuedev/continue/main/extensions/cli/scripts/install.ps1 | iex"',
+        },
+        "version_cmd": "cn --version",
+        "update_cmd": npm_install_cmd("@continuedev/cli@latest"),
+        "path_markers": ["@continuedev/cli", "/.continue/"],
+        "version_check": {"type": "npm", "package": "@continuedev/cli"},
+        "uninstall_cmd": None,
+        "auth_type": "oauth_browser",
+        "auth_env_vars": ["ANTHROPIC_API_KEY"],
+        "auth_cmd": "cn login",
+        "auth_note": "Run 'cn login' for Continue account OAuth, or set ANTHROPIC_API_KEY for BYOK.",
+        "requires": ["curl"],
+        "tags": ["continue", "cn", "agentic", "headless", "mcp"],
+    },
+    "sgpt": {
+        "name": "Shell GPT",
+        "bin": "sgpt",
+        "vendor": "TheR1D",
+        "homepage": "https://github.com/TheR1D/shell_gpt",
+        "icon": "🐚",
+        "install": {
+            "Linux": "pip install shell-gpt --break-system-packages 2>/dev/null || pip install shell-gpt",
+            "Darwin": "pip install shell-gpt --break-system-packages 2>/dev/null || pip install shell-gpt",
+            "Windows": "pip install shell-gpt",
+        },
+        "version_cmd": "sgpt --version",
+        "update_cmd": "pip install --upgrade shell-gpt --break-system-packages 2>/dev/null || pip install --upgrade shell-gpt",
+        "version_check": {"type": "pip", "package": "shell-gpt"},
+        "uninstall_cmd": "pip uninstall -y shell-gpt",
+        "auth_type": "api_key",
+        "auth_env_vars": ["OPENAI_API_KEY"],
+        "auth_note": "Run 'sgpt' once to store your API key in ~/.config/shell_gpt/.sgptrc, or set OPENAI_API_KEY.",
+        "requires": ["python3", "pip"],
+        "tags": ["sgpt", "shell-gpt", "shell", "open-source"],
     },
 }
 

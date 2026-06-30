@@ -51,6 +51,13 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.8.0 — 2026-06-30
+- Added four new agent registry entries for gateway tooling coverage: **Gemini CLI**
+  (`@google/gemini-cli`), **LLM** (Simon Willison's `llm`), **Continue CLI** (`cn`),
+  and **Shell GPT** (`sgpt`). Evaluated **mods** (Charm) and **chatblade** but skipped
+  both — repos are archived / no longer maintained.
+- Agent count updated to 25 across docs and README.
+
 ### 1.7.2 — 2026-06-29
 - **Kimi Code:** fix install detection — official installer ships the `kimi`
   binary under `~/.kimi-code/bin/` (not `kimi-code`); detect that path before

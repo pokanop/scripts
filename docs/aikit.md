@@ -1,6 +1,6 @@
 # 🤖 aikit — AI Coding Agent CLI Installer & Manager
 
-**Install, update, authenticate, and manage 21 AI coding agent CLIs from one tool.**
+**Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.**
 
 `aikit` · Python 3 · `rich` · `flask` · `requests`
 
@@ -25,7 +25,7 @@ aikit setup
 
 ---
 
-## Agents (21)
+## Agents (25)
 
 | # | Agent | Install | Auth |
 |---|-------|---------|------|
@@ -50,6 +50,10 @@ aikit setup
 | 19 | 🙌 **OpenHands CLI** | `curl` script | First-run LLM settings; `openhands login` for Cloud only |
 | 20 | 💘 **Crush** | `npm` | `crush login` OAuth or provider env vars |
 | 21 | 🔊 **Amp** | `curl` script | `amp login` (browser sign-in) or `AMP_API_KEY` |
+| 22 | ✨ **Gemini CLI** | `npm` | Google OAuth in `gemini`, or `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
+| 23 | 🔮 **LLM** | `pip` | `llm keys set <provider>` or provider env vars |
+| 24 | ▶️ **Continue CLI** | `curl` script | `cn login` (Continue account) or `ANTHROPIC_API_KEY` |
+| 25 | 🐚 **Shell GPT** | `pip` | `sgpt` first-run key prompt or `OPENAI_API_KEY` |
 
 ---
 
@@ -61,7 +65,7 @@ aikit setup
 | `aikit install [agents...]` | Install agents (multi-select picker if none) |
 | `aikit update [agents...]` | Update agents (all installed if none) |
 | `aikit uninstall [agent...]` | Remove agents |
-| `aikit list` | Status table of all 21 agents |
+| `aikit list` | Status table of all 25 agents |
 | `aikit auth [agent]` | Guided authentication setup |
 | `aikit doctor` | Diagnose environment and agent health |
 | `aikit serve` | Start web dashboard |
@@ -79,7 +83,7 @@ Select agents to install
    2. [ ] 🛸 Antigravity
    3. [X] 🖱️ Cursor CLI
   ...
-  Selected: 1/21  cursor
+  Selected: 1/25  cursor
 ```
 
 Press `Space` or enter numbers to toggle. Press `Enter` to confirm. Press `q` to cancel.
@@ -138,7 +142,7 @@ aikit config set settings.web_port 9000  # Set a value
 
 ```
 aikit                          # Single-file Python script (~1,600 lines)
-├── Agent registry             # 21 agents, each with platform-aware install commands
+├── Agent registry             # 25 agents, each with platform-aware install commands
 ├── Subprocess runner          # Install/update/uninstall execution
 ├── Config system              # JSON-based, three-tier loading, env var overrides
 ├── Rich TUI                   # Tables, panels, interactive multi-select picker
