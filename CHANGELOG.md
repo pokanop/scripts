@@ -62,6 +62,16 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.10.1 — 2026-06-30
+- **Fixed:** `aikit gateway off` now removes the saved credential store
+  (`~/.aikit/gateway/config.json`) so no secret survives teardown. The credential store
+  is not manifest-tracked, so previously `off` left it on disk — still holding the
+  plaintext virtual key — and the gateway dir was never pruned. `off` now deletes
+  `config.json` explicitly and prunes `~/.aikit/gateway/` entirely; the single invariant
+  is *after `off`, the gateway dir is gone*. `off --dry-run` discloses the credential
+  removal, and `status` after `off` reports inactive **and** unconfigured. Recall within
+  an active session (`status` / `models` / `doctor` / re-`on`) is unchanged. (POK-63)
+
 ### 1.10.0 — 2026-06-30
 - **Native per-tool gateway config (`aikit gateway on`)** — beyond the env layer,
   `on` now generates each tool's config in its own native schema (populated with the

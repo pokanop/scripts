@@ -103,7 +103,7 @@ setup script) is that it is **idempotent in both directions**:
 | You run | Result |
 |---------|--------|
 | `on` then `on` (same args) | No net change — the managed block is replaced with identical content, the prior run's config files are reversed and rewritten, the manifest is refreshed. |
-| `on` then `off` | The rc file and environment-affecting state return to **exactly** what they were before `on`: the managed block is gone, the backup is consumed, every file aikit wrote (`gateway.env`, `gateway.json`, staged copies, installed configs) is deleted along with any directory aikit created for them, and the manifest is cleared. |
+| `on` then `off` | The rc file and environment-affecting state return to **exactly** what they were before `on`: the managed block is gone, the backup is consumed, every file aikit wrote (`gateway.env`, `gateway.json`, staged copies, installed configs) is deleted along with any directory aikit created for them, the saved credential store (`config.json`) is removed, the manifest is cleared, and `~/.aikit/gateway/` itself is pruned. **After `off`, the gateway dir does not exist.** |
 | `off` with nothing active | Friendly no-op, exit 0. |
 | Interrupted `on` (crash / Ctrl-C mid-write) | `off` still fully cleans up — including the secret-bearing `gateway.env`. |
 
@@ -115,10 +115,13 @@ everything — no orphaned configs, and never an orphaned key file.
 `off` removes **only** aikit's managed block (a precise splice that leaves the rest of
 your rc byte-for-byte intact) and **only** the files aikit itself created (each recorded
 `created_by_aikit` in the manifest) — it never touches a line you added to your rc or a
-tool config you owned. It also prunes the now-empty directories it made (including
-`~/.aikit/gateway/tools/`). The one thing `off` intentionally keeps is
-`~/.aikit/gateway/config.json` (your saved URL + key) so you can `on` again without
-re-entering it.
+tool config you owned. It also removes the saved credential store
+(`~/.aikit/gateway/config.json`, your URL + virtual key) and prunes every directory it
+made, including `~/.aikit/gateway/tools/` and `~/.aikit/gateway/` itself. `off` is an
+explicit teardown, so **no secret — not even the virtual key — survives it**: the single
+auditable invariant is *after `off`, the gateway dir is gone*. Switching away and back is
+`off` then `on <url> <key>` — re-`on` takes `-u`/`-k` again, which is the normal
+activation path.
 
 ---
 
@@ -144,7 +147,9 @@ aikit gateway on -u https://gw.example.com [-k sk-…]
 > needs a reachable gateway and a valid key — it just doesn't write any local files.
 
 The URL and virtual key are saved to `~/.aikit/gateway/config.json` (`0600`), so later
-runs don't need the flags again.
+runs **while the gateway is active** (e.g. `status`, `models`, `doctor`, re-`on`) don't
+need the flags again. `aikit gateway off` removes this file, so the first `on` after an
+`off` takes `-u`/`-k` again.
 
 ### `aikit gateway off`
 
@@ -154,8 +159,10 @@ aikit gateway off [--dry-run] [--shell zsh]
 
 Removes the managed block, restores the rc file, deletes every config file aikit wrote
 (portable files, staged copies, and configs aikit installed) along with any directory it
-created for them, and clears the manifest. A no-op (exit 0) when the gateway isn't
-active.
+created for them, removes the saved credential store (`config.json`), clears the
+manifest, and prunes `~/.aikit/gateway/` entirely — so no secret survives teardown.
+`--dry-run` previews this (including the credential removal) without writing. A no-op
+(exit 0) when the gateway isn't active.
 
 ### `aikit gateway status`
 
@@ -176,6 +183,8 @@ gateway reports it. Handy for sanity-checking a URL + key before `on`.
 
 - The virtual key is persisted at `~/.aikit/gateway/config.json` with `0600`
   permissions, **masked** in `status` / `models` / `doctor`, and never written to logs.
+  `aikit gateway off` **deletes** this file (and prunes the gateway dir), so the key does
+  not survive an explicit teardown.
 - Only **inference-scoped** environment variables are set. General-purpose
   credentials other tooling relies on — `AWS_ACCESS_KEY_ID`, `GITHUB_TOKEN` /
   `GH_TOKEN`, `GOOGLE_APPLICATION_CREDENTIALS`, `HF_TOKEN`, `DATABRICKS_TOKEN`, … —
@@ -199,7 +208,7 @@ whether it's reachable (`/v1/models`), and whether it's currently active.
 
 | Path | Purpose | Removed by `off`? |
 |------|---------|-------------------|
-| `~/.aikit/gateway/config.json` | Gateway URL + virtual key (`0600`). | No — kept so you can `on` again |
+| `~/.aikit/gateway/config.json` | Gateway URL + virtual key (`0600`). | Yes — removed so no secret survives teardown |
 | `~/.aikit/gateway/state.json` | Manifest of what `on` changed (`0600`). | Yes |
 | `~/.aikit/gateway/gateway.env` | Portable, source-able export block (`0600` — holds the key). | Yes |
 | `~/.aikit/gateway/gateway.json` | Machine-readable summary: URL, OpenAI base, providers, models. | Yes |

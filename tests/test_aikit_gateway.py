@@ -285,3 +285,80 @@ def test_gateway_off_dry_run_keeps_block(aikit, isolated_gateway):
     aikit.do_gateway_off(dry_run=True)
     assert rc.read_text() == active                  # dry-run off changed nothing
     assert aikit.read_manifest()["active"] is True
+
+
+# --- credential teardown on `off` (POK-63 / QA defect D1) --------------------
+def _files_under(root):
+    """Every regular file under ``root`` (used to scan the temp HOME tree)."""
+    from pathlib import Path
+    return [p for p in Path(root).rglob("*") if p.is_file()]
+
+
+def _files_containing(root, needle: bytes):
+    """Files under ``root`` whose raw bytes contain ``needle`` (the plaintext key)."""
+    hits = []
+    for p in _files_under(root):
+        try:
+            if needle in p.read_bytes():
+                hits.append(p)
+        except OSError:
+            pass
+    return hits
+
+
+def test_gateway_off_scrubs_credential_store_no_secret_survives(
+    aikit, isolated_gateway, tmp_path, capsys
+):
+    """`off` deletes config.json so no plaintext virtual key survives an explicit teardown.
+
+    This is the regression guard for D1: the credential store is NOT manifest-tracked, so
+    before the fix `off` left ~/.aikit/gateway/config.json (full `sk-…` key) on disk.
+    """
+    rc = isolated_gateway
+    home = tmp_path                                   # the fixture sets HOME → tmp_path
+    key = "sk-regression-supersecret-9876543210"
+
+    aikit.do_gateway_on("https://gw.example.com", key, yes=True)
+    # Sanity — while active the key really is persisted on disk (config.json + env block),
+    # so the post-`off` "zero files" assertion below is meaningful rather than vacuous.
+    assert aikit.GATEWAY_CONFIG_FILE.exists()
+    assert aikit.load_gateway_config()["key"] == key
+    assert _files_containing(home, key.encode())      # key lives somewhere right now
+
+    capsys.readouterr()                               # drop `on` output
+    aikit.do_gateway_off()
+
+    # 1 + 2 — credential store gone, gateway dir fully pruned (no orphaned files).
+    assert not aikit.GATEWAY_CONFIG_FILE.exists()
+    assert not aikit.GATEWAY_DIR.exists()
+    # 3 — the centerpiece: the plaintext key appears in ZERO files anywhere under HOME.
+    survivors = _files_containing(home, key.encode())
+    assert survivors == [], f"plaintext key survived teardown in: {survivors}"
+
+    # 4 — status now reports inactive AND unconfigured (no URL / masked-key line).
+    capsys.readouterr()
+    aikit.do_gateway_status()
+    out = capsys.readouterr().out
+    assert "inactive" in out
+    assert "Configured URL" not in out
+    assert "Key" not in out
+    assert key[:5] not in out                         # not even the masked prefix
+
+    # 5 — a second `off` is a clean no-op (idempotency preserved, no crash).
+    aikit.do_gateway_off()
+    assert not aikit.GATEWAY_DIR.exists()
+
+
+def test_gateway_off_dry_run_discloses_credential_removal(aikit, isolated_gateway, capsys):
+    """`off --dry-run` must say it will also remove the saved credentials (config.json)."""
+    aikit.do_gateway_on("https://gw.example.com", "sk-key-12345678", yes=True)
+    assert aikit.GATEWAY_CONFIG_FILE.exists()
+    capsys.readouterr()                               # drop `on` output
+
+    aikit.do_gateway_off(dry_run=True)
+    out = capsys.readouterr().out
+    assert "Dry run" in out
+    assert "config.json" in out                       # credential removal disclosed
+    # dry-run is non-destructive: credentials + manifest untouched.
+    assert aikit.GATEWAY_CONFIG_FILE.exists()
+    assert aikit.read_manifest()["active"] is True

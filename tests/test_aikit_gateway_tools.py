@@ -271,8 +271,10 @@ def test_on_writes_files_installs_detected_only_then_off_is_pristine(aikit, gw):
     assert not tools_dir.exists()                                # N1: empty tools/ pruned
     assert aider_cfg.read_text() == aider_before                 # still pristine
     assert aikit.read_manifest() == {}
-    # the gateway dir itself stays — it still holds config.json (the persisted key)
-    assert (gw.gwdir / "config.json").exists()
+    # POK-63: `off` now scrubs the credential store too — config.json is removed and the
+    # whole gateway dir is pruned, so no plaintext virtual key survives an explicit teardown.
+    assert not (gw.gwdir / "config.json").exists()
+    assert not gw.gwdir.exists()
 
     # second off → clean no-op
     aikit.do_gateway_off()

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.10.0
+aikit — AI Coding Agent CLI Installer & Manager  v1.10.1
 Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -50,7 +50,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.10.0"
+__version__ = "1.10.1"
 
 import scriptkit as sk
 
@@ -3518,16 +3518,22 @@ def do_gateway_off(*, shell=None, dry_run=False):
 
     if dry_run:
         where = f"the managed block from {rc}" if present else f"the manifest (no block found in {rc})"
-        print_info(f"Dry run — would remove {where} and clear gateway state.")
+        creds = " and the saved gateway credentials (config.json)" if GATEWAY_CONFIG_FILE.exists() else ""
+        print_info(f"Dry run — would remove {where}{creds}, clear gateway state, and prune {GATEWAY_DIR}.")
         return
 
     for entry in manifest.get("config_files", []):
         _undo_config_file(entry)
     removed = block_mgr.clear(rc, backup_suffix=GATEWAY_RC_BACKUP_SUFFIX, remove_backup=True)
     clear_manifest()
-    # Leave nothing behind: prune the now-empty staging dir (and the gateway dir if it's
-    # empty too — it usually still holds config.json, the persisted credential). rmdir
-    # only removes empty dirs, so a populated dir is untouched.
+    # Remove the saved credential store. config.json is NOT manifest-tracked — the
+    # manifest records what `on` changed to the *system*; the credential store is aikit's
+    # own saved URL + virtual key. `off` is an explicit teardown, so the plaintext key
+    # must not survive it: delete config.json so no secret persists (and so the dir-prune
+    # below actually succeeds instead of silently leaving ~/.aikit/gateway/ behind).
+    GATEWAY_CONFIG_FILE.unlink(missing_ok=True)
+    # Leave nothing behind: prune the now-empty staging dir and the gateway dir. rmdir
+    # only removes empty dirs, so anything aikit didn't account for is left untouched.
     for d in (_gateway_tools_dir(), GATEWAY_DIR):
         try:
             d.rmdir()
