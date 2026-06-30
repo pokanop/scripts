@@ -105,12 +105,18 @@ setup script) is that it is **idempotent in both directions**:
 | `on` then `on` (same args) | No net change — the managed block is replaced with identical content, the prior run's config files are reversed and rewritten, the manifest is refreshed. |
 | `on` then `off` | The rc file and environment-affecting state return to **exactly** what they were before `on`: the managed block is gone, the backup is consumed, every file aikit wrote (`gateway.env`, `gateway.json`, staged copies, installed configs) is deleted along with any directory aikit created for them, and the manifest is cleared. |
 | `off` with nothing active | Friendly no-op, exit 0. |
-| Interrupted `on` | `off` still fully cleans up from whatever the manifest captured. |
+| Interrupted `on` (crash / Ctrl-C mid-write) | `off` still fully cleans up — including the secret-bearing `gateway.env`. |
+
+`on` records its manifest **write-ahead**: the full set of files it's about to write is
+committed to `state.json` *before* the first byte is written. So if `on` is interrupted
+after files land but before it finishes, `off` still has the complete record and reverses
+everything — no orphaned configs, and never an orphaned key file.
 
 `off` removes **only** aikit's managed block (a precise splice that leaves the rest of
 your rc byte-for-byte intact) and **only** the files aikit itself created (each recorded
 `created_by_aikit` in the manifest) — it never touches a line you added to your rc or a
-tool config you owned. The one thing `off` intentionally keeps is
+tool config you owned. It also prunes the now-empty directories it made (including
+`~/.aikit/gateway/tools/`). The one thing `off` intentionally keeps is
 `~/.aikit/gateway/config.json` (your saved URL + key) so you can `on` again without
 re-entering it.
 
@@ -177,6 +183,8 @@ gateway reports it. Handy for sanity-checking a URL + key before `on`.
   git / cloud / hub auth.
 - The env block in your rc contains the virtual key in plaintext (that *is* the
   mechanism — it's your file, and `off` removes it cleanly).
+- `gateway.env` (`0600`) also holds the key; its values are `shlex.quote`d, so a key
+  containing a quote, `$`, or a backtick can't break `source gateway.env` or expand.
 
 ---
 

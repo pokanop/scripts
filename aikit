@@ -3198,9 +3198,13 @@ def render_continue(base, models, detail):
 
 
 def render_gateway_env(pairs):
-    """Portable, source-able export block (holds the virtual key — write 0600)."""
+    """Portable, source-able export block (holds the virtual key — write 0600).
+
+    Values go through ``shlex.quote`` so a key containing a quote, ``$``, or a backtick
+    can't break ``source gateway.env`` or trigger shell expansion.
+    """
     return ("# Source this to route tools through the gateway: `source gateway.env`\n"
-            + "\n".join(f'export {k}="{v}"' for k, v in pairs) + "\n")
+            + "\n".join(f"export {k}={shlex.quote(v)}" for k, v in pairs) + "\n")
 
 
 def render_gateway_summary(base, models, detail, generated):
@@ -3324,40 +3328,48 @@ def gateway_tool_plan(base_url, models, detail, *, home, detector=None, aikit_ow
     return plan
 
 
-def apply_gateway_config_files(plan, base_url, pairs, models, detail, *, generated):
-    """Write portable files + stage/install per-tool configs; return manifest entries.
+def plan_config_file_entries(plan):
+    """The manifest ``config_files`` the plan *will* produce — computed BEFORE any write.
 
-    Portable ``gateway.env`` (0600 — it holds the key) and ``gateway.json`` land in
-    the gateway dir; every tool config is staged under ``tools/``, and installed to
-    its real path only for ``install`` rows. Every file is recorded ``created_by_aikit``
-    so `off` removes exactly this set and nothing the user owns.
+    This is the write-ahead intent: `on` records these in the manifest before
+    :func:`apply_gateway_config_files` touches the disk, so an interrupted `on`
+    (crash/Ctrl-C after files land but before the final manifest write) is still fully
+    reversible by `off` — including the secret-bearing ``gateway.env``. Every path is
+    ``created_by_aikit`` (we're about to create it), and ``created_dirs`` is captured
+    here, against the pre-write tree, so `off` can prune exactly the dirs `on` adds.
     """
-    base = base_url.rstrip("/")
-    entries = []
-
-    env_path = _gateway_env_path()
-    _write_text_file(env_path, render_gateway_env(pairs), mode=0o600)
-    entries.append({"path": str(env_path), "created_by_aikit": True,
-                    "tool": None, "role": "portable"})
-
-    summary_path = _gateway_summary_path()
-    _write_text_file(summary_path, render_gateway_summary(base, models, detail, generated))
-    entries.append({"path": str(summary_path), "created_by_aikit": True,
-                    "tool": None, "role": "portable"})
-
+    entries = [
+        {"path": str(_gateway_env_path()), "created_by_aikit": True, "tool": None, "role": "portable"},
+        {"path": str(_gateway_summary_path()), "created_by_aikit": True, "tool": None, "role": "portable"},
+    ]
     for p in plan:
-        _write_text_file(p["staged"], p["content"])
         entries.append({"path": str(p["staged"]), "created_by_aikit": True,
                         "tool": p["id"], "role": "staged"})
         if p["action"] == "install":
             target = p["target"]
-            created_dirs = _dirs_to_create(target.parent)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(p["content"])
             entries.append({"path": str(target), "created_by_aikit": True,
                             "tool": p["id"], "role": "installed",
-                            "created_dirs": [str(d) for d in created_dirs]})
+                            "created_dirs": [str(d) for d in _dirs_to_create(target.parent)]})
     return entries
+
+
+def apply_gateway_config_files(plan, base_url, pairs, models, detail, *, generated):
+    """Write portable files + stage/install per-tool configs (pure I/O — no manifest).
+
+    Portable ``gateway.env`` (0600 — it holds the key) and ``gateway.json`` land in
+    the gateway dir; every tool config is staged under ``tools/``, and installed to its
+    real path only for ``install`` rows. The manifest of what this writes is recorded
+    separately (and *first*) via :func:`plan_config_file_entries`.
+    """
+    base = base_url.rstrip("/")
+    _write_text_file(_gateway_env_path(), render_gateway_env(pairs), mode=0o600)
+    _write_text_file(_gateway_summary_path(), render_gateway_summary(base, models, detail, generated))
+    for p in plan:
+        _write_text_file(p["staged"], p["content"])
+        if p["action"] == "install":
+            target = p["target"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(p["content"])
 
 
 def gateway_tool_status(manifest, *, home=None, detector=None):
@@ -3461,20 +3473,25 @@ def do_gateway_on(url=None, key=None, *, shell=None, only_discovered=False,
 
     applied_at = _utc_now()
     # Re-applying? Reverse the previous run's config files first so the new manifest is
-    # the single source of truth and a later `off` reverses exactly one install (no
-    # orphaned configs/dirs from the earlier run).
+    # the single source of truth (a later `off` reverses exactly one install) and so the
+    # intent's created_dirs are computed against the post-undo tree, not stale dirs the
+    # prior run left behind.
     for entry in prior.get("config_files", []):
         _undo_config_file(entry)
-    action = GATEWAY_BLOCK.apply(rc, body, backup_suffix=GATEWAY_RC_BACKUP_SUFFIX)
-    config_files = apply_gateway_config_files(
-        plan, url, pairs, models, detail, generated=applied_at,
-    )
-    save_gateway_config(url, key)
-    write_manifest(build_manifest(
+    # Write-ahead intent: build the manifest from the plan and record it BEFORE writing
+    # any file, so an interrupted `on` (apply runs, final write skipped) is still fully
+    # reversible by `off` — including the secret-bearing gateway.env.
+    config_files = plan_config_file_entries(plan)
+    manifest = build_manifest(
         url, shell_name, rc, block,
         model_count=len(models), only_discovered=only_discovered,
         applied_at=applied_at, config_files=config_files,
-    ))
+    )
+    write_manifest(manifest)                          # intent recorded before any write
+    action = GATEWAY_BLOCK.apply(rc, body, backup_suffix=GATEWAY_RC_BACKUP_SUFFIX)
+    apply_gateway_config_files(plan, url, pairs, models, detail, generated=applied_at)
+    save_gateway_config(url, key)
+    write_manifest(manifest)                          # re-affirm on success
     verb = "updated" if action == "update" else "enabled"
     installed = sorted(e["tool"] for e in config_files if e.get("role") == "installed")
     print_success(f"Gateway {verb} — {len(pairs)} vars route through {url}")
@@ -3508,6 +3525,14 @@ def do_gateway_off(*, shell=None, dry_run=False):
         _undo_config_file(entry)
     removed = block_mgr.clear(rc, backup_suffix=GATEWAY_RC_BACKUP_SUFFIX, remove_backup=True)
     clear_manifest()
+    # Leave nothing behind: prune the now-empty staging dir (and the gateway dir if it's
+    # empty too — it usually still holds config.json, the persisted credential). rmdir
+    # only removes empty dirs, so a populated dir is untouched.
+    for d in (_gateway_tools_dir(), GATEWAY_DIR):
+        try:
+            d.rmdir()
+        except OSError:
+            pass
 
     if removed:
         print_success(f"Gateway disabled — managed block removed from {rc}; rc restored.")

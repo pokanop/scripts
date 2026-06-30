@@ -10,6 +10,9 @@ are mocked; no real network.
 from __future__ import annotations
 
 import json
+import shlex
+import shutil
+import subprocess
 import tomllib
 import types
 
@@ -134,8 +137,27 @@ def test_render_empty_models_is_still_valid(aikit):
 def test_render_gateway_env_exports_pairs_including_key(aikit):
     out = aikit.render_gateway_env([("OPENAI_API_KEY", SECRET),
                                     ("OPENAI_BASE_URL", "https://gw/v1")])
-    assert f'export OPENAI_API_KEY="{SECRET}"' in out            # the key lives here
-    assert 'export OPENAI_BASE_URL="https://gw/v1"' in out
+    # shlex.quote leaves shell-safe values unquoted (sk-… keys and URLs qualify).
+    assert f"export OPENAI_API_KEY={SECRET}" in out              # the key lives here
+    assert "export OPENAI_BASE_URL=https://gw/v1" in out
+
+
+def test_render_gateway_env_quotes_values_safely_for_source(aikit, tmp_path):
+    # A key with shell metacharacters must round-trip through `source` unchanged
+    # (N2: shlex.quote) — otherwise it would break sourcing or trigger expansion.
+    nasty = 'sk-a"b$c`d e\'f'
+    out = aikit.render_gateway_env([("OPENAI_API_KEY", nasty)])
+    line = next(l for l in out.splitlines() if l.startswith("export OPENAI_API_KEY="))
+    # shlex.split parses the line with shell semantics; the recovered value must match.
+    assert shlex.split(line) == ["export", f"OPENAI_API_KEY={nasty}"]
+    # And actually source it if a POSIX shell is around — the strongest proof.
+    sh = shutil.which("bash") or shutil.which("sh")
+    if sh:
+        f = tmp_path / "gateway.env"
+        f.write_text(out)
+        res = subprocess.run([sh, "-c", f'. "{f}"; printf %s "$OPENAI_API_KEY"'],
+                             capture_output=True, text=True)
+        assert res.returncode == 0 and res.stdout == nasty
 
 
 def test_render_gateway_summary_is_valid_json(aikit):
@@ -246,9 +268,11 @@ def test_on_writes_files_installs_detected_only_then_off_is_pristine(aikit, gw):
     assert not summary_file.exists()
     assert not opencode_cfg.exists()
     assert not (home / ".config" / "opencode").exists()          # empty dir pruned
-    assert not any(tools_dir.iterdir())                          # staged copies gone
+    assert not tools_dir.exists()                                # N1: empty tools/ pruned
     assert aider_cfg.read_text() == aider_before                 # still pristine
     assert aikit.read_manifest() == {}
+    # the gateway dir itself stays — it still holds config.json (the persisted key)
+    assert (gw.gwdir / "config.json").exists()
 
     # second off → clean no-op
     aikit.do_gateway_off()
@@ -281,6 +305,46 @@ def test_on_then_on_then_off_leaves_no_orphaned_install(aikit, gw):
     aikit.do_gateway_off()
     assert not opencode_cfg.exists()                            # no orphan left behind
     assert not (gw.home / ".config" / "opencode").exists()      # created dir pruned too
+
+
+def test_interrupted_on_is_fully_reversible_by_off(aikit, gw, monkeypatch):
+    # S1: a crash after files are written but before the final manifest write must still
+    # be fully reversible by `off` — including the secret-bearing gateway.env. The
+    # write-ahead manifest (recorded *before* apply) is what makes this hold.
+    gw.detected.add("opencode")
+    env_file = gw.gwdir / "gateway.env"
+    opencode_cfg = gw.home / ".config" / "opencode" / "opencode.json"
+
+    # Let the first (intent) manifest write succeed, then blow up on the second (final,
+    # post-apply) write — apply has already landed every file by then.
+    calls = {"n": 0}
+    real_write = aikit.write_manifest
+
+    def flaky_write(data, path=None):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("simulated crash: final manifest write skipped")
+        real_write(data, path)
+
+    monkeypatch.setattr(aikit, "write_manifest", flaky_write)
+    with pytest.raises(RuntimeError):
+        aikit.do_gateway_on(BASE, SECRET, yes=True)
+
+    # The orphans are on disk — the key file, the installed native config, the rc block.
+    assert env_file.exists() and SECRET in env_file.read_text()
+    assert opencode_cfg.exists()
+    assert aikit.GATEWAY_BLOCK.present_in(gw.rc.read_text())
+    # …but the write-ahead manifest captured them, so `off` can see and reverse them.
+    assert aikit.read_manifest()["config_files"]
+
+    aikit.do_gateway_off()
+    assert not env_file.exists()                                 # secret reclaimed
+    assert not (gw.gwdir / "gateway.json").exists()
+    assert not opencode_cfg.exists()
+    assert not (gw.gwdir / "tools").exists()
+    assert not aikit.GATEWAY_BLOCK.present_in(gw.rc.read_text())
+    assert gw.rc.read_text() == "# rc\n"                         # pristine
+    assert aikit.read_manifest() == {}
 
 
 def test_on_dry_run_writes_no_config_files(aikit, gw, capsys):
