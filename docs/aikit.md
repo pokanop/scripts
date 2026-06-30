@@ -146,16 +146,21 @@ one virtual key — and switch back, leaving your machine **pristine**. Full gui
 **[aikit-gateway.md](aikit-gateway.md)**.
 
 ```bash
-aikit gateway on --dry-run -u https://gw.example.com   # preview, write nothing
-aikit gateway on -u https://gw.example.com             # write the managed env block + manifest
-aikit gateway status                                   # active? URL, masked key, model count, drift
-aikit gateway off                                      # remove the block, restore rc pristine
+aikit gateway on --dry-run -u https://gw.example.com   # preview env block + per-tool plan, write nothing
+aikit gateway on -u https://gw.example.com             # write the env block, native tool configs + manifest
+aikit gateway status                                   # active? URL, masked key, models, wrapped tools, drift
+aikit gateway off                                      # remove everything aikit wrote, restore pristine
 ```
 
-It's idempotent both ways: `on` then `on` is a no-op; `on` then `off` returns the rc
-file and environment-affecting state to exactly where they were. The gateway URL and
-virtual key live at `~/.aikit/gateway/config.json` (`0600`); the key is always masked
-in output and never logged.
+`on` wraps tools at two layers: the **env block** (for everything that reads `OPENAI_*`
+or a provider's own env vars) **and native per-tool config files** for tools that read
+their own config — opencode, codex, crush, goose, pi, hermes, aider, plus staged-only
+llm/continue — each populated with the gateway's models and **never** clobbering a
+config you already have. It's idempotent both ways: `on` then `on` is a no-op; `on` then
+`off` returns the rc file, environment-affecting state, **and every file aikit wrote** to
+exactly where they were. The gateway URL and virtual key live at
+`~/.aikit/gateway/config.json` (`0600`); the key is always masked in output and never
+logged.
 
 ---
 

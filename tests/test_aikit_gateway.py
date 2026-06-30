@@ -201,14 +201,18 @@ def test_undo_config_file_deletes_created(aikit, tmp_path):
 # --- on → status → off round-trip (managed block + manifest, no network) -----
 @pytest.fixture
 def isolated_gateway(aikit, tmp_path, monkeypatch):
-    """Point the gateway config/manifest and shell rc at a temp dir; stub discovery."""
+    """Point the gateway dir/config/manifest, HOME, and shell rc at a temp dir; stub
+    discovery and default every wrapped tool to *not* installed (no real-home writes)."""
     rc = tmp_path / ".zshrc"
     rc.write_text("# existing rc\nalias g=git\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(aikit, "GATEWAY_DIR", tmp_path / "gw")
     monkeypatch.setattr(aikit, "GATEWAY_CONFIG_FILE", tmp_path / "gw" / "config.json")
     monkeypatch.setattr(aikit, "GATEWAY_STATE_FILE", tmp_path / "gw" / "state.json")
     monkeypatch.setattr(aikit, "detect_shell", lambda explicit=None: ("zsh", rc))
     monkeypatch.setattr(aikit, "discover_models",
                         lambda u, k, **kw: (["anthropic/claude-3", "openai/gpt-4o"], {}))
+    monkeypatch.setattr(aikit, "detect_gateway_tool", lambda agent_key: False)
     return rc
 
 

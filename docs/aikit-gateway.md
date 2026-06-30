@@ -19,7 +19,7 @@ aikit gateway off                             # unwrap: restore your machine pri
 
 ## How it works
 
-`on` does four things and records them in a manifest:
+`on` does five things and records them in a manifest:
 
 1. **Discovers models** — `GET {gateway}/v1/models` (any valid key), plus the richer
    `GET {gateway}/model/info` when your key is allowed to see it.
@@ -37,13 +37,61 @@ aikit gateway off                             # unwrap: restore your machine pri
    # <<< aikit gateway <<<
    ```
    The rc file is backed up once (`<rc>.aikit-gateway.bak`) before the first write.
-4. **Records a manifest** at `~/.aikit/gateway/state.json` (`0600`) — gateway URL,
-   shell + rc path, markers, the backup path, model count, and a checksum of the
-   block — so `off` and `status` know exactly what was applied.
+4. **Writes native per-tool config + portable files** — see
+   [Native per-tool config](#native-per-tool-config) below. Portable `gateway.env`
+   (`0600`) and `gateway.json` land in `~/.aikit/gateway/`, and each wrapped tool gets a
+   config in its own schema, staged under `tools/` and installed only when the tool is
+   detected and has no config yet.
+5. **Records a manifest** at `~/.aikit/gateway/state.json` (`0600`) — gateway URL,
+   shell + rc path, markers, the backup path, model count, a checksum of the block, and
+   every config file it wrote (with whether aikit created it) — so `off` and `status`
+   know exactly what was applied.
 
 > **Support for each provider ships as data.** A provider is a row in the
 > `GATEWAY_PROVIDERS` table (prefix, key env vars, base env vars, route, detection),
 > not a special case in the code. Adding a provider is adding a row.
+
+---
+
+## Native per-tool config
+
+The env block covers every tool that reads `OPENAI_*` (or a provider's own) env vars.
+Some tools, though, read **their own config file** instead — so `on` also generates a
+config in each tool's native schema, populated with the models the gateway exposed.
+Where a tool supports it, the file **references the key via an env var** (read from
+`gateway.env` / your shell) rather than inlining the secret.
+
+| Tool | Native config target | Key handling |
+|------|----------------------|--------------|
+| **opencode** | `~/.config/opencode/opencode.json` | `{env:OPENAI_API_KEY}` |
+| **codex** | `~/.codex/config.toml` | `env_key = "OPENAI_API_KEY"` |
+| **crush** | `~/.config/crush/crush.json` | `$OPENAI_API_KEY` |
+| **goose** | `~/.config/goose/config.yaml` | `OPENAI_API_KEY` (env / keyring) |
+| **pi** | `~/.pi/agent/models.json` | `!printf %s "$OPENAI_API_KEY"` (shell) |
+| **hermes** | `~/.hermes/config.yaml` | `${OPENAI_API_KEY}` |
+| **aider** | `~/.aider.conf.yml` | `$OPENAI_API_KEY` |
+| **llm** | *staged only* (path varies) | env (`extra-openai-models.yaml`) |
+| **continue** | *staged only* (path varies) | env (`gateway.env`) |
+| *every other OpenAI-compatible tool/SDK* | — | env layer only (no file) |
+
+> The virtual key is **never** written into a native tool config — only into
+> `gateway.env` (`0600`) and the managed rc block, which are the things that actually
+> export it.
+
+### Never clobber
+
+Every rendered config is first **staged** under `~/.aikit/gateway/tools/`. It is
+installed to the tool's real path **only when both** hold:
+
+1. the tool is **detected** (via aikit's own agent registry — the same detection
+   `aikit list` / `aikit doctor` use), and
+2. **no config already exists** at that path.
+
+If a config is already there, aikit **keeps it** and leaves the staged copy for you to
+merge by hand — it never overwrites a file you own. `llm` and `continue` are always
+staged-only because their real config path varies by install. `aikit gateway status`
+shows, per tool, whether its config is *installed by aikit*, *user-owned (kept)*, or
+*staged only*, and `aikit gateway on --dry-run` previews the whole plan without writing.
 
 ---
 
@@ -54,14 +102,23 @@ setup script) is that it is **idempotent in both directions**:
 
 | You run | Result |
 |---------|--------|
-| `on` then `on` (same args) | No net change — the managed block is replaced with identical content, the manifest is refreshed. |
-| `on` then `off` | The rc file and environment-affecting state return to **exactly** what they were before `on`: the managed block is gone, the backup is consumed, the manifest is cleared. |
+| `on` then `on` (same args) | No net change — the managed block is replaced with identical content, the prior run's config files are reversed and rewritten, the manifest is refreshed. |
+| `on` then `off` | The rc file and environment-affecting state return to **exactly** what they were before `on`: the managed block is gone, the backup is consumed, every file aikit wrote (`gateway.env`, `gateway.json`, staged copies, installed configs) is deleted along with any directory aikit created for them, and the manifest is cleared. |
 | `off` with nothing active | Friendly no-op, exit 0. |
-| Interrupted `on` | `off` still fully cleans up from whatever the manifest captured. |
+| Interrupted `on` (crash / Ctrl-C mid-write) | `off` still fully cleans up — including the secret-bearing `gateway.env`. |
+
+`on` records its manifest **write-ahead**: the full set of files it's about to write is
+committed to `state.json` *before* the first byte is written. So if `on` is interrupted
+after files land but before it finishes, `off` still has the complete record and reverses
+everything — no orphaned configs, and never an orphaned key file.
 
 `off` removes **only** aikit's managed block (a precise splice that leaves the rest of
-your rc byte-for-byte intact) and clears aikit's own state — it never touches lines you
-added yourself.
+your rc byte-for-byte intact) and **only** the files aikit itself created (each recorded
+`created_by_aikit` in the manifest) — it never touches a line you added to your rc or a
+tool config you owned. It also prunes the now-empty directories it made (including
+`~/.aikit/gateway/tools/`). The one thing `off` intentionally keeps is
+`~/.aikit/gateway/config.json` (your saved URL + key) so you can `on` again without
+re-entering it.
 
 ---
 
@@ -77,7 +134,7 @@ aikit gateway on -u https://gw.example.com [-k sk-…]
 |------|--------|
 | `-u, --url` | Gateway base URL. Prompted if omitted and not saved. |
 | `-k, --key` | Virtual key (`sk-…`). **Hidden prompt** if omitted and not saved. |
-| `--dry-run` | Print the env block (key masked) and the targeted providers; write nothing locally. |
+| `--dry-run` | Print the env block (key masked), the targeted providers, and the per-tool config plan (what each tool would get); write nothing locally. |
 | `-y, --yes` | Skip the confirmation prompt. |
 | `--only-discovered` | Only set env vars for providers actually backing the discovered models. |
 | `--shell {zsh,bash,fish}` | Override shell detection. |
@@ -95,15 +152,18 @@ runs don't need the flags again.
 aikit gateway off [--dry-run] [--shell zsh]
 ```
 
-Removes the managed block, restores the rc file, and clears the manifest. A no-op
-(exit 0) when the gateway isn't active.
+Removes the managed block, restores the rc file, deletes every config file aikit wrote
+(portable files, staged copies, and configs aikit installed) along with any directory it
+created for them, and clears the manifest. A no-op (exit 0) when the gateway isn't
+active.
 
 ### `aikit gateway status`
 
-Shows whether the gateway is active, the URL, the **masked** key, the model count,
-the shell + rc path, and **drift warnings** — if the managed block was hand-edited or
-removed from the rc, `status` tells you (and `on` will restore it). The default for a
-bare `aikit gateway`.
+Shows whether the gateway is active, the URL, the **masked** key, the model count, the
+shell + rc path, a **wrapped-tools** table (per tool: detected?, and whether its config
+is *installed by aikit*, *user-owned (kept)*, or *staged only*, with the path), and
+**drift warnings** — if the managed block was hand-edited or removed from the rc,
+`status` tells you (and `on` will restore it). The default for a bare `aikit gateway`.
 
 ### `aikit gateway models`
 
@@ -123,6 +183,8 @@ gateway reports it. Handy for sanity-checking a URL + key before `on`.
   git / cloud / hub auth.
 - The env block in your rc contains the virtual key in plaintext (that *is* the
   mechanism — it's your file, and `off` removes it cleanly).
+- `gateway.env` (`0600`) also holds the key; its values are `shlex.quote`d, so a key
+  containing a quote, `$`, or a backtick can't break `source gateway.env` or expand.
 
 ---
 
@@ -135,11 +197,15 @@ whether it's reachable (`/v1/models`), and whether it's currently active.
 
 ## Files
 
-| Path | Purpose |
-|------|---------|
-| `~/.aikit/gateway/config.json` | Gateway URL + virtual key (`0600`). |
-| `~/.aikit/gateway/state.json` | Manifest of what `on` changed (`0600`). |
-| `<rc>.aikit-gateway.bak` | One-time backup of your rc before the first write. |
+| Path | Purpose | Removed by `off`? |
+|------|---------|-------------------|
+| `~/.aikit/gateway/config.json` | Gateway URL + virtual key (`0600`). | No — kept so you can `on` again |
+| `~/.aikit/gateway/state.json` | Manifest of what `on` changed (`0600`). | Yes |
+| `~/.aikit/gateway/gateway.env` | Portable, source-able export block (`0600` — holds the key). | Yes |
+| `~/.aikit/gateway/gateway.json` | Machine-readable summary: URL, OpenAI base, providers, models. | Yes |
+| `~/.aikit/gateway/tools/*` | Staged native per-tool configs (one per wrapped tool). | Yes |
+| each tool's native path (e.g. `~/.config/opencode/opencode.json`) | Installed config — **only** when the tool was detected and had none. | Yes, **if aikit created it** |
+| `<rc>.aikit-gateway.bak` | One-time backup of your rc before the first write. | Yes |
 
 All paths honor the `AIKIT_CONFIG` override (consistent with the rest of aikit).
 

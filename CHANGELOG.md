@@ -62,6 +62,44 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.10.0 — 2026-06-30
+- **Native per-tool gateway config (`aikit gateway on`)** — beyond the env layer,
+  `on` now generates each tool's config in its own native schema (populated with the
+  models the gateway exposed) so tools that don't read env vars also route through the
+  gateway. Nine renderers ship: **opencode** (`~/.config/opencode/opencode.json`),
+  **codex** (`~/.codex/config.toml`), **crush** (`~/.config/crush/crush.json`),
+  **goose** (`~/.config/goose/config.yaml`), **pi** (`~/.pi/agent/models.json`),
+  **hermes** (`~/.hermes/config.yaml`), **aider** (`~/.aider.conf.yml`), plus
+  **llm** and **continue** (staged only — their real path varies). Each references the
+  key via env var (`{env:OPENAI_API_KEY}`, `$OPENAI_API_KEY`, …) — the secret is never
+  inlined into a tool config.
+- **Portable files** under `~/.aikit/gateway/`: `gateway.env` (source-able export
+  block, `0600` — it holds the key) and `gateway.json` (machine-readable summary:
+  gateway URL, OpenAI-compatible base, all providers, discovered models).
+- **Never-clobber install** — every rendered config is staged under
+  `~/.aikit/gateway/tools/`, and installed to the real path **only when the tool is
+  detected (via aikit's agent registry) AND no config exists there**. An existing user
+  config is kept and the staged copy left for manual merge.
+- **Manifest-tracked, pristine restore** — every file `on` writes is recorded
+  (`created_by_aikit`, plus the directories it had to create) in a **write-ahead manifest
+  committed before any file is written**, so even an *interrupted* `on` (crash / Ctrl-C
+  after files land but before the final manifest write) is fully reversible — including
+  the secret-bearing `gateway.env`. `gateway off` deletes exactly that set (portable
+  files + staged copies + aikit-installed configs), prunes the now-empty directories it
+  created (including `~/.aikit/gateway/tools/`), and never touches a user config aikit
+  didn't create. Re-running `on` first reverses the prior run's files, so a single `off`
+  always fully unwinds; a second `off` is a clean no-op. **Pristine.**
+- **`gateway status`** now lists wrapped tools — detected?, and whether each config is
+  installed-by-aikit, user-owned (kept), or staged-only — with the path. **`gateway on
+  --dry-run`** previews the per-tool plan without writing.
+- `gateway.env` values are emitted through `shlex.quote`, so a key containing a quote,
+  `$`, or a backtick can't break `source gateway.env` or trigger shell expansion.
+- Renderers are pure functions, unit-tested for valid JSON/TOML/YAML + no inlined
+  secret; an `on`→`off` round-trip proves created files are removed and pre-existing
+  user configs are untouched, and an interrupted-`on`→`off` test proves crash-safety.
+  `docs/aikit-gateway.md` completed (per-tool matrix, never-clobber policy,
+  pristine-restore guarantee).
+
 ### 1.9.0 — 2026-06-30
 - **New `aikit gateway` command group** — wrap every OpenAI-compatible tool/SDK to
   route through a single LiteLLM-style gateway with one virtual key, and unwrap again
