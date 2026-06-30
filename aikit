@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.10.0
+aikit — AI Coding Agent CLI Installer & Manager  v1.11.0
 Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -16,7 +16,7 @@ Usage:
     aikit serve                     Start web dashboard (http://localhost:8765)
     aikit doctor                    Diagnose environment and agents
     aikit config get/set/list       Manage configuration
-    aikit gateway on/off/status     Route AI tools through a LiteLLM gateway
+    aikit gateway on/off/purge      Toggle the LiteLLM gateway (purge forgets creds)
 
 Dependencies:
     pip install rich requests flask readchar
@@ -50,7 +50,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.10.0"
+__version__ = "1.11.0"
 
 import scriptkit as sk
 
@@ -3501,8 +3501,13 @@ def do_gateway_on(url=None, key=None, *, shell=None, only_discovered=False,
     print_info(f"Reload your shell to pick up the changes:  source {rc}")
 
 
-def do_gateway_off(*, shell=None, dry_run=False):
-    """Read the manifest → remove the env block → restore rc → clear the manifest."""
+def do_gateway_off(*, shell=None, dry_run=False, announce_creds=True):
+    """Read the manifest → remove the env block → restore rc → clear the manifest.
+
+    Keeps aikit's credential store (`config.json`) — this is a fast toggle, not a forget.
+    ``announce_creds`` is set False when `purge` calls this for the teardown, so we don't
+    print the "credentials kept" hint immediately before purge removes them.
+    """
     manifest = read_manifest()
     if not manifest or not manifest.get("active"):
         print_info("Gateway is not active — nothing to undo.")
@@ -3518,16 +3523,19 @@ def do_gateway_off(*, shell=None, dry_run=False):
 
     if dry_run:
         where = f"the managed block from {rc}" if present else f"the manifest (no block found in {rc})"
-        print_info(f"Dry run — would remove {where} and clear gateway state.")
+        kept = " (saved credentials are kept — use 'purge' to forget them)" if GATEWAY_CONFIG_FILE.exists() else ""
+        print_info(f"Dry run — would remove {where} and clear gateway state{kept}.")
         return
 
     for entry in manifest.get("config_files", []):
         _undo_config_file(entry)
     removed = block_mgr.clear(rc, backup_suffix=GATEWAY_RC_BACKUP_SUFFIX, remove_backup=True)
     clear_manifest()
-    # Leave nothing behind: prune the now-empty staging dir (and the gateway dir if it's
-    # empty too — it usually still holds config.json, the persisted credential). rmdir
-    # only removes empty dirs, so a populated dir is untouched.
+    # Prune the now-empty staging dir. The gateway dir itself intentionally PERSISTS: it
+    # still holds config.json (aikit's own 0600 credential store), which `off` keeps so a
+    # re-`on` is input-free — this is a fast toggle, not a forget. rmdir only removes empty
+    # dirs, so the populated gateway dir is left untouched here. (Use `aikit gateway purge`
+    # to remove the credential store and prune the dir.)
     for d in (_gateway_tools_dir(), GATEWAY_DIR):
         try:
             d.rmdir()
@@ -3539,6 +3547,54 @@ def do_gateway_off(*, shell=None, dry_run=False):
     else:
         print_success("Gateway disabled — state cleared (managed block was already gone).")
     print_info("Open a new shell (or unset the vars) to drop the gateway env.")
+    if announce_creds and GATEWAY_CONFIG_FILE.exists():
+        print_info("Credentials kept — run 'aikit gateway on' to re-enable (no input needed), "
+                   "or 'aikit gateway purge' to forget them.")
+
+
+def do_gateway_purge(*, shell=None, yes=False, dry_run=False):
+    """Forget the saved gateway credentials (the explicit counterpart to the on/off toggle).
+
+    `off` keeps aikit's 0600 credential store so a re-`on` is input-free; `purge` removes
+    it. If the gateway is currently active, purge first runs the full `off` teardown
+    (agent runtimes → pristine), then deletes ``GATEWAY_CONFIG_FILE`` and prunes the
+    now-empty ``GATEWAY_DIR``. With nothing saved, it's a friendly no-op.
+    """
+    manifest = read_manifest()
+    active = bool(manifest and manifest.get("active"))
+    configured = GATEWAY_CONFIG_FILE.exists()
+
+    if not active and not configured:
+        print_info("No saved gateway credentials — nothing to forget.")
+        return
+
+    if dry_run:
+        steps = []
+        if active:
+            steps.append("deactivate the gateway (restore agent runtimes pristine)")
+        steps.append(f"remove the saved credential store ({GATEWAY_CONFIG_FILE.name})")
+        print_info("Dry run — would " + ", then ".join(steps) + f", and prune {GATEWAY_DIR}.")
+        return
+
+    if not yes and not sk.confirm(
+        "Forget the saved gateway credentials? Re-enabling will need the URL and key again.",
+        default=False,
+    ):
+        print_warning("Aborted — credentials kept.")
+        return
+
+    if active:
+        do_gateway_off(shell=shell, announce_creds=False)   # teardown only; purge removes creds next
+
+    GATEWAY_CONFIG_FILE.unlink(missing_ok=True)
+    # With the credential store gone, the gateway dir can finally be pruned (rmdir only
+    # removes empty dirs, so any unaccounted-for file is still left untouched).
+    for d in (_gateway_tools_dir(), GATEWAY_DIR):
+        try:
+            d.rmdir()
+        except OSError:
+            pass
+    print_success("Credentials removed — run 'aikit gateway on -u <url> -k <key>' to set up again.")
 
 
 def do_gateway_status():
@@ -3547,11 +3603,15 @@ def do_gateway_status():
     cfg = load_gateway_config()
 
     if not manifest or not manifest.get("active"):
-        print_info("Gateway: inactive")
         if cfg.get("base_url"):
+            print_info("Gateway: inactive (credentials saved)")
             sk.kv("Configured URL", cfg.get("base_url"))
             sk.kv("Key", _mask_secret(cfg.get("key", "")))
-        print_info("Run 'aikit gateway on' to route tools through the gateway.")
+            print_info("Run 'aikit gateway on' to re-enable (no input needed), "
+                       "or 'aikit gateway purge' to forget the saved credentials.")
+        else:
+            print_info("Gateway: inactive")
+            print_info("Run 'aikit gateway on -u <url> -k <key>' to route tools through the gateway.")
         return
 
     url = manifest.get("gateway_url") or cfg.get("base_url", "")
@@ -4275,6 +4335,16 @@ def build_parser():
     gw_off = gw_sub.add_parser("off", help="Unwrap: remove the env block, restore rc pristine")
     gw_off.add_argument("--shell", choices=["zsh", "bash", "fish"], help="Override shell detection")
     gw_off.add_argument("--dry-run", action="store_true", help="Preview the removal; write nothing")
+    gw_off.add_argument("--purge", action="store_true",
+                        help="Also forget saved credentials (config.json) — same as 'gateway purge'")
+    gw_off.add_argument("-y", "--yes", action="store_true",
+                        help="Skip the confirmation prompt (only used with --purge)")
+
+    gw_purge = gw_sub.add_parser(
+        "purge", help="Forget saved credentials (deactivates first if active)")
+    gw_purge.add_argument("--shell", choices=["zsh", "bash", "fish"], help="Override shell detection")
+    gw_purge.add_argument("-y", "--yes", action="store_true", help="Skip the confirmation prompt")
+    gw_purge.add_argument("--dry-run", action="store_true", help="Preview; write nothing")
 
     gw_sub.add_parser("status", help="Show gateway state, masked key, and drift")
 
@@ -4354,7 +4424,12 @@ def cmd_gateway(args):
         do_gateway_on(args.url, args.key, shell=args.shell,
                       only_discovered=args.only_discovered, yes=args.yes, dry_run=args.dry_run)
     elif action == "off":
-        do_gateway_off(shell=args.shell, dry_run=args.dry_run)
+        if getattr(args, "purge", False):
+            do_gateway_purge(shell=args.shell, yes=args.yes, dry_run=args.dry_run)
+        else:
+            do_gateway_off(shell=args.shell, dry_run=args.dry_run)
+    elif action == "purge":
+        do_gateway_purge(shell=args.shell, yes=args.yes, dry_run=args.dry_run)
     elif action == "models":
         do_gateway_models(args.url, args.key)
     else:  # "status" or no sub-action — the at-a-glance default

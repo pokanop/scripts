@@ -12,8 +12,13 @@ unlike a one-shot setup script — records exactly what it changed so it can und
 ```bash
 aikit gateway on -u https://gw.example.com   # wrap: point every tool at the gateway
 aikit gateway status                          # what's active right now
-aikit gateway off                             # unwrap: restore your machine pristine
+aikit gateway off                             # unwrap: restore runtimes pristine (creds kept)
+aikit gateway purge                           # forget the saved virtual key entirely
 ```
+
+`on`/`off` is a **fast, zero-input toggle**: `off` returns your agent runtimes to
+pristine but keeps aikit's own `0600` credential store, so flipping back `on` needs no
+input. `purge` is the explicit **forget** that removes the saved credentials.
 
 ---
 
@@ -103,8 +108,10 @@ setup script) is that it is **idempotent in both directions**:
 | You run | Result |
 |---------|--------|
 | `on` then `on` (same args) | No net change — the managed block is replaced with identical content, the prior run's config files are reversed and rewritten, the manifest is refreshed. |
-| `on` then `off` | The rc file and environment-affecting state return to **exactly** what they were before `on`: the managed block is gone, the backup is consumed, every file aikit wrote (`gateway.env`, `gateway.json`, staged copies, installed configs) is deleted along with any directory aikit created for them, and the manifest is cleared. |
-| `off` with nothing active | Friendly no-op, exit 0. |
+| `on` then `off` | Your **agent runtimes** return to **exactly** what they were before `on`: the managed block is gone, the backup is consumed, every file aikit wrote (`gateway.env`, `gateway.json`, staged copies, installed configs) is deleted along with any directory aikit created for them, and the manifest is cleared. aikit's own `config.json` credential store is **kept**, so re-`on` is input-free. |
+| `off` then `on` (no flags) | Fast, zero-input re-toggle — the saved URL + key are reused (no prompt, just a quick model-list refresh), reproducing the same runtime surface. |
+| `purge` | The explicit **forget**: deactivates first if active, then removes `config.json` and prunes `~/.aikit/gateway/`. After `purge`, re-enabling needs `-u`/`-k` again. |
+| `off` / `purge` with nothing active/saved | Friendly no-op, exit 0. |
 | Interrupted `on` (crash / Ctrl-C mid-write) | `off` still fully cleans up — including the secret-bearing `gateway.env`. |
 
 `on` records its manifest **write-ahead**: the full set of files it's about to write is
@@ -112,13 +119,17 @@ committed to `state.json` *before* the first byte is written. So if `on` is inte
 after files land but before it finishes, `off` still has the complete record and reverses
 everything — no orphaned configs, and never an orphaned key file.
 
-`off` removes **only** aikit's managed block (a precise splice that leaves the rest of
-your rc byte-for-byte intact) and **only** the files aikit itself created (each recorded
-`created_by_aikit` in the manifest) — it never touches a line you added to your rc or a
-tool config you owned. It also prunes the now-empty directories it made (including
-`~/.aikit/gateway/tools/`). The one thing `off` intentionally keeps is
-`~/.aikit/gateway/config.json` (your saved URL + key) so you can `on` again without
-re-entering it.
+**"Pristine" means your agent runtimes** — your shell rc and your tool configs — not
+aikit's private `~/.aikit/` state dir. `off` removes **only** aikit's managed block (a
+precise splice that leaves the rest of your rc byte-for-byte intact) and **only** the
+files aikit itself created (each recorded `created_by_aikit` in the manifest) — it never
+touches a line you added to your rc or a tool config you owned. It also prunes the
+now-empty directories it made (including `~/.aikit/gateway/tools/`). The one thing `off`
+intentionally keeps is `~/.aikit/gateway/config.json` — aikit's own `0600` credential
+store (your saved URL + key), like `~/.aws/credentials` or a `gh` token — so the next
+`on` is a fast, input-free toggle. To forget the saved credentials entirely, run
+**`aikit gateway purge`** (below); while OFF the key lives **only** in that `0600` store,
+never in an agent-runtime file.
 
 ---
 
@@ -149,13 +160,29 @@ runs don't need the flags again.
 ### `aikit gateway off`
 
 ```bash
-aikit gateway off [--dry-run] [--shell zsh]
+aikit gateway off [--dry-run] [--shell zsh] [--purge [-y]]
 ```
 
 Removes the managed block, restores the rc file, deletes every config file aikit wrote
 (portable files, staged copies, and configs aikit installed) along with any directory it
-created for them, and clears the manifest. A no-op (exit 0) when the gateway isn't
-active.
+created for them, and clears the manifest. **Keeps** the saved credential store
+(`config.json`) so the next `on` needs no input. A no-op (exit 0) when the gateway isn't
+active. Pass `--purge` to also forget the saved credentials in one shot (equivalent to
+`off` then `purge`; `-y` skips the confirmation).
+
+### `aikit gateway purge`
+
+```bash
+aikit gateway purge [-y] [--dry-run] [--shell zsh]
+```
+
+The explicit **forget**. Removes aikit's saved credential store
+(`~/.aikit/gateway/config.json`) and prunes `~/.aikit/gateway/`, so re-enabling the
+gateway needs the URL + key again. If the gateway is currently **active**, `purge` first
+runs the full `off` teardown (agent runtimes → pristine) and *then* removes the
+credentials. Destructive, so it **confirms first** (`-y` to skip); `--dry-run` previews
+without writing. A friendly no-op (exit 0) when nothing is saved. After `purge`, the
+virtual key is absent from your machine entirely.
 
 ### `aikit gateway status`
 
@@ -163,7 +190,10 @@ Shows whether the gateway is active, the URL, the **masked** key, the model coun
 shell + rc path, a **wrapped-tools** table (per tool: detected?, and whether its config
 is *installed by aikit*, *user-owned (kept)*, or *staged only*, with the path), and
 **drift warnings** — if the managed block was hand-edited or removed from the rc,
-`status` tells you (and `on` will restore it). The default for a bare `aikit gateway`.
+`status` tells you (and `on` will restore it). When **inactive but credentials are
+saved**, it reports *inactive (credentials saved)* with the URL + masked key and points
+you at `on` / `purge`; after `purge` it shows plain *inactive*. The default for a bare
+`aikit gateway`.
 
 ### `aikit gateway models`
 
@@ -185,6 +215,10 @@ gateway reports it. Handy for sanity-checking a URL + key before `on`.
   mechanism — it's your file, and `off` removes it cleanly).
 - `gateway.env` (`0600`) also holds the key; its values are `shlex.quote`d, so a key
   containing a quote, `$`, or a backtick can't break `source gateway.env` or expand.
+- **While OFF, the key lives only in aikit's `0600` `config.json`** — no agent-runtime
+  file (rc, `gateway.env`, tool config) retains it. `off` keeps `config.json` for the
+  fast toggle; **`aikit gateway purge`** removes it (and prunes the gateway dir), wiping
+  the virtual key from your machine entirely.
 
 ---
 
@@ -199,7 +233,7 @@ whether it's reachable (`/v1/models`), and whether it's currently active.
 
 | Path | Purpose | Removed by `off`? |
 |------|---------|-------------------|
-| `~/.aikit/gateway/config.json` | Gateway URL + virtual key (`0600`). | No — kept so you can `on` again |
+| `~/.aikit/gateway/config.json` | Gateway URL + virtual key (`0600`). | No by `off` (kept for fast re-toggle) — removed by `purge` |
 | `~/.aikit/gateway/state.json` | Manifest of what `on` changed (`0600`). | Yes |
 | `~/.aikit/gateway/gateway.env` | Portable, source-able export block (`0600` — holds the key). | Yes |
 | `~/.aikit/gateway/gateway.json` | Machine-readable summary: URL, OpenAI base, providers, models. | Yes |

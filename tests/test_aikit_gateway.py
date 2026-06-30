@@ -285,3 +285,136 @@ def test_gateway_off_dry_run_keeps_block(aikit, isolated_gateway):
     aikit.do_gateway_off(dry_run=True)
     assert rc.read_text() == active                  # dry-run off changed nothing
     assert aikit.read_manifest()["active"] is True
+
+
+# --- toggle model + purge (POK-63 corrected design) -------------------------
+# `on`/`off` is a fast, zero-input toggle that RETAINS aikit's 0600 credential store;
+# `purge` is the explicit "forget" that removes it. "Pristine" applies to the user's
+# agent runtimes (rc + tool configs + portable files), not aikit's private cred store.
+def _files_with_key(home, key, *, exclude=None):
+    """Files under ``home`` whose raw bytes contain ``key`` (optionally skipping one path)."""
+    from pathlib import Path
+    exclude = Path(exclude) if exclude else None
+    hits = []
+    for p in Path(home).rglob("*"):
+        if p.is_file() and p != exclude:
+            try:
+                if key.encode() in p.read_bytes():
+                    hits.append(str(p))
+            except OSError:
+                pass
+    return hits
+
+
+def test_gateway_fast_toggle_off_then_on_needs_no_input(aikit, isolated_gateway, monkeypatch):
+    """Headline: `on` → `off` → `on` (no -u/-k) re-activates with NO prompt and restores the
+    same agent-runtime surface. `off` keeps the saved credentials so the toggle is input-free."""
+    import getpass
+    rc = isolated_gateway
+    key = "sk-toggle-1234567890"
+
+    aikit.do_gateway_on("https://gw.example.com", key, yes=True)
+    rc_active = rc.read_text()
+    assert aikit.read_manifest()["active"] is True
+
+    aikit.do_gateway_off()
+    assert aikit.read_manifest() == {}                       # deactivated
+    assert aikit.GATEWAY_CONFIG_FILE.exists()                # …but credentials retained
+
+    # Any prompt for url/key would mean the re-toggle wasn't input-free → fail loudly.
+    monkeypatch.setattr(aikit, "_prompt", lambda *a, **k: pytest.fail("prompted for URL"))
+    monkeypatch.setattr(getpass, "getpass", lambda *a, **k: pytest.fail("prompted for key"))
+
+    aikit.do_gateway_on(None, None, yes=True)                # zero-input re-toggle
+    assert aikit.read_manifest()["active"] is True
+    assert rc.read_text() == rc_active                       # runtime surface restored identically
+
+
+def test_gateway_off_keeps_creds_runtimes_pristine(aikit, isolated_gateway):
+    """`off` returns agent runtimes to pristine but KEEPS the 0600 credential store; the key
+    survives in zero agent-runtime files (it lives only in config.json)."""
+    rc = isolated_gateway
+    home = rc.parent                                         # HOME == tmp_path
+    original = rc.read_text()
+    key = "sk-keepcreds-9876543210"
+
+    aikit.do_gateway_on("https://gw.example.com", key, yes=True)
+    env_file = aikit.GATEWAY_DIR / "gateway.env"
+    assert env_file.exists() and key in env_file.read_text()  # a runtime file holds the key while ON
+
+    aikit.do_gateway_off()
+
+    # credential store retained at 0600
+    assert aikit.GATEWAY_CONFIG_FILE.exists()
+    assert (aikit.GATEWAY_CONFIG_FILE.stat().st_mode & 0o777) == 0o600
+    assert aikit.load_gateway_config()["key"] == key
+    # runtimes pristine
+    assert rc.read_text() == original                        # rc byte-for-byte
+    assert not env_file.exists()                             # portable runtime file gone
+    # security invariant: key only in the cred store, in no agent-runtime file under HOME
+    assert _files_with_key(home, key, exclude=aikit.GATEWAY_CONFIG_FILE) == []
+
+
+def test_gateway_purge_forgets_creds_and_wipes_key(aikit, isolated_gateway):
+    """`on` → `purge`: config.json + gateway dir gone, key absent from the WHOLE HOME tree,
+    status unconfigured, and the toggle ability removed (re-`on` needs creds again)."""
+    rc = isolated_gateway
+    home = rc.parent
+    key = "sk-purge-secret-2468013579"
+
+    aikit.do_gateway_on("https://gw.example.com", key, yes=True)
+    aikit.do_gateway_purge(yes=True)
+
+    assert not aikit.GATEWAY_CONFIG_FILE.exists()
+    assert not aikit.GATEWAY_DIR.exists()                    # dir pruned
+    assert aikit.read_manifest() == {}                       # deactivated as part of purge
+    assert _files_with_key(home, key) == []                  # key gone everywhere under HOME
+    # toggle ability removed: with nothing saved, resolving creds (no prompt) raises
+    with pytest.raises(aikit.AikitError):
+        aikit._resolve_gateway_credentials(None, None, prompt_missing=False)
+
+
+def test_gateway_off_then_purge_reaches_same_end_state(aikit, isolated_gateway):
+    """`off` (keep creds) then `purge` (inactive path) reaches the same end state as on→purge."""
+    rc = isolated_gateway
+    home = rc.parent
+    key = "sk-offpurge-1111222233"
+
+    aikit.do_gateway_on("https://gw.example.com", key, yes=True)
+    aikit.do_gateway_off()
+    assert aikit.GATEWAY_CONFIG_FILE.exists()                # off kept creds
+    aikit.do_gateway_purge(yes=True)                         # forget them (inactive-but-configured)
+    assert not aikit.GATEWAY_CONFIG_FILE.exists()
+    assert not aikit.GATEWAY_DIR.exists()
+    assert _files_with_key(home, key) == []
+
+
+def test_gateway_purge_noop_when_nothing_saved(aikit, isolated_gateway, capsys):
+    """`purge` with nothing saved is a friendly no-op (exit 0, no crash)."""
+    aikit.do_gateway_purge(yes=True)
+    out = capsys.readouterr().out
+    assert "nothing to forget" in out.lower()
+    assert not aikit.GATEWAY_CONFIG_FILE.exists()
+
+
+def test_gateway_purge_dry_run_is_non_destructive(aikit, isolated_gateway, capsys):
+    """`purge --dry-run` previews credential removal but writes nothing."""
+    aikit.do_gateway_on("https://gw.example.com", "sk-dry-1234567890", yes=True)
+    capsys.readouterr()
+    aikit.do_gateway_purge(dry_run=True)
+    out = capsys.readouterr().out
+    assert "Dry run" in out and "config.json" in out
+    assert aikit.GATEWAY_CONFIG_FILE.exists()                # untouched
+    assert aikit.read_manifest()["active"] is True           # still active
+
+
+def test_gateway_off_purge_flag_routes_to_purge(aikit, isolated_gateway, monkeypatch):
+    """`aikit gateway off --purge` routes through cmd_gateway to do_gateway_purge."""
+    import types
+    calls = []
+    monkeypatch.setattr(aikit, "do_gateway_purge", lambda **kw: calls.append(("purge", kw)))
+    monkeypatch.setattr(aikit, "do_gateway_off", lambda **kw: calls.append(("off", kw)))
+    args = types.SimpleNamespace(gateway_action="off", shell=None, dry_run=False,
+                                 purge=True, yes=True)
+    aikit.cmd_gateway(args)
+    assert calls == [("purge", {"shell": None, "yes": True, "dry_run": False})]
