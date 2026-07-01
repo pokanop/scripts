@@ -105,7 +105,7 @@ shows, per tool, whether its config is *installed by aikit*, *user-owned (kept)*
 
 ## Tool coverage
 
-aikit knows 25 agents, but not all of them can be pointed at a third-party gateway.
+aikit knows 26 agents, but not all of them can be pointed at a third-party gateway.
 Rather than silently route the ones it can and ignore the rest, aikit tracks a
 **coverage state** for *every* agent and reports it — so you always know what's
 wrapped, what isn't yet, and what never will be. `aikit gateway coverage` prints the
@@ -195,7 +195,7 @@ declared tool resolves to `passthrough` and is honoured by `coverage`/`status`/`
   token). Set per-passthrough with a `credential_mode` in the mapping.
 
 ```bash
-aikit gateway coverage        # the full 25-row matrix: agent, detected?, state, how/why
+aikit gateway coverage        # the full 26-row matrix: agent, detected?, state, how/why
 ```
 
 > The guarantee: **no detected agent is silently omitted.** If aikit ever gains an
@@ -304,7 +304,7 @@ reports *inactive (credentials saved)* with the URL + masked key and points you 
 
 ### `aikit gateway coverage`
 
-Read-only. Prints the full **25-row coverage matrix** — for every agent aikit knows:
+Read-only. Prints the full **26-row coverage matrix** — for every agent aikit knows:
 `detected?`, its coverage **state** (`renderer` / `env` / `passthrough` / `pending` /
 `unsupported`), and *how / why* (the routing var or config path, or the reason it isn't
 routed) — plus a per-state tally. This is the honest, one-look answer to "does the

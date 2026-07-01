@@ -1,6 +1,6 @@
 # 🤖 aikit — AI Coding Agent CLI Installer & Manager
 
-**Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.**
+**Install, update, authenticate, and manage 26 AI coding agent CLIs from one tool.**
 
 `aikit` · Python 3 · `rich` · `flask` · `requests`
 
@@ -25,7 +25,7 @@ aikit setup
 
 ---
 
-## Agents (25)
+## Agents (26)
 
 | # | Agent | Install | Auth |
 |---|-------|---------|------|
@@ -37,23 +37,24 @@ aikit setup
 | 6 | ⚡ **Kilo CLI** | `npm` | `kilo auth login` (Kilo account) or `/connect` for BYOK |
 | 7 | 🔓 **OpenCode** | `npm` | `opencode auth login` for provider API keys |
 | 8 | 🐉 **Qwen Code** | `npm` | `/auth` inside `qwen` (OAuth, Coding Plan, or API keys) |
-| 9 | 🐙 **GitHub Copilot CLI** | `curl` script | `copilot login` OAuth or `COPILOT_GITHUB_TOKEN` / fine-grained PAT |
-| 10 | 🚀 **Grok Build** | `curl` script | `grok login` OAuth or `XAI_API_KEY` |
-| 11 | 🤝 **Aider** | `pip`/`curl` | Provider API keys |
-| 12 | 🌙 **Kimi Code** | `curl` script | `/login` in `kimi` (membership OAuth) or Kimi Code Console API key |
-| 13 | 🦅 **Kiro CLI** | `curl` script | `kiro-cli login` OAuth or `KIRO_API_KEY` (Pro+) |
-| 14 | π **Pi Coding Agent** | `npm` | `/login` in `pi` (subscription OAuth) or provider API keys |
-| 15 | 🦞 **OpenClaw** | `curl` script | `openclaw onboard` guided setup |
-| 16 | ⬛ **Blackbox AI** | `npm` | API key from dashboard → `blackbox configure` |
-| 17 | 🪿 **Goose** | `curl` script | `goose configure` or provider API keys |
-| 18 | 🌀 **Cline** | `npm` | `cline auth` OAuth (Cline, ChatGPT) or BYOK |
-| 19 | 🙌 **OpenHands CLI** | `curl` script | First-run LLM settings; `openhands login` for Cloud only |
-| 20 | 💘 **Crush** | `npm` | `crush login` OAuth or provider env vars |
-| 21 | 🔊 **Amp** | `curl` script | `amp login` (browser sign-in) or `AMP_API_KEY` |
-| 22 | ✨ **Gemini CLI** | `npm` | Google OAuth in `gemini`, or `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
-| 23 | 🔮 **LLM** | `pip` | `llm keys set <provider>` or provider env vars |
-| 24 | ▶️ **Continue CLI** | `curl` script | `cn login` (Continue account) or `ANTHROPIC_API_KEY` |
-| 25 | 🐚 **Shell GPT** | `pip` | `sgpt` first-run key prompt or `OPENAI_API_KEY` |
+| 9 | 🎯 **Qodo Gen CLI** | `npm` | `qodo login` (Qodo account) or `QODO_API_KEY` / provider keys for BYOK |
+| 10 | 🐙 **GitHub Copilot CLI** | `curl` script | `copilot login` OAuth or `COPILOT_GITHUB_TOKEN` / fine-grained PAT |
+| 11 | 🚀 **Grok Build** | `curl` script | `grok login` OAuth or `XAI_API_KEY` |
+| 12 | 🤝 **Aider** | `pip`/`curl` | Provider API keys |
+| 13 | 🌙 **Kimi Code** | `curl` script | `/login` in `kimi` (membership OAuth) or Kimi Code Console API key |
+| 14 | 🦅 **Kiro CLI** | `curl` script | `kiro-cli login` OAuth or `KIRO_API_KEY` (Pro+) |
+| 15 | π **Pi Coding Agent** | `npm` | `/login` in `pi` (subscription OAuth) or provider API keys |
+| 16 | 🦞 **OpenClaw** | `curl` script | `openclaw onboard` guided setup |
+| 17 | ⬛ **Blackbox AI** | `npm` | API key from dashboard → `blackbox configure` |
+| 18 | 🪿 **Goose** | `curl` script | `goose configure` or provider API keys |
+| 19 | 🌀 **Cline** | `npm` | `cline auth` OAuth (Cline, ChatGPT) or BYOK |
+| 20 | 🙌 **OpenHands CLI** | `curl` script | First-run LLM settings; `openhands login` for Cloud only |
+| 21 | 💘 **Crush** | `npm` | `crush login` OAuth or provider env vars |
+| 22 | 🔊 **Amp** | `curl` script | `amp login` (browser sign-in) or `AMP_API_KEY` |
+| 23 | ✨ **Gemini CLI** | `npm` | Google OAuth in `gemini`, or `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
+| 24 | 🔮 **LLM** | `pip` | `llm keys set <provider>` or provider env vars |
+| 25 | ▶️ **Continue CLI** | `curl` script | `cn login` (Continue account) or `ANTHROPIC_API_KEY` |
+| 26 | 🐚 **Shell GPT** | `pip` | `sgpt` first-run key prompt or `OPENAI_API_KEY` |
 
 ---
 
@@ -65,7 +66,7 @@ aikit setup
 | `aikit install [agents...]` | Install agents (multi-select picker if none) |
 | `aikit update [agents...]` | Update agents (all installed if none) |
 | `aikit uninstall [agent...]` | Remove agents |
-| `aikit list` | Status table of all 25 agents |
+| `aikit list` | Status table of all 26 agents |
 | `aikit auth [agent]` | Guided authentication setup |
 | `aikit doctor` | Diagnose environment and agent health |
 | `aikit serve` | Start web dashboard |
@@ -84,7 +85,7 @@ Select agents to install
    2. [ ] 🛸 Antigravity
    3. [X] 🖱️ Cursor CLI
   ...
-  Selected: 1/25  cursor
+  Selected: 1/26  cursor
 ```
 
 Press `Space` or enter numbers to toggle. Press `Enter` to confirm. Press `q` to cancel.
@@ -169,7 +170,7 @@ logged.
 
 ```
 aikit                          # Single-file Python script (~1,600 lines)
-├── Agent registry             # 25 agents, each with platform-aware install commands
+├── Agent registry             # 26 agents, each with platform-aware install commands
 ├── Subprocess runner          # Install/update/uninstall execution
 ├── Config system              # JSON-based, three-tier loading, env var overrides
 ├── Rich TUI                   # Tables, panels, interactive multi-select picker

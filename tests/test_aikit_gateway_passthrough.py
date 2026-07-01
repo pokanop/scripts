@@ -170,7 +170,7 @@ def test_static_coverage_is_the_declared_baseline(aikit):
     counts: dict = {}
     for c in cov.values():
         counts[c["state"]] = counts.get(c["state"], 0) + 1
-    assert counts == {"renderer": 12, "env": 5, "pending": 3, "unsupported": 5}
+    assert counts == {"renderer": 12, "env": 5, "pending": 4, "unsupported": 5}
     assert cov["cursor"]["state"] == "unsupported"
 
 

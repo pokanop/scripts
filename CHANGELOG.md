@@ -62,6 +62,13 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.15.0 — 2026-07-01
+- **Add Qodo Gen CLI** (`qodo`) to the agent registry. Installs via `npm install -g
+  @qodo/command` (the renamed successor to deprecated `@qodo/gen`). Auth: `qodo login`
+  / `QODO_API_KEY`, with BYOK via provider keys. Gateway coverage: `pending` — Qodo
+  routes through its cloud API; no verified `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL`
+  override for LLM routing. Agent count 25 → 26. (POK-74)
+
 ### 1.14.0 — 2026-07-01
 - **Native config renderers for config-driven agents (close coverage gaps).** Three new
   Stage-3 renderers wrap tools that were detected but not reliably routed, plus env

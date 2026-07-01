@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.14.0
-Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.
+aikit — AI Coding Agent CLI Installer & Manager  v1.15.0
+Install, update, authenticate, and manage 26 AI coding agent CLIs from one tool.
 
 Architecture:
     Agent registry → platform-aware install → auth multiplexing → web dashboard
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 
 import scriptkit as sk
 
@@ -199,7 +199,7 @@ def resolve_uninstall_cmd(agent):
 
 
 # =============================================================================
-# Agent Registry — 25 coding agents, platform-aware install commands
+# Agent Registry — 26 coding agents, platform-aware install commands
 # =============================================================================
 
 _CURRENT_PLATFORM = platform.system()  # "Linux", "Darwin", "Windows"
@@ -383,6 +383,28 @@ AGENTS = {
         "auth_note": "Run 'qwen' and use '/auth' for Qwen OAuth, Coding Plan, or API keys. Or configure ~/.qwen/settings.json / env vars.",
         "requires": ["node", "npm"],
         "tags": ["qwen", "alibaba", "open-source", "multi-protocol"],
+    },
+    "qodo": {
+        "name": "Qodo Gen CLI",
+        "bin": "qodo",
+        "vendor": "QodoAI",
+        "homepage": "https://qodo.ai/features/qodo-cli/",
+        "icon": "🎯",
+        "install": {
+            "Linux": npm_install_cmd("@qodo/command"),
+            "Darwin": npm_install_cmd("@qodo/command"),
+            "Windows": npm_install_cmd("@qodo/command"),
+        },
+        "version_cmd": "qodo --version",
+        "update_cmd": npm_install_cmd("@qodo/command@latest"),
+        "path_markers": ["@qodo/command", "@qodo/gen"],
+        "version_check": {"type": "npm", "package": "@qodo/command"},
+        "uninstall_cmd": None,
+        "auth_type": "account_or_byok",
+        "auth_env_vars": ["QODO_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
+        "auth_note": "Run 'qodo login' to sign in with a Qodo account (free tier). Or set QODO_API_KEY, or OPENAI_API_KEY / ANTHROPIC_API_KEY for BYOK. 'qodo --model={model-name}' selects a specific model.",
+        "requires": ["node", "npm"],
+        "tags": ["qodo", "quality", "test-coverage", "code-review", "mcp", "ci-cd", "free-tier"],
     },
     "copilot": {
         "name": "GitHub Copilot CLI",
@@ -3574,6 +3596,8 @@ GATEWAY_COVERAGE = {
                   "reason": "no MOONSHOT_API_BASE; needs ~/.kimi/config.toml provider (type=openai_legacy) base_url"},
     "blackbox":  {"state": COVERAGE_PENDING,
                   "reason": "auth is proprietary BLACKBOX_API_KEY via 'blackbox configure' (not a provider var the env layer sets); no verified OPENAI_BASE_URL support — Stage-7: probe live install for a settable base_url (likely renderer)"},
+    "qodo":      {"state": COVERAGE_PENDING,
+                  "reason": "Qodo-cloud auth (QODO_API_KEY / ~/.qodo/auth.key); no verified OPENAI_BASE_URL or ANTHROPIC_BASE_URL for LLM routing — needs a renderer if BYOK endpoint override is confirmed"},
     # -- unsupported / passthrough-candidate: first-party CLIs. Each declares its
     #    native protocol + the LiteLLM passthrough route that wraps it (verified against
     #    llm_passthrough_endpoints.py), the auth var the tool reads, and whether the
