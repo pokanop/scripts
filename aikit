@@ -3276,7 +3276,7 @@ GATEWAY_COVERAGE = {
     "kimi":      {"state": COVERAGE_PENDING,
                   "reason": "no MOONSHOT_API_BASE; needs ~/.kimi/config.toml provider (type=openai_legacy) base_url"},
     "blackbox":  {"state": COVERAGE_PENDING,
-                  "reason": "may honor OPENAI_BASE_URL (Gemini-CLI fork) — unverified; confirm before wiring as env vs renderer"},
+                  "reason": "auth is proprietary BLACKBOX_API_KEY via 'blackbox configure' (not a provider var the env layer sets); no verified OPENAI_BASE_URL support — Stage-7: probe live install for a settable base_url (likely renderer)"},
     # -- unsupported: first-party backend, cannot target a third-party gateway. --
     "antigravity": {"state": COVERAGE_UNSUPPORTED, "reason": "Google-account backend — no third-party base-URL"},
     "cursor":      {"state": COVERAGE_UNSUPPORTED, "reason": "routes through Cursor's backend — no third-party base-URL"},
