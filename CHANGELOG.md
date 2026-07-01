@@ -62,6 +62,15 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.15.0 — 2026-07-01
+- **New agent: Droid (Factory AI).** Adds Factory's terminal coding agent (`droid`)
+  via the official `curl -fsSL https://app.factory.ai/cli | sh` installer (Linux/macOS;
+  Windows unsupported). Updates with `droid update`; version checks via
+  `droid update --check`. OAuth on first `droid` run (no separate login subcommand).
+  Gateway coverage: **unsupported** — routes through Factory AI's proprietary backend
+  with no OpenAI-compatible passthrough or base-URL override. Agent count 25 → 26.
+  (POK-75)
+
 ### 1.14.0 — 2026-07-01
 - **Native config renderers for config-driven agents (close coverage gaps).** Three new
   Stage-3 renderers wrap tools that were detected but not reliably routed, plus env

@@ -373,7 +373,7 @@ def test_aikit_validate_agent_keys_ok(tool_loader):
 
 def test_aikit_new_agent_registry_entries(tool_loader):
     m = tool_loader("aikit")
-    assert len(m.AGENTS) == 25
+    assert len(m.AGENTS) == 26
     goose = m.AGENTS["goose"]
     assert goose["bin"] == "goose"
     assert goose["update_cmd"] == "goose update"
@@ -409,6 +409,22 @@ def test_aikit_amp_registry_entry(tool_loader):
     assert "ampcode.com/install.sh" in amp["install"]["Linux"]
     assert "ampcode.com/install.sh" in amp["install"]["Darwin"]
     assert "install.ps1" in amp["install"]["Windows"]
+
+
+def test_aikit_droid_registry_entry(tool_loader):
+    m = tool_loader("aikit")
+    droid = m.AGENTS["droid"]
+    assert droid["bin"] == "droid"
+    assert droid["vendor"] == "Factory AI"
+    assert droid["update_cmd"] == "droid update"
+    assert droid.get("update_via_install") is True
+    assert droid["auth_type"] == "oauth_browser"
+    assert droid["install"]["Windows"] is None
+    assert "app.factory.ai/cli" in droid["install"]["Linux"]
+    assert droid["version_check"]["cmd"] == "droid update --check"
+    cov = m.gateway_coverage()
+    assert cov["droid"]["state"] == "unsupported"
+    assert "proprietary" in cov["droid"]["reason"]
 
 
 def test_aikit_resolve_update_cmd_amp(tool_loader, monkeypatch):
