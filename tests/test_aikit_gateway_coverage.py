@@ -48,7 +48,7 @@ def test_coverage_classifies_every_agent(aikit):
     cov = aikit.gateway_coverage()
     # Every agent in the registry is classified — the anti-silent-omission guarantee.
     assert set(cov) == set(aikit.AGENTS)
-    assert len(cov) == 25
+    assert len(cov) == 26
 
 
 def test_coverage_bucket_counts_match_audit(aikit):
@@ -56,7 +56,7 @@ def test_coverage_bucket_counts_match_audit(aikit):
     counts: dict = {}
     for c in cov.values():
         counts[c["state"]] = counts.get(c["state"], 0) + 1
-    assert counts == {"renderer": 12, "env": 5, "pending": 3, "unsupported": 5}
+    assert counts == {"renderer": 12, "env": 6, "pending": 3, "unsupported": 5}
     assert "unclassified" not in counts   # nothing left uncategorised
 
 
@@ -100,7 +100,7 @@ def test_unclassified_agent_is_surfaced_not_dropped(aikit, monkeypatch):
 # --- rows builder -----------------------------------------------------------
 def test_coverage_rows_span_all_agents_in_state_order(aikit):
     rows = aikit.gateway_coverage_rows(detector=lambda k: False)
-    assert len(rows) == 25
+    assert len(rows) == 26
     assert {r["id"] for r in rows} == set(aikit.AGENTS)
     # Grouped: the first 12 rows are the renderer set (sorted within the group).
     assert all(r["state"] == "renderer" for r in rows[:12])

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.14.0
-Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.
+aikit — AI Coding Agent CLI Installer & Manager  v1.15.0
+Install, update, authenticate, and manage 26 AI coding agent CLIs from one tool.
 
 Architecture:
     Agent registry → platform-aware install → auth multiplexing → web dashboard
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 
 import scriptkit as sk
 
@@ -199,7 +199,7 @@ def resolve_uninstall_cmd(agent):
 
 
 # =============================================================================
-# Agent Registry — 25 coding agents, platform-aware install commands
+# Agent Registry — 26 coding agents, platform-aware install commands
 # =============================================================================
 
 _CURRENT_PLATFORM = platform.system()  # "Linux", "Darwin", "Windows"
@@ -526,6 +526,30 @@ AGENTS = {
         "auth_note": "Run 'pi' then '/login' for subscription OAuth (Claude, ChatGPT, Copilot) or API keys. Or set provider env vars.",
         "requires": ["node", "npm"],
         "tags": ["pi", "minimal", "customizable", "extensions", "self-modifying"],
+    },
+    "plandex": {
+        "name": "Plandex",
+        "bin": "plandex",
+        "bin_aliases": ["pdx"],
+        "vendor": "Plandex AI",
+        "homepage": "https://plandex.ai",
+        "icon": "📐",
+        "install": {
+            "Linux": "curl -sL https://plandex.ai/install.sh | bash",
+            "Darwin": "curl -sL https://plandex.ai/install.sh | bash",
+            "Windows": 'wsl -d Ubuntu bash -lc "curl -sL https://plandex.ai/install.sh | bash"',
+        },
+        "version_cmd": "plandex --version",
+        "update_cmd": None,
+        "update_via_install": True,
+        "path_markers": ["/.plandex-v2/", "/.plandex-home-v2/"],
+        "version_check": {"type": "github_release", "repo": "plandex-ai/plandex", "tag_prefix": "cli/v"},
+        "uninstall_cmd": binary_uninstall_cmd("plandex", extra_paths=["$HOME/.local/bin/pdx"]),
+        "auth_type": "api_key",
+        "auth_env_vars": ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"],
+        "auth_note": "Set OPENROUTER_API_KEY (recommended — access to 200+ models) or individual provider keys. Run 'plandex new' to start your first plan. Plandex Cloud has wound down; use local or self-hosted mode.",
+        "requires": ["curl"],
+        "tags": ["plandex", "pdx", "open-source", "large-tasks", "diff-sandbox", "go"],
     },
     "openclaw": {
         "name": "OpenClaw",
@@ -3558,6 +3582,7 @@ GATEWAY_COVERAGE = {
     "claude":   {"state": COVERAGE_ENV, "via": "ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN (/anthropic route)"},
     "gemini":   {"state": COVERAGE_ENV, "via": "GEMINI_API_BASE / GOOGLE_GEMINI_BASE_URL (/gemini route)"},
     "openclaw": {"state": COVERAGE_ENV, "via": "OPENAI_BASE_URL / ANTHROPIC_BASE_URL"},
+    "plandex":  {"state": COVERAGE_ENV, "via": "OPENAI_API_BASE + OPENAI_API_KEY"},
     "sgpt":     {"state": COVERAGE_ENV, "via": "OPENAI_BASE_URL + OPENAI_API_KEY"},
     # openhands reads LLM_* (not OPENAI_*) and only with `--override-with-envs`; its
     # on-disk agent_settings.json needs a literal key aikit won't write to a shared file,

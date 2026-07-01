@@ -62,6 +62,15 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.15.0 — 2026-07-01
+- **Plandex agent support.** New registry entry for the Plandex CLI (`plandex` / `pdx`):
+  curl install from `https://plandex.ai/install.sh`, GitHub-release version checks
+  (`cli/v*`), re-install for updates (no standalone `upgrade` subcommand), and Windows
+  via WSL only. Auth is provider API keys (`OPENROUTER_API_KEY` recommended).
+- **Gateway coverage:** `plandex` → **env** via `OPENAI_API_BASE + OPENAI_API_KEY`
+  (Plandex reads `OPENAI_API_BASE` for OpenAI-compatible routing; the env layer sets it).
+  Static baseline is now `12 renderer · 6 env · 3 pending · 5 unsupported`. (POK-72)
+
 ### 1.14.0 — 2026-07-01
 - **Native config renderers for config-driven agents (close coverage gaps).** Three new
   Stage-3 renderers wrap tools that were detected but not reliably routed, plus env

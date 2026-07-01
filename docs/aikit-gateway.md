@@ -105,7 +105,7 @@ shows, per tool, whether its config is *installed by aikit*, *user-owned (kept)*
 
 ## Tool coverage
 
-aikit knows 25 agents, but not all of them can be pointed at a third-party gateway.
+aikit knows 26 agents, but not all of them can be pointed at a third-party gateway.
 Rather than silently route the ones it can and ignore the rest, aikit tracks a
 **coverage state** for *every* agent and reports it — so you always know what's
 wrapped, what isn't yet, and what never will be. `aikit gateway coverage` prints the
@@ -119,9 +119,9 @@ full matrix; `on` and `status` call out anything detected-but-not-routed inline.
 | **pending** | detected but not reliably routed yet — no renderer and no standard env var; a tracked gap | ❌ not yet |
 | **unsupported** | no usable native passthrough route **and** no OpenAI-compatible / base-URL override path — with the real reason | 🚫 by design |
 
-- **env-routed (5):** `claude` (`ANTHROPIC_BASE_URL`+`ANTHROPIC_AUTH_TOKEN`),
+- **env-routed (6):** `claude` (`ANTHROPIC_BASE_URL`+`ANTHROPIC_AUTH_TOKEN`),
   `gemini` (`GEMINI_API_BASE`/`GOOGLE_GEMINI_BASE_URL`), `openclaw`, `sgpt` (via
-  `OPENAI_BASE_URL`), and `openhands`. OpenHands reads `LLM_*` (not `OPENAI_*`) and only
+  `OPENAI_BASE_URL`), `plandex` (via `OPENAI_API_BASE`), and `openhands`. OpenHands reads `LLM_*` (not `OPENAI_*`) and only
   with `openhands --override-with-envs`, so `on` exports `LLM_BASE_URL`+`LLM_API_KEY` and
   the coverage row states that caveat (its on-disk `agent_settings.json`, if present,
   takes precedence). These need no native config — the env layer carries them.
@@ -195,7 +195,7 @@ declared tool resolves to `passthrough` and is honoured by `coverage`/`status`/`
   token). Set per-passthrough with a `credential_mode` in the mapping.
 
 ```bash
-aikit gateway coverage        # the full 25-row matrix: agent, detected?, state, how/why
+aikit gateway coverage        # the full 26-row matrix: agent, detected?, state, how/why
 ```
 
 > The guarantee: **no detected agent is silently omitted.** If aikit ever gains an
@@ -304,7 +304,7 @@ reports *inactive (credentials saved)* with the URL + masked key and points you 
 
 ### `aikit gateway coverage`
 
-Read-only. Prints the full **25-row coverage matrix** — for every agent aikit knows:
+Read-only. Prints the full **26-row coverage matrix** — for every agent aikit knows:
 `detected?`, its coverage **state** (`renderer` / `env` / `passthrough` / `pending` /
 `unsupported`), and *how / why* (the routing var or config path, or the reason it isn't
 routed) — plus a per-state tally. This is the honest, one-look answer to "does the
