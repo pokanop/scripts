@@ -434,6 +434,9 @@ def test_aikit_droid_registry_entry(tool_loader):
     assert droid["update_cmd"] == "droid update"
     assert droid.get("update_via_install") is None
     assert droid["auth_type"] == "oauth_browser"
+    # Factory AI supports headless/BYOK auth via $FACTORY_API_KEY (fk-…); it must be
+    # registered so discover_auth's generic env-var check picks it up (POK-76).
+    assert "FACTORY_API_KEY" in droid["auth_env_vars"]
     assert droid["install"]["Windows"] is None
     assert "app.factory.ai/cli" in droid["install"]["Linux"]
     assert droid["version_check"]["cmd"] == "droid update --check"
@@ -822,6 +825,62 @@ def test_aikit_discover_auth_antigravity_token(tool_loader, monkeypatch, tmp_pat
     assert result["auth_configured"] is True
     assert result["method"] == "cred_file"
     assert result["source"] == str(tok_file)
+
+
+def test_aikit_discover_auth_droid_env_var(tool_loader, monkeypatch):
+    # POK-76: Factory AI's headless/BYOK auth ($FACTORY_API_KEY) must count as authed.
+    m = tool_loader("aikit")
+    monkeypatch.setenv("FACTORY_API_KEY", "fk-test-key")
+    result = m.discover_auth("droid")
+    assert result["auth_configured"] is True
+    assert result["method"] == "env_var"
+    assert result["source"] == "$FACTORY_API_KEY"
+
+
+def test_aikit_discover_auth_droid_cred_file(tool_loader, monkeypatch, tmp_path):
+    # POK-76: `droid login` fallback credential file under ~/.factory/ means authed.
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    factory_dir = home / ".factory"
+    factory_dir.mkdir(parents=True)
+    cred_file = factory_dir / "auth.json"
+    cred_file.write_text('{"token": "abc"}')
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("FACTORY_API_KEY", raising=False)
+    result = m.discover_auth("droid")
+    assert result["auth_configured"] is True
+    assert result["method"] == "cred_file"
+    assert result["source"] == str(cred_file)
+
+
+def test_aikit_discover_auth_droid_settings_file(tool_loader, monkeypatch, tmp_path):
+    # POK-76: keyring-backed OAuth leaves no cred file, but `droid login` writes
+    # ~/.factory/settings.json — that is enough to consider droid authenticated.
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    factory_dir = home / ".factory"
+    factory_dir.mkdir(parents=True)
+    settings = factory_dir / "settings.json"
+    settings.write_text('{"model": "claude"}')
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("FACTORY_API_KEY", raising=False)
+    result = m.discover_auth("droid")
+    assert result["auth_configured"] is True
+    assert result["method"] == "config_file"
+    assert result["source"] == str(settings)
+
+
+def test_aikit_discover_auth_droid_unauthenticated(tool_loader, monkeypatch, tmp_path):
+    # POK-76 guard: an unauthenticated droid (only logs, no creds/settings, no env,
+    # no prior aikit-recorded auth) must still report needs-auth — no false positive.
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    (home / ".factory" / "logs").mkdir(parents=True)
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("FACTORY_API_KEY", raising=False)
+    monkeypatch.setattr(m, "load_config", lambda: {"agents": {}})
+    result = m.discover_auth("droid")
+    assert result["auth_configured"] is False
 
 
 def test_aikit_discover_auth_kilo_ignores_opencode_config(tool_loader, monkeypatch, tmp_path):

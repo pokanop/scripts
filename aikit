@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.15.0
+aikit — AI Coding Agent CLI Installer & Manager  v1.15.1
 Install, update, authenticate, and manage 31 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.15.0"
+__version__ = "1.15.1"
 
 import scriptkit as sk
 
@@ -888,8 +888,8 @@ AGENTS = {
         },
         "uninstall_cmd": None,
         "auth_type": "oauth_browser",
-        "auth_env_vars": [],
-        "auth_note": "Run 'droid' on first use for Factory AI account OAuth. Free account required; enterprise plans available.",
+        "auth_env_vars": ["FACTORY_API_KEY"],
+        "auth_note": "Run 'droid' on first use for Factory AI account OAuth, or set FACTORY_API_KEY (fk-…) for headless/BYOK. Free account required; enterprise plans available.",
         "requires": ["curl"],
         "tags": ["droid", "factory", "terminal-bench", "multi-model", "enterprise", "ci-cd"],
     },
@@ -2559,6 +2559,26 @@ def discover_auth(agent_key):
         ]:
             if ap.exists() and ap.stat().st_size > 0:
                 return {"auth_configured": True, "method": "config_file", "source": str(ap)}
+
+    # Droid (Factory AI): `droid login` stores OAuth tokens in the system keyring
+    # with a file fallback under ~/.factory/, and writes settings there on first
+    # authenticated run; API-key auth uses $FACTORY_API_KEY (checked generically
+    # above). Detect the credential fallback file or those settings.
+    if agent_key == "droid":
+        factory_dir = home / ".factory"
+        for cred_name in ("auth.json", "credentials.json", ".credentials.json", "session.json", "tokens.json"):
+            cred_path = factory_dir / cred_name
+            if cred_path.exists() and cred_path.stat().st_size > 0:
+                return {"auth_configured": True, "method": "cred_file", "source": str(cred_path)}
+        # settings files are written on authenticated use, not on mere invocation:
+        # verified on a real install (POK-76) — running droid unauthenticated seeds
+        # ~/.factory/{cache,logs,sessions,certs,telemetry,host.json} but no
+        # settings.json, so this stays a needs-auth signal. Same best-effort
+        # heuristic amp uses for ~/.config/amp/settings.json.
+        for cfg_name in ("settings.json", "settings.local.json"):
+            cfg_path = factory_dir / cfg_name
+            if cfg_path.exists() and cfg_path.stat().st_size > 0:
+                return {"auth_configured": True, "method": "config_file", "source": str(cfg_path)}
 
     # For agents with auth_env_vars, check shell profile files
     if env_vars and not auth_type == "oauth_browser":
