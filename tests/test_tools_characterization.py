@@ -373,7 +373,7 @@ def test_aikit_validate_agent_keys_ok(tool_loader):
 
 def test_aikit_new_agent_registry_entries(tool_loader):
     m = tool_loader("aikit")
-    assert len(m.AGENTS) == 25
+    assert len(m.AGENTS) == 26
     goose = m.AGENTS["goose"]
     assert goose["bin"] == "goose"
     assert goose["update_cmd"] == "goose update"

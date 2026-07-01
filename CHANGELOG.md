@@ -62,6 +62,12 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.15.0 — 2026-07-01
+- **Auggie (Augment Code CLI).** New agent entry for Augment's terminal CLI (`auggie`),
+  installed via npm (`@augmentcode/auggie`). Auth is browser OAuth via `auggie login`.
+  Classified as gateway `unsupported` — Augment's backend is proprietary with no
+  OpenAI-compatible passthrough route. Agent count 25 → 26. (POK-70)
+
 ### 1.14.0 — 2026-07-01
 - **Native config renderers for config-driven agents (close coverage gaps).** Three new
   Stage-3 renderers wrap tools that were detected but not reliably routed, plus env

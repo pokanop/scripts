@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.14.0
-Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.
+aikit — AI Coding Agent CLI Installer & Manager  v1.15.0
+Install, update, authenticate, and manage 26 AI coding agent CLIs from one tool.
 
 Architecture:
     Agent registry → platform-aware install → auth multiplexing → web dashboard
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 
 import scriptkit as sk
 
@@ -199,7 +199,7 @@ def resolve_uninstall_cmd(agent):
 
 
 # =============================================================================
-# Agent Registry — 25 coding agents, platform-aware install commands
+# Agent Registry — 26 coding agents, platform-aware install commands
 # =============================================================================
 
 _CURRENT_PLATFORM = platform.system()  # "Linux", "Darwin", "Windows"
@@ -769,6 +769,29 @@ AGENTS = {
         "auth_note": "Run 'sgpt' once to store your API key in ~/.config/shell_gpt/.sgptrc, or set OPENAI_API_KEY.",
         "requires": ["python3", "pip"],
         "tags": ["sgpt", "shell-gpt", "shell", "open-source"],
+    },
+    "auggie": {
+        "name": "Auggie",
+        "bin": "auggie",
+        "vendor": "Augment Code",
+        "homepage": "https://www.augmentcode.com/product/cli",
+        "icon": "🔋",
+        "install": {
+            "Linux": npm_install_cmd("@augmentcode/auggie"),
+            "Darwin": npm_install_cmd("@augmentcode/auggie"),
+            "Windows": npm_install_cmd("@augmentcode/auggie"),
+        },
+        "version_cmd": "auggie --version",
+        "update_cmd": npm_install_cmd("@augmentcode/auggie@latest"),
+        "path_markers": ["@augmentcode/auggie", "/.augment/"],
+        "version_check": {"type": "npm", "package": "@augmentcode/auggie"},
+        "uninstall_cmd": None,
+        "auth_type": "oauth_browser",
+        "auth_env_vars": [],
+        "auth_cmd": "auggie login",
+        "auth_note": "Run 'auggie login' for Augment account OAuth (browser). Free tier available; paid plans from $60/month.",
+        "requires": ["node", "npm"],
+        "tags": ["augment", "auggie", "codebase-understanding", "mcp", "free-tier"],
     },
 }
 
@@ -3604,6 +3627,8 @@ GATEWAY_COVERAGE = {
                     "reason": "no native LiteLLM passthrough route for Sourcegraph's backend; AMP_URL points at Amp instances only — declare a custom mapping to route it",
                     "passthrough": {"protocol": "amp", "route": None,
                                     "auth_var": "AMP_API_KEY", "base_url_var": None}},
+    "auggie":      {"state": COVERAGE_UNSUPPORTED,
+                    "reason": "Augment's backend is proprietary — no OpenAI-compatible passthrough route or base-URL override exposed; cannot be routed via the LiteLLM gateway"},
 }
 
 
