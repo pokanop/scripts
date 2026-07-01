@@ -62,6 +62,42 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.13.0 — 2026-07-01
+- **Passthrough-endpoint discovery + native-protocol tool linking.** Routability
+  through a native passthrough route (claude → `/anthropic`) is now treated as a
+  **runtime, gateway-dependent** property, discovered from the live gateway — not a
+  static "unroutable" table. aikit stays a pure client: it discovers what the gateway
+  already exposes and links tools to it, never configuring LiteLLM.
+- **Composite discovery** (`discover_passthrough_routes`) — usable routes =
+  known built-in routes (`/anthropic`, `/gemini`, `/vertex_ai`, `/bedrock`, `/cohere`,
+  `/mistral`, `/openai`, `/vllm`, `/azure`, `/cursor`, verified against LiteLLM source)
+  ∩ (provider-tag inference ∪ a cheap, safe probe), **plus** any user-declared custom
+  routes. A route is always mounted, so **presence ≠ works**: a mounted-but-401 route is
+  reported **unusable** (cf. POK-62), never inferred usable. Degrades gracefully — no
+  admin key or a probe failure is "unknown", never a crash.
+- **New `aikit gateway verify`** — probes each candidate passthrough route (a models-list
+  GET, no tokens) and reports usability, **flagging any mounted-but-401 route** so a
+  mis-forwarding upstream credential is surfaced, not silently broken. `on` also warns
+  when a route it's wiring probes 401.
+- **New `passthrough` coverage state + reclassification.** The 5 vendor-locked tools
+  POK-66 marked `unsupported` are re-examined against the live route set: `cursor`
+  (`/cursor` Cursor Cloud Agents route **exists**) and `antigravity` (`/gemini` route
+  exists) now carry route-aware reasons — the blocker is the missing tool-side base-URL
+  override, not the gateway; `copilot`/`kiro`/`amp` stay `unsupported` (no native LiteLLM
+  route) with accurate reasons. Any of them **flips to `passthrough`** the moment a route
+  is usable and a base-URL override exists (or a custom mapping is declared).
+- **User-declared custom passthroughs** — the escape hatch for tools with no
+  auto-discoverable native route: `passthroughs: {tool: {route, auth_var, base_url_var,
+  credential_mode}}` in the gateway config. Env-wired through the managed block and
+  honoured by `coverage`/`status`/`verify`. `on` now **merge-saves** the config so
+  hand-added `passthroughs`/`credential_mode` survive a re-`on`.
+- **Credential modes** — default `virtual_key` (the gateway injects the upstream key);
+  opt into `forwarded_token` (the caller's own subscription token is forwarded upstream,
+  the mode that makes Claude Code Max work) via `credential_mode` — aikit then sets base
+  URLs but leaves the tool's auth token untouched. Per-passthrough override supported.
+- `on`/`status`/`coverage` account for passthrough-routed tools by name (route + auth
+  mode); nothing detected is silently omitted. (POK-68)
+
 ### 1.12.0 — 2026-07-01
 - **New `aikit gateway coverage`** — a read-only, per-agent coverage matrix for the
   gateway. For every one of the 25 agents it shows `detected?`, a **coverage state**
