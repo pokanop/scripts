@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.11.0
+aikit — AI Coding Agent CLI Installer & Manager  v1.12.0
 Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -17,6 +17,7 @@ Usage:
     aikit doctor                    Diagnose environment and agents
     aikit config get/set/list       Manage configuration
     aikit gateway on/off/purge      Toggle the LiteLLM gateway (purge forgets creds)
+    aikit gateway coverage          Show which agents route through the gateway (and which can't)
 
 Dependencies:
     pip install rich requests flask readchar
@@ -50,7 +51,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.11.0"
+__version__ = "1.12.0"
 
 import scriptkit as sk
 
@@ -2718,27 +2719,10 @@ GATEWAY_PROVIDERS = [
     ("ollama",           "Ollama (local)",        "ollama",           [],                                                   ["OLLAMA_API_BASE"],                             "/v1",         ["ollama"],           ["ollama"]),
 ]
 
-# Tools that aren't tied to one provider but speak the OpenAI-compatible API and
-# therefore just need OPENAI_BASE_URL + OPENAI_API_KEY pointed at the gateway.
-OPENAI_COMPATIBLE_TOOLS = [
-    # id              bins           py
-    ("aider",        ["aider"],     ["aider"]),
-    ("llm",          ["llm"],       ["llm"]),
-    ("opencode",     ["opencode"],  []),
-    ("pi",           ["pi"],        []),
-    ("hermes-agent", ["hermes"],    []),
-    ("codex",        ["codex"],     []),
-    ("crush",        ["crush"],     []),
-    ("goose",        ["goose"],     []),
-    ("continue",     ["cn"],        []),
-    ("cursor",       ["cursor"],    []),
-    ("sgpt",         ["sgpt"],      ["shell_gpt"]),
-    ("chatblade",    ["chatblade"], []),
-    ("mods",         ["mods"],      []),
-    ("langchain",    [],            ["langchain", "langchain_openai"]),
-    ("llamaindex",   [],            ["llama_index"]),
-    ("litellm",      ["litellm"],   ["litellm"]),
-]
+# Per-tool OpenAI-compatible coverage now lives in the gateway coverage model
+# (see GATEWAY_COVERAGE / gateway_coverage() below). The env layer beneath sets
+# OPENAI_* on every activation, so any tool that speaks the OpenAI-compatible API
+# is routed without a standalone table to maintain.
 
 # Universal OpenAI-compatible vars set for every activation (provider-independent).
 # Key vars take the virtual key; base vars take the gateway URL plus the given suffix
@@ -3240,6 +3224,102 @@ GATEWAY_TOOL_SPECS = [
     ("continue",     "continue", "continue.models.json",         None,                             render_continue),
 ]
 
+# --- coverage capability model ---------------------------------------------
+# Single source of truth for how (and whether) each agent in AGENTS reaches the
+# gateway. Four states — the whole point of this model is that every agent lands
+# in exactly one, so `status`/`on`/`coverage` can account for all of them and
+# never silently omit a detected tool.
+#
+#   renderer     aikit writes the tool's native config (the GATEWAY_TOOL_SPECS set)
+#   env          routed by a standard/provider env var build_env_pairs() already sets
+#   pending      detected but not reliably routed yet — no renderer and the env path
+#                is non-standard or absent; tracked here (visibly) until a later stage
+#                adds a native renderer or a new env var
+#   unsupported  bound to a first-party backend — cannot point at a third-party
+#                OpenAI-compatible gateway; correct to exclude, but declared not silent
+COVERAGE_RENDERER = "renderer"
+COVERAGE_ENV = "env"
+COVERAGE_PENDING = "pending"
+COVERAGE_UNSUPPORTED = "unsupported"
+COVERAGE_UNCLASSIFIED = "unclassified"   # fallback for an agent nobody has classified
+
+# Ordered for display (grouped, most-covered first) and for the `on` accounting.
+COVERAGE_STATE_ORDER = (
+    COVERAGE_RENDERER, COVERAGE_ENV, COVERAGE_PENDING,
+    COVERAGE_UNSUPPORTED, COVERAGE_UNCLASSIFIED,
+)
+# States that actually reach the gateway. Everything else is "detected but not routed".
+COVERAGE_ROUTED_STATES = frozenset({COVERAGE_RENDERER, COVERAGE_ENV})
+
+# Declared coverage for every agent NOT handled by a native renderer. Renderer
+# coverage derives from GATEWAY_TOOL_SPECS (single source), so those 9 agents are
+# intentionally absent here. `via` = the routing var/route (env); `reason` = the
+# blocking detail (pending/unsupported). Keyed by AGENTS id.
+GATEWAY_COVERAGE = {
+    # -- env: already reach the gateway through a standard/provider env var that
+    #    build_env_pairs() sets unconditionally (verified against the env layer). --
+    "claude":   {"state": COVERAGE_ENV, "via": "ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN (/anthropic route)"},
+    "gemini":   {"state": COVERAGE_ENV, "via": "GEMINI_API_BASE / GOOGLE_GEMINI_BASE_URL (/gemini route)"},
+    "qwen":     {"state": COVERAGE_ENV, "via": "OPENAI_BASE_URL + OPENAI_API_KEY"},
+    "openclaw": {"state": COVERAGE_ENV, "via": "OPENAI_BASE_URL / ANTHROPIC_BASE_URL"},
+    "sgpt":     {"state": COVERAGE_ENV, "via": "OPENAI_BASE_URL + OPENAI_API_KEY"},
+    # -- pending: detected but not reliably routed. `reason` records the known route
+    #    to wire up so the Stage-7 renderer worklist is actionable, not a mystery. --
+    "openhands": {"state": COVERAGE_PENDING,
+                  "reason": "reads LLM_BASE_URL / ~/.openhands/settings.json; env layer sets OPENAI_* but not LLM_BASE_URL"},
+    "kilo":      {"state": COVERAGE_PENDING,
+                  "reason": "opencode-fork BYOK provider config; no renderer or standard base-URL env var wired yet"},
+    "cline":     {"state": COVERAGE_PENDING,
+                  "reason": "base URL not settable by env (key-only); needs ~/.cline/data/globalState.json (openAiBaseUrl)"},
+    "grok":      {"state": COVERAGE_PENDING,
+                  "reason": "no XAI base-URL env var; needs ~/.grok/config.toml [model.*] base_url"},
+    "kimi":      {"state": COVERAGE_PENDING,
+                  "reason": "no MOONSHOT_API_BASE; needs ~/.kimi/config.toml provider (type=openai_legacy) base_url"},
+    "blackbox":  {"state": COVERAGE_PENDING,
+                  "reason": "auth is proprietary BLACKBOX_API_KEY via 'blackbox configure' (not a provider var the env layer sets); no verified OPENAI_BASE_URL support — Stage-7: probe live install for a settable base_url (likely renderer)"},
+    # -- unsupported: first-party backend, cannot target a third-party gateway. --
+    "antigravity": {"state": COVERAGE_UNSUPPORTED, "reason": "Google-account backend — no third-party base-URL"},
+    "cursor":      {"state": COVERAGE_UNSUPPORTED, "reason": "routes through Cursor's backend — no third-party base-URL"},
+    "copilot":     {"state": COVERAGE_UNSUPPORTED, "reason": "GitHub-locked — requires GitHub Copilot subscription/backend"},
+    "kiro":        {"state": COVERAGE_UNSUPPORTED, "reason": "AWS/Kiro backend — no third-party base-URL"},
+    "amp":         {"state": COVERAGE_UNSUPPORTED, "reason": "Sourcegraph backend — no third-party base-URL"},
+}
+
+
+def _renderer_target_rels():
+    """agent_key → native-config rel path (None when staged-only), from the specs."""
+    return {agent_key: target_rel
+            for _, agent_key, _, target_rel, _ in GATEWAY_TOOL_SPECS}
+
+
+def gateway_coverage():
+    """Full per-agent gateway coverage — the single map `status`/`on`/`coverage` read.
+
+    Spans **every** agent in AGENTS. ``renderer`` state derives from
+    GATEWAY_TOOL_SPECS (so it can't drift from what `on` actually writes); every
+    other agent's state comes from GATEWAY_COVERAGE. An agent in neither is returned
+    as ``unclassified`` rather than dropped — a newly-registered agent surfaces
+    loudly in `coverage` instead of being silently omitted.
+
+    Returns ``{agent_id: {"state", "via", "reason"}}`` (via/reason may be None).
+    """
+    renderer_targets = _renderer_target_rels()
+    cov = {}
+    for key in AGENTS:                       # AGENTS preserves insertion order
+        if key in renderer_targets:
+            target_rel = renderer_targets[key]
+            via = (f"~/{target_rel}" if target_rel
+                   else "staged native config (real path varies)")
+            cov[key] = {"state": COVERAGE_RENDERER, "via": via, "reason": None}
+        elif key in GATEWAY_COVERAGE:
+            entry = GATEWAY_COVERAGE[key]
+            cov[key] = {"state": entry["state"], "via": entry.get("via"),
+                        "reason": entry.get("reason")}
+        else:
+            cov[key] = {"state": COVERAGE_UNCLASSIFIED, "via": None,
+                        "reason": "no gateway coverage declared — add it to GATEWAY_COVERAGE"}
+    return cov
+
 
 def _gateway_tools_dir():
     return GATEWAY_DIR / "tools"
@@ -3395,6 +3475,66 @@ def gateway_tool_status(manifest, *, home=None, detector=None):
     return rows
 
 
+def gateway_coverage_rows(*, detector=None):
+    """Coverage matrix for **every** agent — one row per AGENTS entry, in
+    state-grouped display order. Pure given the detector; backs the `coverage`
+    command and the `status`/`on` accounting, so a detected agent can never be
+    silently dropped from the report.
+
+    Each row: ``{"id", "name", "detected" (bool), "state", "detail"}`` where
+    ``detail`` is the routing var/route (renderer/env) or the blocking reason
+    (pending/unsupported/unclassified).
+    """
+    detector = detector or detect_gateway_tool
+    cov = gateway_coverage()
+    order = {s: i for i, s in enumerate(COVERAGE_STATE_ORDER)}
+    rows = []
+    for key in AGENTS:
+        c = cov[key]
+        rows.append({
+            "id": key,
+            "name": AGENTS[key].get("name", key),
+            "detected": bool(detector(key)),
+            "state": c["state"],
+            "detail": c.get("via") or c.get("reason") or "",
+        })
+    rows.sort(key=lambda r: (order.get(r["state"], len(order)), r["id"]))
+    return rows
+
+
+def _coverage_detected_unrouted(rows):
+    """[(id, state)] for every detected agent that does NOT reach the gateway,
+    in display order — the 'detected but not routed' set `on`/`status` must own."""
+    return [(r["id"], r["state"]) for r in rows
+            if r["detected"] and r["state"] not in COVERAGE_ROUTED_STATES]
+
+
+def _coverage_detected_env(rows):
+    """ids of detected agents routed purely via env (no native config) — so `on`
+    can positively confirm they're wrapped, not just the renderer set."""
+    return [r["id"] for r in rows
+            if r["detected"] and r["state"] == COVERAGE_ENV]
+
+
+def _format_coverage_group(items):
+    """'openhands (pending), copilot (unsupported)' from [(id, state), …]."""
+    return ", ".join(f"{i} ({s})" for i, s in items)
+
+
+def _print_gateway_coverage_accounting(rows):
+    """After the renderer plan, account for the *other* detected agents so `on`
+    (and its dry-run) is honest about everything installed — env-routed ones by
+    name, and anything detected-but-not-routed with a pointer to `coverage`."""
+    env_routed = _coverage_detected_env(rows)
+    if env_routed:
+        print_info("Also routed via env (no native config): " + ", ".join(env_routed))
+    unrouted = _coverage_detected_unrouted(rows)
+    if unrouted:
+        print_warning("Detected but not routed through the gateway: "
+                      + _format_coverage_group(unrouted)
+                      + " — see 'aikit gateway coverage'")
+
+
 def _print_gateway_tool_plan(plan, *, dry_run):
     """Print the per-tool config matrix for `on` (and its `--dry-run` preview)."""
     print_info("Native per-tool config:")
@@ -3460,6 +3600,9 @@ def do_gateway_on(url=None, key=None, *, shell=None, only_discovered=False,
     sk.kv("rc file", str(rc))
     print_info(f"{len(pairs)} environment variable(s) in the managed block")
     _print_gateway_tool_plan(plan, dry_run=dry_run)
+    # Account for every *other* detected agent (env-routed, pending, unsupported)
+    # so `on` — like `status`/`coverage` — never silently omits an installed tool.
+    _print_gateway_coverage_accounting(gateway_coverage_rows())
 
     if dry_run:
         print_info("Dry run — nothing will be written. Managed block preview:")
@@ -3628,6 +3771,9 @@ def do_gateway_status():
     rows = gateway_tool_status(manifest)
     sk.table([{"name": "Tool"}, {"name": "Detected"}, {"name": "Config"}], rows,
              title="Wrapped tools")
+    # Account for the *other* detected agents (env-routed, pending, unsupported) so
+    # status is honest about everything installed, not just the 9 wrapped tools.
+    _print_gateway_coverage_accounting(gateway_coverage_rows())
 
     # Drift detection — has the managed block been hand-edited or removed?
     markers = manifest.get("markers") or {}
@@ -3650,6 +3796,36 @@ def do_gateway_status():
         )
     else:
         print_info("Managed block matches the manifest (no drift).")
+
+
+def do_gateway_coverage():
+    """Read-only: the full per-agent gateway coverage matrix (every agent in AGENTS).
+
+    Shows how each tool reaches the gateway — native ``renderer``, ``env`` var,
+    still ``pending`` (a tracked gap with no route yet), or ``unsupported`` (a
+    first-party backend that can't target a gateway, with the reason) — so nothing
+    aikit knows about is left unaccounted for. Detection reflects what's installed
+    right now; the classification is static (independent of gateway on/off)."""
+    rows = gateway_coverage_rows()
+    table_rows = [
+        [r["id"], "yes" if r["detected"] else "no", r["state"], r["detail"]]
+        for r in rows
+    ]
+    sk.table(
+        [{"name": "Agent"}, {"name": "Detected"}, {"name": "Coverage"}, {"name": "How / why"}],
+        table_rows, title=f"Gateway tool coverage ({len(rows)} agents)")
+
+    counts = {}
+    for r in rows:
+        counts[r["state"]] = counts.get(r["state"], 0) + 1
+    tally = " · ".join(f"{counts[s]} {s}" for s in COVERAGE_STATE_ORDER if counts.get(s))
+    detected = sum(1 for r in rows if r["detected"])
+    print_info(f"{tally}  ({detected} detected)")
+    print_info("renderer/env reach the gateway; pending = tracked gap (no route yet); "
+               "unsupported = first-party backend, cannot target a gateway.")
+    unrouted = _coverage_detected_unrouted(rows)
+    if unrouted:
+        print_warning("Detected but not routed: " + _format_coverage_group(unrouted))
 
 
 def do_gateway_models(url=None, key=None):
@@ -4348,6 +4524,9 @@ def build_parser():
 
     gw_sub.add_parser("status", help="Show gateway state, masked key, and drift")
 
+    gw_sub.add_parser("coverage",
+                      help="Show per-agent gateway coverage (renderer/env/pending/unsupported)")
+
     gw_models = gw_sub.add_parser("models", help="List models the key can see (read-only)")
     gw_models.add_argument("-u", "--url", help="Gateway base URL override")
     gw_models.add_argument("-k", "--key", help="Virtual key override")
@@ -4430,6 +4609,8 @@ def cmd_gateway(args):
             do_gateway_off(shell=args.shell, dry_run=args.dry_run)
     elif action == "purge":
         do_gateway_purge(shell=args.shell, yes=args.yes, dry_run=args.dry_run)
+    elif action == "coverage":
+        do_gateway_coverage()
     elif action == "models":
         do_gateway_models(args.url, args.key)
     else:  # "status" or no sub-action — the at-a-glance default
