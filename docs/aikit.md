@@ -58,7 +58,7 @@ aikit setup
 | 27 | 🐚 **Shell GPT** | `pip` | `sgpt` first-run key prompt or `OPENAI_API_KEY` |
 | 28 | 🧩 **Devin CLI** | `curl` script | `devin login` OAuth (Cognition AI account) |
 | 29 | 🔋 **Auggie** | `npm` | `auggie login` (Augment account OAuth) |
-| 30 | 🏭 **Droid** | `curl` script | `droid` on first use (Factory AI OAuth) |
+| 30 | 🏭 **Droid** | `curl` script | `droid` on first use (Factory AI OAuth), or `FACTORY_API_KEY` |
 | 31 | 🖥️ **Open Interpreter** | `pip` | Provider API keys (`OPENAI_API_KEY`, etc.) or first-run prompt; `--local` for Ollama |
 
 ---

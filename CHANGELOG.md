@@ -62,6 +62,20 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.15.1 — 2026-07-01
+- **Fix: droid always showed "needs auth" even when authenticated** (POK-76). `droid`
+  was registered without any `auth_env_vars` and had no per-agent branch in
+  `discover_auth`, so neither its headless/BYOK key nor its browser login was ever
+  detected — it only cleared once `aikit auth droid` was run explicitly. Now:
+  - `FACTORY_API_KEY` (fk-…) is a registered auth env var, so the generic env check
+    detects headless/CI auth.
+  - `discover_auth` gained a droid branch that finds the `droid login` credential
+    fallback file (`~/.factory/{auth,credentials,.credentials,session,tokens}.json`)
+    or the settings written on first authenticated run (`~/.factory/settings.json`,
+    `settings.local.json`) — mirroring the antigravity/amp discovery pattern.
+  - A genuinely unauthenticated droid (only `~/.factory/logs/`, no env, no recorded
+    auth) still reports needs-auth — no false positive. Regression tests added.
+
 ### 1.15.0 — 2026-07-01
 - **Six new agents added to the registry (25 → 31)**, each with platform-aware install,
   auth, and gateway-coverage classification:
