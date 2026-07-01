@@ -62,6 +62,38 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.14.0 — 2026-07-01
+- **Native config renderers for config-driven agents (close coverage gaps).** Three new
+  Stage-3 renderers wrap tools that were detected but not reliably routed, plus env
+  wiring for OpenHands — shrinking the "detected but not routed" set to the declared
+  gaps. Renderer count 9 → 12; each follows the same never-clobber + manifest-restore
+  pattern (staged under `~/.aikit/gateway/tools/`, installed only when the tool is
+  detected and has no config, reversed pristine on `off`). No renderer receives or writes
+  the virtual key. (POK-67)
+- **kilo** → `~/.config/kilo/kilo.json`. Kilo is an OpenCode fork, so the same `provider`
+  schema — but its own `$schema` (`https://app.kilo.ai/config.json`) and config dir; the
+  key is referenced via `{env:OPENAI_API_KEY}` (single-brace), never inlined.
+- **qwen** → `~/.qwen/settings.json`. Explicit OpenAI-compatible provider pinned to
+  `SETTINGS_VERSION` 4 — the shipping schema; the published-docs v5 shape crashes the
+  CLI ("models is not iterable"). The key is read from the env via each provider entry's
+  `envKey` (`OPENAI_API_KEY`), so the secret stays out of the file. qwen was already
+  env-routable; the renderer makes the routing explicit and reportable.
+- **cline** → `~/.cline/data/settings/providers.json`. Pre-registers the gateway as a
+  custom `openai-compatible` provider (v1 schema, non-reserved id `litellm-gw`; the
+  legacy `globalState.json` path is no longer read). Cline dropped provider-config env
+  vars and stores the key in-file, so the rendered entry is **keyless** — supply the key
+  at runtime with `cline -k "$OPENAI_API_KEY"`, which reuses the pre-registered base URL
+  + model.
+- **openhands** → routed via **env**, not a renderer. The standalone OpenHands CLI reads
+  `LLM_*` (not `OPENAI_*`), and only with `--override-with-envs`; its on-disk
+  `agent_settings.json` needs a literal key aikit won't write to a shared-readable file.
+  So `on` now also exports `LLM_BASE_URL` + `LLM_API_KEY`, and coverage classifies
+  openhands as `env` with the `--override-with-envs` caveat stated in its *How / why*.
+- **Coverage reclassification.** `kilo`/`cline`/`qwen` → `renderer`, `openhands` → `env`.
+  The static baseline is now `12 renderer · 5 env · 3 pending · 5 unsupported`
+  (was `9 · 5 · 6 · 5`). `grok`, `kimi`, `blackbox` stay `pending` (no confirmed base-URL
+  override); `cursor`, `antigravity`, `copilot`, `kiro`, `amp` stay `unsupported`. (POK-67)
+
 ### 1.13.0 — 2026-07-01
 - **Passthrough-endpoint discovery + native-protocol tool linking.** Routability
   through a native passthrough route (claude → `/anthropic`) is now treated as a

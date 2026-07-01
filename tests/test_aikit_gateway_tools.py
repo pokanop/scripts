@@ -26,10 +26,13 @@ MODELS = ["anthropic/claude-3", "openai/gpt-4o"]
 DETAIL = {"openai/gpt-4o": {"provider": "openai", "max_tokens": 200000}}
 SECRET = "sk-secret-key-1234567890"
 
-JSON_RENDERERS = ("render_opencode", "render_crush", "render_pi", "render_continue")
-# Renderers that embed an OPENAI_API_KEY *reference* (never the literal key).
+JSON_RENDERERS = ("render_opencode", "render_crush", "render_pi", "render_continue",
+                  "render_kilo", "render_qwen", "render_cline")
+# Renderers that embed an OPENAI_API_KEY *reference* (never the literal key). cline is
+# excluded on purpose: it has no env-var support, so its config is keyless.
 ENV_REF_RENDERERS = ("render_opencode", "render_codex", "render_crush", "render_pi",
-                     "render_hermes", "render_aider", "render_goose", "render_continue")
+                     "render_hermes", "render_aider", "render_goose", "render_continue",
+                     "render_kilo", "render_qwen")
 ALL_RENDERERS = JSON_RENDERERS + ("render_codex", "render_goose", "render_hermes",
                                   "render_aider", "render_llm")
 
@@ -112,6 +115,50 @@ def test_render_continue_json_models(aikit):
     assert all(m["apiBase"] == "https://gw.example.com/v1" for m in cfg["models"])
 
 
+def test_render_kilo_json_opencode_schema_with_kilo_url(aikit):
+    # OpenCode-fork schema, but kilo's own $schema URL and a single-brace {env:...} ref.
+    cfg = json.loads(aikit.render_kilo(BASE, MODELS, DETAIL))
+    assert cfg["$schema"] == "https://app.kilo.ai/config.json"   # kilo's URL, not opencode's
+    prov = cfg["provider"]["litellm"]
+    assert prov["npm"] == "@ai-sdk/openai-compatible"
+    assert prov["options"]["baseURL"] == "https://gw.example.com/v1"
+    assert prov["options"]["apiKey"] == "{env:OPENAI_API_KEY}"   # single-brace env ref
+    assert set(prov["models"]) == set(MODELS)
+
+
+def test_render_qwen_v4_settings_openai_provider(aikit):
+    # v4 array form (not the v5 wrapper that crashes the CLI); key read from env via envKey.
+    cfg = json.loads(aikit.render_qwen(BASE, MODELS, DETAIL))
+    assert cfg["$version"] == 4
+    assert cfg["security"]["auth"]["selectedType"] == "openai"
+    providers = cfg["modelProviders"]["openai"]
+    assert isinstance(providers, list)                          # array, or the CLI crashes
+    by_id = {p["id"]: p for p in providers}
+    assert set(by_id) == set(MODELS)
+    assert all(p["baseUrl"] == "https://gw.example.com/v1" for p in providers)
+    assert all(p["envKey"] == "OPENAI_API_KEY" for p in providers)  # key read from env, not inlined
+    assert cfg["model"]["name"] in by_id                        # default matches a provider id
+
+
+def test_render_cline_v1_keyless_providers_json(aikit):
+    # Cline providers.json v1: keyless (user supplies key at runtime), non-reserved id,
+    # deterministic ISO-8601 updatedAt so the renderer stays pure.
+    cfg = json.loads(aikit.render_cline(BASE, MODELS, DETAIL))
+    assert cfg["version"] == 1
+    pid = cfg["lastUsedProvider"]
+    assert pid not in ("openai", "litellm")                     # reserved built-in ids
+    entry = cfg["providers"][pid]
+    s = entry["settings"]
+    assert s["provider"] == pid and s["client"] == "openai-compatible"
+    assert s["baseUrl"] == "https://gw.example.com/v1"
+    assert s["model"] == "anthropic/claude-3"                   # first discovered model
+    assert "apiKey" not in s                                    # keyless — supply via `cline -k`
+    assert entry["tokenSource"] == "manual"
+    assert entry["updatedAt"].endswith("Z")                     # valid ISO-8601
+    # pure/deterministic: same inputs → byte-identical output (no wall-clock timestamp)
+    assert aikit.render_cline(BASE, MODELS, DETAIL) == aikit.render_cline(BASE, MODELS, DETAIL)
+
+
 def test_no_renderer_inlines_a_secret(aikit):
     # Renderers don't even receive the key — they *cannot* inline it. Assert the
     # output never contains a key-looking literal, regardless of detail contents.
@@ -131,6 +178,8 @@ def test_render_empty_models_is_still_valid(aikit):
     json.loads(aikit.render_opencode(BASE, [], {}))
     tomllib.loads(aikit.render_codex(BASE, [], {}))
     assert _yaml_load(aikit.render_llm(BASE, [], {})) is None  # just the comment header
+    for name in ("render_kilo", "render_qwen", "render_cline"):
+        json.loads(getattr(aikit, name)(BASE, [], {}))        # POK-67 renderers: valid JSON
 
 
 # --- portable files ---------------------------------------------------------
@@ -181,7 +230,10 @@ def test_gateway_tool_plan_actions(aikit, tmp_path):
     assert plan["codex"]["action"] == "not-detected"            # not installed
     assert plan["llm"]["action"] == "staged-only"               # target path varies
     assert plan["continue"]["action"] == "staged-only"
-    assert len(plan) == 9
+    assert plan["kilo"]["action"] == "not-detected"             # POK-67 renderers
+    assert plan["qwen"]["action"] == "not-detected"
+    assert plan["cline"]["action"] == "not-detected"
+    assert len(plan) == 12
 
 
 # --- helpers: dir creation/pruning ------------------------------------------
@@ -246,8 +298,8 @@ def test_on_writes_files_installs_detected_only_then_off_is_pristine(aikit, gw):
     assert SECRET not in summary_file.read_text()
     assert json.loads(summary_file.read_text())["openai_compatible_base"] == f"{BASE}/v1"
 
-    # all nine configs staged, none leaking the secret
-    assert sum(1 for _ in tools_dir.iterdir()) == 9
+    # all twelve configs staged, none leaking the secret
+    assert sum(1 for _ in tools_dir.iterdir()) == 12
     for f in tools_dir.iterdir():
         assert SECRET not in f.read_text()
 
@@ -259,7 +311,7 @@ def test_on_writes_files_installs_detected_only_then_off_is_pristine(aikit, gw):
     manifest = aikit.read_manifest()
     roles = [e["role"] for e in manifest["config_files"]]
     assert roles.count("portable") == 2
-    assert roles.count("staged") == 9
+    assert roles.count("staged") == 12
     assert roles.count("installed") == 1                         # opencode only
 
     # off → every aikit-created file removed; created dir pruned; user config kept
