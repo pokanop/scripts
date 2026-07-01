@@ -39,7 +39,6 @@ def test_registry_native_passthrough_routes(aikit):
 def test_registry_local_providers_have_no_key_envs(aikit):
     by_id = {p[0]: p for p in aikit.GATEWAY_PROVIDERS}
     assert by_id["ollama"][3] == []  # no API key for local Ollama
-    assert "litellm" in {t[0] for t in aikit.OPENAI_COMPATIBLE_TOOLS}
 
 
 # --- env-pair building ------------------------------------------------------

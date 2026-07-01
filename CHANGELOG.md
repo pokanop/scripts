@@ -62,6 +62,30 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.12.0 — 2026-07-01
+- **New `aikit gateway coverage`** — a read-only, per-agent coverage matrix for the
+  gateway. For every one of the 25 agents it shows `detected?`, a **coverage state**
+  (`renderer` / `env` / `pending` / `unsupported`), and *how / why* (the routing var or
+  native config path, or the reason it can't be routed), plus a per-state tally. Answers
+  "does the gateway cover tool X, and if not, why?" in one look.
+- **Coverage capability model** — a single source of truth for how each agent reaches
+  the gateway. `renderer` state derives from the native-config renderers (no drift);
+  the other 16 agents are declared explicitly: **env-routed (5)** — `claude`, `gemini`,
+  `qwen`, `openclaw`, `sgpt` (already carried by the env layer, no native config needed);
+  **pending (6)** — `openhands`, `kilo`, `cline`, `grok`, `kimi`, `blackbox` (detected but
+  not routed yet, each with the known route recorded); **unsupported (5)** — `antigravity`,
+  `cursor`, `copilot`, `kiro`, `amp` (first-party backends that can't target a third-party
+  gateway, with the reason).
+- **Honest reporting — nothing silent.** `aikit gateway status` and `on` (incl.
+  `--dry-run`) now account for **every detected agent**, not just the 9 wrapped tools:
+  env-routed ones are named, and any detected-but-not-routed (`pending`/`unsupported`)
+  agent is called out inline with a pointer to `coverage`. A newly-registered agent that
+  nobody classified surfaces as `unclassified` rather than vanishing from the report.
+- **Removed dead `OPENAI_COMPATIBLE_TOOLS` table** — an unused list that looked like the
+  tool-coverage source but did nothing; its intent now lives in the coverage model. The
+  env layer still sets `OPENAI_*` for every activation, so any OpenAI-compatible tool is
+  routed without a per-tool table. Docs gain a **Tool coverage** section. (POK-66)
+
 ### 1.11.0 — 2026-06-30
 - **Added `aikit gateway purge`** — the explicit "forget" for the saved gateway
   credentials. `on`/`off` is a **fast, zero-input toggle**: `off` returns your agent

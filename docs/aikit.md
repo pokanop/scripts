@@ -70,7 +70,7 @@ aikit setup
 | `aikit doctor` | Diagnose environment and agent health |
 | `aikit serve` | Start web dashboard |
 | `aikit config get/set/list` | Manage `~/.aikit/config.json` |
-| `aikit gateway on/off/status/models` | Route AI tools through a LiteLLM gateway — see **[gateway docs](aikit-gateway.md)** |
+| `aikit gateway on/off/status/coverage/models` | Route AI tools through a LiteLLM gateway — see **[gateway docs](aikit-gateway.md)** |
 
 ### Multi-Select Picker
 
@@ -149,6 +149,7 @@ one virtual key — and switch back, leaving your machine **pristine**. Full gui
 aikit gateway on --dry-run -u https://gw.example.com   # preview env block + per-tool plan, write nothing
 aikit gateway on -u https://gw.example.com             # write the env block, native tool configs + manifest
 aikit gateway status                                   # active? URL, masked key, models, wrapped tools, drift
+aikit gateway coverage                                 # per-agent: routed via renderer/env, pending, or unsupported
 aikit gateway off                                      # remove everything aikit wrote, restore pristine
 ```
 

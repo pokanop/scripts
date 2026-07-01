@@ -100,6 +100,43 @@ shows, per tool, whether its config is *installed by aikit*, *user-owned (kept)*
 
 ---
 
+## Tool coverage
+
+aikit knows 25 agents, but not all of them can be pointed at a third-party gateway.
+Rather than silently route the ones it can and ignore the rest, aikit tracks a
+**coverage state** for *every* agent and reports it — so you always know what's
+wrapped, what isn't yet, and what never will be. `aikit gateway coverage` prints the
+full matrix; `on` and `status` call out anything detected-but-not-routed inline.
+
+| State | Meaning | Reaches the gateway? |
+|-------|---------|----------------------|
+| **renderer** | aikit writes the tool's native config (the 9 tools above) | ✅ yes |
+| **env** | routed by a standard/provider env var the env block already sets | ✅ yes |
+| **pending** | detected but not reliably routed yet — no renderer and no standard env var; a tracked gap | ❌ not yet |
+| **unsupported** | bound to a first-party backend (Google account, Cursor, GitHub, AWS/Kiro, Sourcegraph) — cannot target a third-party gateway | 🚫 by design |
+
+- **env-routed (5):** `claude` (`ANTHROPIC_BASE_URL`+`ANTHROPIC_AUTH_TOKEN`),
+  `gemini` (`GEMINI_API_BASE`/`GOOGLE_GEMINI_BASE_URL`), `qwen`, `openclaw`, `sgpt`
+  (all via `OPENAI_BASE_URL`). These need no native config — the env layer already
+  carries them.
+- **pending (6):** `openhands`, `kilo`, `cline`, `grok`, `kimi`, `blackbox`. aikit
+  detects them but has no route wired yet; each row's *How / why* records the known
+  route (e.g. openhands reads `LLM_BASE_URL` / `~/.openhands/settings.json`) so it can
+  be picked up by a future renderer. They are shown, never hidden.
+- **unsupported (5):** `antigravity`, `cursor`, `copilot`, `kiro`, `amp`. These route
+  through a vendor's own backend and can't be aimed at your gateway — excluded on
+  purpose, with the reason spelled out.
+
+```bash
+aikit gateway coverage        # the full 25-row matrix: agent, detected?, state, how/why
+```
+
+> The guarantee: **no detected agent is silently omitted.** If aikit ever gains an
+> agent that nobody has classified, it surfaces as `unclassified` in `coverage`
+> (with a note to fix it) rather than disappearing from the report.
+
+---
+
 ## The pristine-restore guarantee
 
 The whole point of the gateway being an *aikit* feature (rather than a copy of a
@@ -190,10 +227,21 @@ Shows whether the gateway is active, the URL, the **masked** key, the model coun
 shell + rc path, a **wrapped-tools** table (per tool: detected?, and whether its config
 is *installed by aikit*, *user-owned (kept)*, or *staged only*, with the path), and
 **drift warnings** — if the managed block was hand-edited or removed from the rc,
-`status` tells you (and `on` will restore it). When **inactive but credentials are
-saved**, it reports *inactive (credentials saved)* with the URL + masked key and points
-you at `on` / `purge`; after `purge` it shows plain *inactive*. The default for a bare
+`status` tells you (and `on` will restore it). Below the wrapped-tools table it also
+accounts for **other detected agents** — the env-routed ones by name, and anything
+detected-but-not-routed (`pending` / `unsupported`) with a pointer to `coverage` — so
+nothing installed is left unmentioned. When **inactive but credentials are saved**, it
+reports *inactive (credentials saved)* with the URL + masked key and points you at
+`on` / `purge`; after `purge` it shows plain *inactive*. The default for a bare
 `aikit gateway`.
+
+### `aikit gateway coverage`
+
+Read-only. Prints the full **25-row coverage matrix** — for every agent aikit knows:
+`detected?`, its coverage **state** (`renderer` / `env` / `pending` / `unsupported`),
+and *how / why* (the routing var or config path, or the reason it isn't routed) — plus
+a per-state tally. This is the honest, one-look answer to "does the gateway cover tool
+X, and if not, why?" See [Tool coverage](#tool-coverage) for what the states mean.
 
 ### `aikit gateway models`
 
