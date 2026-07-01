@@ -56,7 +56,7 @@ def test_coverage_bucket_counts_match_audit(aikit):
     counts: dict = {}
     for c in cov.values():
         counts[c["state"]] = counts.get(c["state"], 0) + 1
-    assert counts == {"renderer": 9, "env": 5, "pending": 6, "unsupported": 5}
+    assert counts == {"renderer": 12, "env": 5, "pending": 3, "unsupported": 5}
     assert "unclassified" not in counts   # nothing left uncategorised
 
 
@@ -78,8 +78,8 @@ def test_known_agents_land_in_expected_buckets(aikit):
     cov = aikit.gateway_coverage()
     assert cov["opencode"]["state"] == "renderer"
     assert cov["claude"]["state"] == "env"
-    assert cov["qwen"]["state"] == "env"
-    assert cov["openhands"]["state"] == "pending"
+    assert cov["qwen"]["state"] == "renderer"      # POK-67: now a native renderer
+    assert cov["openhands"]["state"] == "env"      # POK-67: wired via LLM_* env vars
     assert cov["copilot"]["state"] == "unsupported"
     # env routes name the actual var; unsupported names the blocking backend.
     assert "ANTHROPIC_BASE_URL" in cov["claude"]["via"]
@@ -102,9 +102,9 @@ def test_coverage_rows_span_all_agents_in_state_order(aikit):
     rows = aikit.gateway_coverage_rows(detector=lambda k: False)
     assert len(rows) == 25
     assert {r["id"] for r in rows} == set(aikit.AGENTS)
-    # Grouped: the first 9 rows are the renderer set (sorted within the group).
-    assert all(r["state"] == "renderer" for r in rows[:9])
-    assert [r["id"] for r in rows[:9]] == sorted(
+    # Grouped: the first 12 rows are the renderer set (sorted within the group).
+    assert all(r["state"] == "renderer" for r in rows[:12])
+    assert [r["id"] for r in rows[:12]] == sorted(
         {agent_key for _, agent_key, _, _, _ in aikit.GATEWAY_TOOL_SPECS})
 
 
@@ -116,10 +116,10 @@ def test_coverage_rows_detected_reflects_detector(aikit):
 
 def test_detected_unrouted_and_env_helpers(aikit):
     rows = aikit.gateway_coverage_rows(
-        detector=lambda k: k in {"opencode", "claude", "openhands", "copilot"})
+        detector=lambda k: k in {"opencode", "claude", "kimi", "copilot"})
     assert aikit._coverage_detected_env(rows) == ["claude"]
     unrouted = dict(aikit._coverage_detected_unrouted(rows))
-    assert unrouted == {"openhands": "pending", "copilot": "unsupported"}
+    assert unrouted == {"kimi": "pending", "copilot": "unsupported"}
     # a routed renderer tool is NOT reported as unrouted
     assert "opencode" not in unrouted
 
@@ -127,26 +127,27 @@ def test_detected_unrouted_and_env_helpers(aikit):
 # --- `coverage` command output ----------------------------------------------
 def test_coverage_command_accounts_for_every_state(aikit, monkeypatch, capsys):
     monkeypatch.setattr(aikit, "detect_gateway_tool",
-                        lambda k: k in {"opencode", "claude", "openhands", "copilot"})
+                        lambda k: k in {"opencode", "claude", "kimi", "copilot"})
     aikit.do_gateway_coverage()
     out = capsys.readouterr().out
     # env-routed, pending, and unsupported agents all appear — none silently omitted.
     for name in ("opencode", "claude", "qwen", "openhands", "copilot", "cursor"):
         assert name in out
     assert "renderer" in out and "env" in out and "pending" in out and "unsupported" in out
-    assert "9 renderer" in out                              # the per-state tally
+    assert "12 renderer" in out                             # the per-state tally
     assert "Detected but not routed" in out                 # honest unrouted warning
-    assert "openhands (pending)" in out and "copilot (unsupported)" in out
+    assert "kimi (pending)" in out and "copilot (unsupported)" in out
 
 
 # --- `on` / `status` account for env + unsupported, not just wrapped tools ---
 def test_on_reports_env_routed_and_unrouted(aikit, gw, capsys):
-    gw.detected.update({"opencode", "claude", "openhands", "copilot"})
+    gw.detected.update({"opencode", "claude", "openhands", "kimi", "copilot"})
     aikit.do_gateway_on(BASE, SECRET, yes=True)
     out = capsys.readouterr().out
     assert "Also routed via env" in out and "claude" in out
+    assert "openhands" in out                               # POK-67: env-routed via LLM_*
     assert "Detected but not routed through the gateway" in out
-    assert "openhands (pending)" in out
+    assert "kimi (pending)" in out
     assert "copilot (unsupported)" in out
     assert SECRET not in out                                # key never printed
 

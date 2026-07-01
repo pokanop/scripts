@@ -77,6 +77,9 @@ Where a tool supports it, the file **references the key via an env var** (read f
 | **aider** | `~/.aider.conf.yml` | `$OPENAI_API_KEY` |
 | **llm** | *staged only* (path varies) | env (`extra-openai-models.yaml`) |
 | **continue** | *staged only* (path varies) | env (`gateway.env`) |
+| **kilo** | `~/.config/kilo/kilo.json` | `{env:OPENAI_API_KEY}` |
+| **qwen** | `~/.qwen/settings.json` | `envKey: OPENAI_API_KEY` |
+| **cline** | `~/.cline/data/settings/providers.json` | *keyless* — `cline -k "$OPENAI_API_KEY"` at runtime |
 | *every other OpenAI-compatible tool/SDK* | — | env layer only (no file) |
 
 > The virtual key is **never** written into a native tool config — only into
@@ -110,24 +113,27 @@ full matrix; `on` and `status` call out anything detected-but-not-routed inline.
 
 | State | Meaning | Reaches the gateway? |
 |-------|---------|----------------------|
-| **renderer** | aikit writes the tool's native config (the 9 tools above) | ✅ yes |
+| **renderer** | aikit writes the tool's native config (the 12 tools above) | ✅ yes |
 | **env** | routed by a standard/provider env var the env block already sets | ✅ yes |
 | **passthrough** | routed through a native-protocol passthrough route (`/anthropic`, `/gemini`, a custom route…), resolved at runtime from live discovery or a declared mapping | ✅ yes |
 | **pending** | detected but not reliably routed yet — no renderer and no standard env var; a tracked gap | ❌ not yet |
 | **unsupported** | no usable native passthrough route **and** no OpenAI-compatible / base-URL override path — with the real reason | 🚫 by design |
 
 - **env-routed (5):** `claude` (`ANTHROPIC_BASE_URL`+`ANTHROPIC_AUTH_TOKEN`),
-  `gemini` (`GEMINI_API_BASE`/`GOOGLE_GEMINI_BASE_URL`), `qwen`, `openclaw`, `sgpt`
-  (all via `OPENAI_BASE_URL`). These need no native config — the env layer already
-  carries them.
+  `gemini` (`GEMINI_API_BASE`/`GOOGLE_GEMINI_BASE_URL`), `openclaw`, `sgpt` (via
+  `OPENAI_BASE_URL`), and `openhands`. OpenHands reads `LLM_*` (not `OPENAI_*`) and only
+  with `openhands --override-with-envs`, so `on` exports `LLM_BASE_URL`+`LLM_API_KEY` and
+  the coverage row states that caveat (its on-disk `agent_settings.json`, if present,
+  takes precedence). These need no native config — the env layer carries them.
 - **passthrough:** any tool wired through a native-protocol route (base URL + auth var
   aimed at the route). Empty by default — the vendor CLIs below have a real route but no
   base-URL override — but a **declared custom mapping** (or a future tool that honours a
   base-URL override) lands here, showing its route + credential mode.
-- **pending (6):** `openhands`, `kilo`, `cline`, `grok`, `kimi`, `blackbox`. aikit
-  detects them but has no route wired yet; each row's *How / why* records the known
-  route (e.g. openhands reads `LLM_BASE_URL` / `~/.openhands/settings.json`) so it can
-  be picked up by a future renderer. They are shown, never hidden.
+- **pending (3):** `grok`, `kimi`, `blackbox`. aikit detects them but has no route wired
+  yet; each row's *How / why* records the config path a future renderer must write (e.g.
+  grok needs `~/.grok/config.toml [model.*] base_url`) so the gap stays tracked, never
+  hidden. (`kilo`, `cline`, `qwen` graduated to `renderer` and `openhands` to `env` in
+  1.14.0.)
 - **unsupported (5):** `antigravity`, `cursor`, `copilot`, `kiro`, `amp`. Routability
   is a *runtime* property, so these are re-examined against the live gateway:
   - `cursor` — LiteLLM **does** mount a `/cursor` (Cursor Cloud Agents) passthrough, and

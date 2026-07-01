@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.13.0
+aikit — AI Coding Agent CLI Installer & Manager  v1.14.0
 Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.13.0"
+__version__ = "1.14.0"
 
 import scriptkit as sk
 
@@ -2756,6 +2756,15 @@ GATEWAY_UNIVERSAL_BASE_VARS = (
     ("LITELLM_PROXY_API_BASE", ""),
 )
 
+# OpenHands (and other LiteLLM-SDK tools) read LLM_* — not OPENAI_* — for their LLM
+# config, so the universal OpenAI block alone doesn't route them. Set LLM_BASE_URL /
+# LLM_API_KEY so the tool can reach the gateway. Caveat (surfaced in gateway coverage's
+# `via` for openhands): the OpenHands CLI only reads these with `--override-with-envs`,
+# and its on-disk agent_settings.json, if present, takes precedence — verified against
+# OpenHands/OpenHands-CLI (agent_store.py reads exactly LLM_API_KEY/LLM_BASE_URL/LLM_MODEL).
+GATEWAY_LLM_SDK_KEY_VARS = ("LLM_API_KEY",)
+GATEWAY_LLM_SDK_BASE_VARS = (("LLM_BASE_URL", "/v1"),)
+
 # Built-in LiteLLM passthrough routes — native-protocol endpoints the proxy mounts in
 # code (not gated on config), each forwarding a provider's own API through the gateway.
 # Verified against litellm/proxy/pass_through_endpoints/llm_passthrough_endpoints.py.
@@ -3106,6 +3115,10 @@ def build_env_pairs(base_url, key, only_providers=None, *,
     # Universal block, single-sourced from the tables above.
     pairs = [(var, key) for var in GATEWAY_UNIVERSAL_KEY_VARS]
     pairs += [(var, f"{base}{suffix}") for var, suffix in GATEWAY_UNIVERSAL_BASE_VARS]
+    # LiteLLM-SDK tools (OpenHands) read LLM_* rather than OPENAI_* — tool-agnostic like
+    # the universal block, so wire it unconditionally (kept even under --only-discovered).
+    pairs += [(var, key) for var in GATEWAY_LLM_SDK_KEY_VARS]
+    pairs += [(var, f"{base}{suffix}") for var, suffix in GATEWAY_LLM_SDK_BASE_VARS]
     for pid, name, prefix, key_envs, base_envs, route, bins, pys in GATEWAY_PROVIDERS:
         if pid == "openai":
             continue  # already covered by the universal block
@@ -3391,6 +3404,70 @@ def render_continue(base, models, detail):
     return json.dumps(cfg, indent=2) + "\n"
 
 
+def render_kilo(base, models, detail):
+    # Kilo is an OpenCode fork: same `provider` schema, but its own $schema URL and
+    # config dir (~/.config/kilo/). `{env:...}` (single braces, no $) resolves the key
+    # from the env at load — the secret stays out of the file. Verified against
+    # Kilo-Org/kilocode (config/config.ts, config/variable.ts).
+    cfg = {
+        "$schema": "https://app.kilo.ai/config.json",
+        "provider": {
+            GATEWAY_TOOL_PROVIDER_ID: {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": GATEWAY_TOOL_PROVIDER_NAME,
+                "options": {"baseURL": f"{base}/v1", "apiKey": "{env:OPENAI_API_KEY}"},
+                "models": {m: {"name": m} for m in models},
+            }
+        },
+    }
+    return json.dumps(cfg, indent=2) + "\n"
+
+
+def render_qwen(base, models, detail):
+    # Qwen Code (a gemini-cli fork), SETTINGS_VERSION 4. `envKey` names the env var the
+    # key is read from (secret stays out of the file); the selected `model.name` must
+    # match a provider entry `id`. The published docs show a v5 shape that crashes the
+    # shipping CLI ("models is not iterable") — this is the v4 array form. Verified
+    # against QwenLM/qwen-code (settingsSchema.ts, models/types.ts, modelConfigUtils.ts).
+    providers = [{"id": m, "name": m, "baseUrl": f"{base}/v1", "envKey": "OPENAI_API_KEY"}
+                 for m in models]
+    cfg = {
+        "$version": 4,
+        "security": {"auth": {"selectedType": "openai"}},
+        "model": {"name": _default_model(models)},
+        "modelProviders": {"openai": providers},
+    }
+    return json.dumps(cfg, indent=2) + "\n"
+
+
+def render_cline(base, models, detail):
+    # Cline CLI persists providers to ~/.cline/data/settings/providers.json (Zod v1).
+    # `apiKey` is optional, so this entry is keyless — the user supplies it at runtime
+    # (`cline -k "$OPENAI_API_KEY"`), which reuses this pre-registered baseUrl/model. The
+    # id must NOT be a reserved built-in (`openai`/`litellm`) or Cline treats it as the
+    # built-in provider — hence `litellm-gw`. A fixed updatedAt keeps the renderer pure
+    # and still satisfies the ISO-8601 check. Verified against cline/cline
+    # (services/llms/provider-settings.ts, providers/ids.ts).
+    provider_id = "litellm-gw"
+    cfg = {
+        "version": 1,
+        "lastUsedProvider": provider_id,
+        "providers": {
+            provider_id: {
+                "settings": {
+                    "provider": provider_id,
+                    "client": "openai-compatible",
+                    "baseUrl": f"{base}/v1",
+                    "model": _default_model(models),
+                },
+                "updatedAt": "1970-01-01T00:00:00.000Z",
+                "tokenSource": "manual",
+            }
+        },
+    }
+    return json.dumps(cfg, indent=2) + "\n"
+
+
 def render_gateway_env(pairs):
     """Portable, source-able export block (holds the virtual key — write 0600).
 
@@ -3432,6 +3509,9 @@ GATEWAY_TOOL_SPECS = [
     ("aider",        "aider",    "aider.conf.yml",               ".aider.conf.yml",                render_aider),
     ("llm",          "llm",      "llm.extra-openai-models.yaml", None,                             render_llm),
     ("continue",     "continue", "continue.models.json",         None,                             render_continue),
+    ("kilo",         "kilo",     "kilo.json",                    ".config/kilo/kilo.json",         render_kilo),
+    ("qwen",         "qwen",     "qwen.settings.json",           ".qwen/settings.json",            render_qwen),
+    ("cline",        "cline",    "cline.providers.json",         ".cline/data/settings/providers.json", render_cline),
 ]
 
 # --- coverage capability model ---------------------------------------------
@@ -3469,7 +3549,7 @@ COVERAGE_STATE_ORDER = (
 COVERAGE_ROUTED_STATES = frozenset({COVERAGE_RENDERER, COVERAGE_ENV, COVERAGE_PASSTHROUGH})
 
 # Declared coverage for every agent NOT handled by a native renderer. Renderer
-# coverage derives from GATEWAY_TOOL_SPECS (single source), so those 9 agents are
+# coverage derives from GATEWAY_TOOL_SPECS (single source), so those 12 agents are
 # intentionally absent here. `via` = the routing var/route (env); `reason` = the
 # blocking detail (pending/unsupported). Keyed by AGENTS id.
 GATEWAY_COVERAGE = {
@@ -3477,17 +3557,17 @@ GATEWAY_COVERAGE = {
     #    build_env_pairs() sets unconditionally (verified against the env layer). --
     "claude":   {"state": COVERAGE_ENV, "via": "ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN (/anthropic route)"},
     "gemini":   {"state": COVERAGE_ENV, "via": "GEMINI_API_BASE / GOOGLE_GEMINI_BASE_URL (/gemini route)"},
-    "qwen":     {"state": COVERAGE_ENV, "via": "OPENAI_BASE_URL + OPENAI_API_KEY"},
     "openclaw": {"state": COVERAGE_ENV, "via": "OPENAI_BASE_URL / ANTHROPIC_BASE_URL"},
     "sgpt":     {"state": COVERAGE_ENV, "via": "OPENAI_BASE_URL + OPENAI_API_KEY"},
-    # -- pending: detected but not reliably routed. `reason` records the known route
-    #    to wire up so the Stage-7 renderer worklist is actionable, not a mystery. --
-    "openhands": {"state": COVERAGE_PENDING,
-                  "reason": "reads LLM_BASE_URL / ~/.openhands/settings.json; env layer sets OPENAI_* but not LLM_BASE_URL"},
-    "kilo":      {"state": COVERAGE_PENDING,
-                  "reason": "opencode-fork BYOK provider config; no renderer or standard base-URL env var wired yet"},
-    "cline":     {"state": COVERAGE_PENDING,
-                  "reason": "base URL not settable by env (key-only); needs ~/.cline/data/globalState.json (openAiBaseUrl)"},
+    # openhands reads LLM_* (not OPENAI_*) and only with `--override-with-envs`; its
+    # on-disk agent_settings.json needs a literal key aikit won't write to a shared file,
+    # so env (with the flag) is the reliable path. The `via` states the caveat plainly.
+    "openhands": {"state": COVERAGE_ENV,
+                  "via": "LLM_BASE_URL + LLM_API_KEY — run 'openhands --override-with-envs' (on-disk agent_settings.json, if present, takes precedence)"},
+    # -- pending: detected but not reliably routed. POK-67 (Stage 8) landed native
+    #    renderers for kilo/cline/qwen and env wiring for openhands; the ones below stay
+    #    pending — each `reason` records the config path a future renderer must write, so
+    #    the gap stays tracked and actionable, never a mystery. --
     "grok":      {"state": COVERAGE_PENDING,
                   "reason": "no XAI base-URL env var; needs ~/.grok/config.toml [model.*] base_url"},
     "kimi":      {"state": COVERAGE_PENDING,
