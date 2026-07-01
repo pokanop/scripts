@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.12.0
+aikit — AI Coding Agent CLI Installer & Manager  v1.13.0
 Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -51,7 +51,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.12.0"
+__version__ = "1.13.0"
 
 import scriptkit as sk
 
@@ -2734,6 +2734,44 @@ GATEWAY_UNIVERSAL_BASE_VARS = (
     ("LITELLM_PROXY_API_BASE", ""),
 )
 
+# Built-in LiteLLM passthrough routes — native-protocol endpoints the proxy mounts in
+# code (not gated on config), each forwarding a provider's own API through the gateway.
+# Verified against litellm/proxy/pass_through_endpoints/llm_passthrough_endpoints.py.
+# A route is *always mounted* whenever the proxy runs, so its mere presence proves
+# nothing about usability — only discovery (a provider actually serving models, or a
+# live probe) tells us the upstream credential forwards. cf. POK-62: /anthropic 401'd
+# while /v1 served the same model. Fields per route:
+#   provider  the GATEWAY_PROVIDERS prefix it wraps (ties into providers_in_use); a
+#             bare label (e.g. "cursor") when it has no OpenAI-compatible provider row
+#   probe     a cheap, safe GET sub-path that exercises the upstream credential (a
+#             models-list endpoint — no tokens spent), or None when none is safe
+GATEWAY_PASSTHROUGH_ROUTES = {
+    "/anthropic": {"provider": "anthropic",   "probe": "/v1/models"},
+    "/gemini":    {"provider": "gemini",      "probe": "/v1beta/models"},
+    "/vertex_ai": {"provider": "vertex_ai",   "probe": None},
+    "/bedrock":   {"provider": "bedrock",     "probe": None},
+    "/cohere":    {"provider": "cohere",      "probe": "/v1/models"},
+    "/mistral":   {"provider": "mistral",     "probe": "/v1/models"},
+    "/openai":    {"provider": "openai",      "probe": "/v1/models"},
+    "/vllm":      {"provider": "hosted_vllm", "probe": "/v1/models"},
+    "/azure":     {"provider": "azure",       "probe": None},
+    "/cursor":    {"provider": "cursor",      "probe": "/v0/models"},
+}
+
+# Credential modes for a passthrough route (whose upstream key is used):
+#   virtual_key     — the caller sends the gateway virtual key; LiteLLM injects the
+#                     shared upstream provider key. aikit sets the tool's auth var = key.
+#   forwarded_token — the endpoint has forward_headers:true; the caller's OWN token is
+#                     forwarded upstream (the personal-subscription case, e.g. Claude
+#                     Code Max). aikit sets the base URL but LEAVES the tool's own token.
+GATEWAY_CRED_VIRTUAL_KEY = "virtual_key"
+GATEWAY_CRED_FORWARDED_TOKEN = "forwarded_token"
+GATEWAY_CRED_MODES = (GATEWAY_CRED_VIRTUAL_KEY, GATEWAY_CRED_FORWARDED_TOKEN)
+# Built-in native routes where forwarding the caller's OWN token upstream is a real use
+# case (LiteLLM mounts /anthropic with _forward_headers=True) — this is what made Claude
+# Code Max work for the owner. Used only when the operator opts into forwarded-token mode.
+GATEWAY_FORWARD_CAPABLE_PREFIXES = frozenset({"anthropic"})
+
 GATEWAY_DIR = CONFIG_DIR / "gateway"
 GATEWAY_CONFIG_FILE = GATEWAY_DIR / "config.json"   # credential store: base_url + virtual key
 GATEWAY_STATE_FILE = GATEWAY_DIR / "state.json"     # manifest: what `on` changed
@@ -2755,13 +2793,35 @@ def _gateway_config():
 
 
 def load_gateway_config():
-    """Return the saved gateway credentials ({} when unconfigured)."""
+    """Return the saved gateway config ({} when unconfigured): base_url + key, plus any
+    user-declared ``passthroughs`` / ``credential_mode`` the operator added by hand."""
     return _gateway_config().load()
 
 
 def save_gateway_config(base_url, key):
-    """Persist gateway URL + virtual key at 0600 (sk.Config.save chmods 0600)."""
-    _gateway_config().save({"base_url": base_url, "key": key})
+    """Persist gateway URL + virtual key at 0600 (sk.Config.save chmods 0600).
+
+    Merges over the existing file so hand-added keys (``passthroughs``,
+    ``credential_mode``) survive a re-``on`` — only base_url/key are overwritten.
+    """
+    data = _gateway_config().load()
+    data.update({"base_url": base_url, "key": key})
+    _gateway_config().save(data)
+
+
+def load_custom_passthroughs():
+    """User-declared custom passthrough routes: ``{tool: {route, auth_var, base_url_var,
+    credential_mode}}``. The escape hatch for tools with no auto-discoverable native
+    route (amp, kiro, copilot, …). Empty dict when none declared or the value is junk."""
+    val = load_gateway_config().get("passthroughs")
+    return val if isinstance(val, dict) else {}
+
+
+def gateway_credential_mode():
+    """Default credential mode for passthrough routing (``virtual_key`` unless the
+    operator set ``credential_mode: forwarded_token`` in the gateway config)."""
+    mode = load_gateway_config().get("credential_mode")
+    return mode if mode in GATEWAY_CRED_MODES else GATEWAY_CRED_VIRTUAL_KEY
 
 
 def _mask_secret(value):
@@ -2881,6 +2941,111 @@ def providers_in_use(models, detail):
     return seen
 
 
+# --- passthrough-route discovery -------------------------------------------
+# A passthrough route lets a tool speak a provider's *native* protocol through the
+# gateway (claude → /anthropic, gemini → /gemini). aikit stays a pure client: it never
+# configures LiteLLM, it discovers what the gateway already exposes and links tools to
+# it. Routability is a RUNTIME, gateway-dependent property — not a static table.
+_PASSTHROUGH_CACHE: dict = {}
+
+
+def _reset_passthrough_cache():
+    """Drop the in-process discovery cache (tests call this between gateways)."""
+    _PASSTHROUGH_CACHE.clear()
+
+
+def _probe_status(url, key, *, timeout=6):
+    """HTTP status for a safe GET to a passthrough probe endpoint; 0 on network error.
+
+    Never raises — unlike :func:`_gateway_get_json` it does not treat 401/403 as fatal,
+    because a 401 from a *mounted* passthrough is exactly the signal we want to surface
+    (the route exists but the upstream credential doesn't forward — POK-62). Injectable
+    for tests so no real network is touched.
+    """
+    import requests
+
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "x-api-key": key,
+        "Accept": "application/json",
+        "User-Agent": f"aikit/{__version__}",
+    }
+    try:
+        return requests.get(url, headers=headers, timeout=timeout).status_code
+    except requests.exceptions.RequestException:
+        return 0
+
+
+def _classify_route(route, provider, inferred, status, *, source):
+    """One route's usability verdict from (provider-tag inference, probe status)."""
+    # Probe wins when conclusive: an explicit 401/403 means the route is mounted but the
+    # upstream credential does NOT forward — unusable regardless of inference (POK-62).
+    if status in (401, 403):
+        return {"route": route, "provider": provider, "usable": False,
+                "status": "unauthorized", "via": "probe", "source": source}
+    if status and 200 <= status < 300:
+        return {"route": route, "provider": provider, "usable": True,
+                "status": "ok", "via": "probe", "source": source}
+    # No conclusive probe (not probed, timed out, or a non-auth error) → fall back to
+    # provider-tag inference: a provider serving models is a strong hint its route works.
+    if inferred:
+        return {"route": route, "provider": provider, "usable": True,
+                "status": "inferred", "via": "inference", "source": source}
+    return {"route": route, "provider": provider, "usable": False,
+            "status": "unknown", "via": None, "source": source}
+
+
+def discover_passthrough_routes(base_url, key, models=None, detail=None, *,
+                                custom=None, probe=False, prober=None):
+    """Composite discovery of the gateway's *usable* passthrough routes.
+
+    usable = known built-in routes ∩ (provider-tag inference ∪ successful probe),
+    plus any user-declared custom routes. Cheap and safe: probing (opt-in via
+    ``probe=True``) issues at most one models-list GET per probeable route and never
+    raises — a probe error is 'unknown', never fatal, so this can't crash ``on``.
+
+    ``models``/``detail`` come from :func:`discover_models` (for inference). ``custom``
+    is the user-declared ``{tool: {route, ...}}`` mapping. Returns ``{route: info}``
+    where info has ``usable``/``status``/``via``/``source``; call
+    :func:`usable_passthrough_routes` for just the usable set.
+    """
+    base = base_url.rstrip("/")
+    live = prober is None and probe
+    cache_key = (base, probe, tuple(sorted(models or [])))
+    if live and cache_key in _PASSTHROUGH_CACHE:
+        discovered = dict(_PASSTHROUGH_CACHE[cache_key])
+    else:
+        prober = prober or _probe_status
+        in_use = providers_in_use(models or [], detail or {})
+        discovered = {}
+        for route, spec in GATEWAY_PASSTHROUGH_ROUTES.items():
+            provider = spec["provider"]
+            status = None
+            if probe and spec.get("probe"):
+                status = prober(f"{base}{route}{spec['probe']}", key)
+            discovered[route] = _classify_route(
+                route, provider, provider in in_use, status, source="builtin")
+        if live:
+            _PASSTHROUGH_CACHE[cache_key] = dict(discovered)
+    # User-declared custom routes are authoritative (the user asserts the gateway has a
+    # matching passthrough); they augment, and can override, the built-in verdict.
+    for tool, decl in (custom or {}).items():
+        route = (decl or {}).get("route")
+        if not route:
+            continue
+        discovered[route] = {
+            "route": route, "provider": (decl.get("provider") or tool),
+            "usable": True, "status": "declared", "via": "custom",
+            "source": "custom", "tool": tool,
+        }
+    return discovered
+
+
+def usable_passthrough_routes(discovered):
+    """The set of routes discovery judged usable (drop the mounted-but-401 ones)."""
+    return {r for r, info in (discovered or {}).items() if info.get("usable")}
+
+
 # --- shell detection + env block -------------------------------------------
 def detect_shell(explicit=None):
     """Return (shell_name, rc_path), mirroring the reference script's logic."""
@@ -2899,12 +3064,21 @@ def detect_shell(explicit=None):
     return name, rc
 
 
-def build_env_pairs(base_url, key, only_providers=None):
+def build_env_pairs(base_url, key, only_providers=None, *,
+                    passthroughs=None, forwarded_token_prefixes=frozenset()):
     """Ordered, de-duped (VAR, VALUE) env pairs routing tools through the gateway.
 
     A universal OpenAI-compatible block first, then per-provider key + base-URL
-    overrides. ``only_providers`` (a set of prefixes) restricts the per-provider
-    vars; ``None`` means all providers.
+    overrides, then any resolved passthrough tools. ``only_providers`` (a set of
+    prefixes) restricts the per-provider vars; ``None`` means all providers.
+
+    ``passthroughs`` is an iterable of resolved passthrough specs (each with
+    ``route``/``base_url_var``/``auth_var``/``auth_mode``) — a tool's base-URL override
+    is pointed at ``{gateway}{route}`` and its auth var set to the virtual key.
+    ``forwarded_token_prefixes`` (and a passthrough's ``forwarded_token`` auth mode) mean
+    the gateway forwards the caller's OWN token upstream, so aikit sets the base URL but
+    LEAVES that tool's auth var untouched. Both extras default off, so the standard
+    virtual-key wiring is byte-for-byte unchanged.
     """
     base = base_url.rstrip("/")
     # Universal block, single-sourced from the tables above.
@@ -2916,10 +3090,24 @@ def build_env_pairs(base_url, key, only_providers=None):
         if only_providers is not None and prefix not in only_providers:
             continue
         target = f"{base}{route}"
-        for ke in key_envs:
-            pairs.append((ke, key))
+        # forwarded-token mode: the caller's own token is forwarded upstream, so DON'T
+        # overwrite the tool's auth var with the virtual key — only redirect the base URL.
+        if prefix not in forwarded_token_prefixes:
+            for ke in key_envs:
+                pairs.append((ke, key))
         for be in base_envs:
             pairs.append((be, target))
+
+    # Resolved / user-declared passthrough tools: wire the tool's own base-URL override
+    # env var at the route (and its auth var, unless the route forwards the user's token).
+    for pt in (passthroughs or []):
+        route, base_url_var = pt.get("route"), pt.get("base_url_var")
+        if not route or not base_url_var:
+            continue  # nothing to point via env (renderer's job) — skip silently
+        pairs.append((base_url_var, f"{base}{route}"))
+        auth_var = pt.get("auth_var")
+        if auth_var and pt.get("auth_mode") != GATEWAY_CRED_FORWARDED_TOKEN:
+            pairs.append((auth_var, key))
 
     seen, out = set(), []
     for k, v in pairs:
@@ -3226,30 +3414,37 @@ GATEWAY_TOOL_SPECS = [
 
 # --- coverage capability model ---------------------------------------------
 # Single source of truth for how (and whether) each agent in AGENTS reaches the
-# gateway. Four states — the whole point of this model is that every agent lands
-# in exactly one, so `status`/`on`/`coverage` can account for all of them and
-# never silently omit a detected tool.
+# gateway. The whole point of this model is that every agent lands in exactly one
+# state, so `status`/`on`/`coverage` can account for all of them and never silently
+# omit a detected tool.
 #
 #   renderer     aikit writes the tool's native config (the GATEWAY_TOOL_SPECS set)
 #   env          routed by a standard/provider env var build_env_pairs() already sets
+#   passthrough  routed through a native-protocol passthrough route (base URL + auth
+#                var point at the route), resolved at RUNTIME from live discovery or a
+#                user-declared custom mapping — see GATEWAY_PASSTHROUGH_ROUTES. A tool
+#                only lands here when its route is usable AND it exposes a base-URL
+#                override to point there; that makes it distinct from `env` (which is
+#                wired unconditionally) and `unsupported` (no route, or no override).
 #   pending      detected but not reliably routed yet — no renderer and the env path
 #                is non-standard or absent; tracked here (visibly) until a later stage
 #                adds a native renderer or a new env var
-#   unsupported  bound to a first-party backend — cannot point at a third-party
-#                OpenAI-compatible gateway; correct to exclude, but declared not silent
+#   unsupported  no usable passthrough route AND no OpenAI-compatible/override path —
+#                correct to exclude, but declared (with the real reason), not silent
 COVERAGE_RENDERER = "renderer"
 COVERAGE_ENV = "env"
+COVERAGE_PASSTHROUGH = "passthrough"
 COVERAGE_PENDING = "pending"
 COVERAGE_UNSUPPORTED = "unsupported"
 COVERAGE_UNCLASSIFIED = "unclassified"   # fallback for an agent nobody has classified
 
 # Ordered for display (grouped, most-covered first) and for the `on` accounting.
 COVERAGE_STATE_ORDER = (
-    COVERAGE_RENDERER, COVERAGE_ENV, COVERAGE_PENDING,
+    COVERAGE_RENDERER, COVERAGE_ENV, COVERAGE_PASSTHROUGH, COVERAGE_PENDING,
     COVERAGE_UNSUPPORTED, COVERAGE_UNCLASSIFIED,
 )
 # States that actually reach the gateway. Everything else is "detected but not routed".
-COVERAGE_ROUTED_STATES = frozenset({COVERAGE_RENDERER, COVERAGE_ENV})
+COVERAGE_ROUTED_STATES = frozenset({COVERAGE_RENDERER, COVERAGE_ENV, COVERAGE_PASSTHROUGH})
 
 # Declared coverage for every agent NOT handled by a native renderer. Renderer
 # coverage derives from GATEWAY_TOOL_SPECS (single source), so those 9 agents are
@@ -3277,12 +3472,36 @@ GATEWAY_COVERAGE = {
                   "reason": "no MOONSHOT_API_BASE; needs ~/.kimi/config.toml provider (type=openai_legacy) base_url"},
     "blackbox":  {"state": COVERAGE_PENDING,
                   "reason": "auth is proprietary BLACKBOX_API_KEY via 'blackbox configure' (not a provider var the env layer sets); no verified OPENAI_BASE_URL support — Stage-7: probe live install for a settable base_url (likely renderer)"},
-    # -- unsupported: first-party backend, cannot target a third-party gateway. --
-    "antigravity": {"state": COVERAGE_UNSUPPORTED, "reason": "Google-account backend — no third-party base-URL"},
-    "cursor":      {"state": COVERAGE_UNSUPPORTED, "reason": "routes through Cursor's backend — no third-party base-URL"},
-    "copilot":     {"state": COVERAGE_UNSUPPORTED, "reason": "GitHub-locked — requires GitHub Copilot subscription/backend"},
-    "kiro":        {"state": COVERAGE_UNSUPPORTED, "reason": "AWS/Kiro backend — no third-party base-URL"},
-    "amp":         {"state": COVERAGE_UNSUPPORTED, "reason": "Sourcegraph backend — no third-party base-URL"},
+    # -- unsupported / passthrough-candidate: first-party CLIs. Each declares its
+    #    native protocol + the LiteLLM passthrough route that wraps it (verified against
+    #    llm_passthrough_endpoints.py), the auth var the tool reads, and whether the
+    #    *tool* exposes a base-URL override the env layer can point at the route.
+    #    Routability is resolved at RUNTIME (see resolve_passthrough_state): a tool flips
+    #    to `passthrough` only when its route is usable AND it has a base-URL override
+    #    (standard or user-declared). The vendor CLIs below have a real route but no
+    #    override, so they stay `unsupported` until a native renderer (Stage 8, POK-67)
+    #    or a user-declared custom mapping wires them — the route is no longer the
+    #    blocker, the missing tool-side override is, and the reason now says so. --
+    "cursor":      {"state": COVERAGE_UNSUPPORTED,
+                    "reason": "Cursor Cloud Agents passthrough exists at /cursor, but cursor-agent has no base-URL override env var — needs a native renderer or a declared custom mapping",
+                    "passthrough": {"protocol": "cursor", "route": "/cursor",
+                                    "auth_var": "CURSOR_API_KEY", "base_url_var": None}},
+    "antigravity": {"state": COVERAGE_UNSUPPORTED,
+                    "reason": "Google AI Studio passthrough exists at /gemini, but agy is Google-account-locked with no base-URL override",
+                    "passthrough": {"protocol": "gemini", "route": "/gemini",
+                                    "auth_var": None, "base_url_var": None}},
+    "copilot":     {"state": COVERAGE_UNSUPPORTED,
+                    "reason": "LiteLLM exposes no GitHub Copilot passthrough route and copilot has no base-URL override — declare a custom mapping to route it",
+                    "passthrough": {"protocol": "github_copilot", "route": None,
+                                    "auth_var": "COPILOT_GITHUB_TOKEN", "base_url_var": None}},
+    "kiro":        {"state": COVERAGE_UNSUPPORTED,
+                    "reason": "no native LiteLLM passthrough route for Kiro's backend and no base-URL override — declare a custom mapping to route it",
+                    "passthrough": {"protocol": "kiro", "route": None,
+                                    "auth_var": "KIRO_API_KEY", "base_url_var": None}},
+    "amp":         {"state": COVERAGE_UNSUPPORTED,
+                    "reason": "no native LiteLLM passthrough route for Sourcegraph's backend; AMP_URL points at Amp instances only — declare a custom mapping to route it",
+                    "passthrough": {"protocol": "amp", "route": None,
+                                    "auth_var": "AMP_API_KEY", "base_url_var": None}},
 }
 
 
@@ -3292,7 +3511,52 @@ def _renderer_target_rels():
             for _, agent_key, _, target_rel, _ in GATEWAY_TOOL_SPECS}
 
 
-def gateway_coverage():
+def resolve_passthrough_state(key, entry, *, usable_routes=None, custom=None,
+                              credential_mode=GATEWAY_CRED_VIRTUAL_KEY):
+    """Resolve a coverage entry's RUNTIME state from discovered routes + custom maps.
+
+    Only entries with passthrough candidacy (a ``passthrough`` block) or a user-declared
+    custom mapping can change; everything else returns its static entry untouched — so
+    ``gateway_coverage()`` with no discovery is byte-for-byte the POK-66 behaviour.
+
+    A tool resolves to ``passthrough`` when either (a) the user declared a custom mapping
+    for it (the user asserts the gateway route + how to reach it), or (b) its built-in
+    route is in ``usable_routes`` AND it exposes a base-URL override to point there. A
+    built-in route that's usable but has no override stays ``unsupported`` — but the
+    reason flips to name the tool-side gap, not the gateway. Returns a fresh dict; the
+    internal ``passthrough`` candidacy key is never leaked into the result.
+    """
+    custom = custom or {}
+    decl = custom.get(key)
+    pt = entry.get("passthrough")
+    out = {k: v for k, v in entry.items() if k != "passthrough"}
+    if not decl and not pt:
+        return out                                   # nothing to resolve
+
+    route = (decl or {}).get("route") or (pt or {}).get("route")
+    base_url_var = (decl or {}).get("base_url_var") or (pt or {}).get("base_url_var")
+    auth_var = (decl or {}).get("auth_var") or (pt or {}).get("auth_var")
+    auth_mode = ((decl or {}).get("credential_mode") or (decl or {}).get("auth_mode")
+                 or (pt or {}).get("credential_mode") or credential_mode)
+
+    if decl and route:                               # user-declared → trusted, routed
+        out.update(state=COVERAGE_PASSTHROUGH, reason=None, route=route,
+                   auth_var=auth_var, base_url_var=base_url_var, auth_mode=auth_mode,
+                   source="custom", via=f"{route} (custom, {auth_mode})")
+    elif usable_routes is not None and route and route in usable_routes:
+        if base_url_var:                             # route usable + tool can be pointed
+            out.update(state=COVERAGE_PASSTHROUGH, reason=None, route=route,
+                       auth_var=auth_var, base_url_var=base_url_var, auth_mode=auth_mode,
+                       source="builtin", via=f"{route} ({auth_mode})")
+        else:                                        # route usable, tool has no override
+            out.update(state=COVERAGE_UNSUPPORTED, route=route,
+                       reason=f"{route} passthrough is usable, but {key} has no base-URL "
+                              "override — needs a native renderer or a custom mapping")
+    return out
+
+
+def gateway_coverage(*, passthrough=None, custom=None,
+                     credential_mode=GATEWAY_CRED_VIRTUAL_KEY):
     """Full per-agent gateway coverage — the single map `status`/`on`/`coverage` read.
 
     Spans **every** agent in AGENTS. ``renderer`` state derives from
@@ -3301,7 +3565,12 @@ def gateway_coverage():
     as ``unclassified`` rather than dropped — a newly-registered agent surfaces
     loudly in `coverage` instead of being silently omitted.
 
-    Returns ``{agent_id: {"state", "via", "reason"}}`` (via/reason may be None).
+    ``passthrough`` (the usable-route set from :func:`discover_passthrough_routes`) and
+    ``custom`` (user-declared ``{tool: {...}}`` mappings) drive RUNTIME resolution of
+    the vendor-native tools; omit both for the static view.
+
+    Returns ``{agent_id: {"state", "via", "reason", ...}}`` (via/reason may be None;
+    ``route``/``auth_mode``/``auth_var``/``base_url_var`` appear on resolved passthroughs).
     """
     renderer_targets = _renderer_target_rels()
     cov = {}
@@ -3311,13 +3580,18 @@ def gateway_coverage():
             via = (f"~/{target_rel}" if target_rel
                    else "staged native config (real path varies)")
             cov[key] = {"state": COVERAGE_RENDERER, "via": via, "reason": None}
-        elif key in GATEWAY_COVERAGE:
-            entry = GATEWAY_COVERAGE[key]
-            cov[key] = {"state": entry["state"], "via": entry.get("via"),
-                        "reason": entry.get("reason")}
         else:
-            cov[key] = {"state": COVERAGE_UNCLASSIFIED, "via": None,
-                        "reason": "no gateway coverage declared — add it to GATEWAY_COVERAGE"}
+            entry = GATEWAY_COVERAGE.get(key) or {
+                "state": COVERAGE_UNCLASSIFIED, "via": None,
+                "reason": "no gateway coverage declared — add it to GATEWAY_COVERAGE"}
+            resolved = resolve_passthrough_state(
+                key, entry, usable_routes=passthrough, custom=custom,
+                credential_mode=credential_mode)
+            cov[key] = {"state": resolved["state"], "via": resolved.get("via"),
+                        "reason": resolved.get("reason"), "route": resolved.get("route"),
+                        "auth_mode": resolved.get("auth_mode"),
+                        "auth_var": resolved.get("auth_var"),
+                        "base_url_var": resolved.get("base_url_var")}
     return cov
 
 
@@ -3475,18 +3749,24 @@ def gateway_tool_status(manifest, *, home=None, detector=None):
     return rows
 
 
-def gateway_coverage_rows(*, detector=None):
+def gateway_coverage_rows(*, detector=None, passthrough=None, custom=None,
+                          credential_mode=GATEWAY_CRED_VIRTUAL_KEY):
     """Coverage matrix for **every** agent — one row per AGENTS entry, in
     state-grouped display order. Pure given the detector; backs the `coverage`
     command and the `status`/`on` accounting, so a detected agent can never be
     silently dropped from the report.
 
+    ``passthrough``/``custom``/``credential_mode`` are threaded into
+    :func:`gateway_coverage` for runtime resolution of the vendor-native tools; omit
+    them for the static view.
+
     Each row: ``{"id", "name", "detected" (bool), "state", "detail"}`` where
-    ``detail`` is the routing var/route (renderer/env) or the blocking reason
-    (pending/unsupported/unclassified).
+    ``detail`` is the routing var/route (renderer/env/passthrough) or the blocking
+    reason (pending/unsupported/unclassified).
     """
     detector = detector or detect_gateway_tool
-    cov = gateway_coverage()
+    cov = gateway_coverage(passthrough=passthrough, custom=custom,
+                           credential_mode=credential_mode)
     order = {s: i for i, s in enumerate(COVERAGE_STATE_ORDER)}
     rows = []
     for key in AGENTS:
@@ -3516,6 +3796,42 @@ def _coverage_detected_env(rows):
             if r["detected"] and r["state"] == COVERAGE_ENV]
 
 
+def _coverage_detected_passthrough(rows):
+    """[(id, detail)] for detected agents routed through a native-protocol passthrough
+    route — reported with their route so `on`/`status` name the credential path used."""
+    return [(r["id"], r["detail"]) for r in rows
+            if r["detected"] and r["state"] == COVERAGE_PASSTHROUGH]
+
+
+def _warn_passthrough_401s(base_url, key, specs, *, prober=None):
+    """Probe the wired passthrough routes and warn on any mounted-but-401 route, so a
+    mis-forwarding upstream credential is surfaced at wire time (POK-62). Only probes
+    built-in routes with a known-safe models-list GET; `verify` covers the rest."""
+    base = base_url.rstrip("/")
+    prober = prober or _probe_status
+    for s in specs:
+        route = s.get("route")
+        spec = GATEWAY_PASSTHROUGH_ROUTES.get(route)
+        if not spec or not spec.get("probe"):
+            continue                 # custom route with no known safe probe — skip here
+        status = prober(f"{base}{route}{spec['probe']}", key)
+        if status in (401, 403):
+            print_warning(f"Passthrough {route} is mounted but returned HTTP {status} — "
+                          "the upstream credential isn't forwarding. Run "
+                          "'aikit gateway verify' to diagnose.")
+
+
+def _passthrough_wiring(cov, credential_mode):
+    """(specs, forwarded_token_prefixes) that :func:`build_env_pairs` needs, from a
+    resolved coverage map. ``specs`` are the passthrough-routed tools (route + auth/base
+    vars); ``forwarded_token_prefixes`` are the built-in native routes whose key var to
+    skip because the operator opted into forwarded-token mode (Claude Code Max)."""
+    specs = [c for c in cov.values() if c.get("state") == COVERAGE_PASSTHROUGH]
+    forwarded = (GATEWAY_FORWARD_CAPABLE_PREFIXES
+                 if credential_mode == GATEWAY_CRED_FORWARDED_TOKEN else frozenset())
+    return specs, forwarded
+
+
 def _format_coverage_group(items):
     """'openhands (pending), copilot (unsupported)' from [(id, state), …]."""
     return ", ".join(f"{i} ({s})" for i, s in items)
@@ -3523,11 +3839,15 @@ def _format_coverage_group(items):
 
 def _print_gateway_coverage_accounting(rows):
     """After the renderer plan, account for the *other* detected agents so `on`
-    (and its dry-run) is honest about everything installed — env-routed ones by
-    name, and anything detected-but-not-routed with a pointer to `coverage`."""
+    (and its dry-run) is honest about everything installed — env- and passthrough-routed
+    ones by name, and anything detected-but-not-routed with a pointer to `coverage`."""
     env_routed = _coverage_detected_env(rows)
     if env_routed:
         print_info("Also routed via env (no native config): " + ", ".join(env_routed))
+    passthrough_routed = _coverage_detected_passthrough(rows)
+    if passthrough_routed:
+        print_info("Routed via native passthrough: "
+                   + ", ".join(f"{i} → {d}" for i, d in passthrough_routed))
     unrouted = _coverage_detected_unrouted(rows)
     if unrouted:
         print_warning("Detected but not routed through the gateway: "
@@ -3579,8 +3899,19 @@ def do_gateway_on(url=None, key=None, *, shell=None, only_discovered=False,
     models, detail = discover_models(url, key)
     only = providers_in_use(models, detail) if only_discovered else None
 
+    # Passthrough routing: discover which native routes this gateway exposes (inference
+    # from the models in use — probing lives in `verify` so `on` stays fast), fold in any
+    # user-declared custom routes, and resolve the vendor-native tools accordingly.
+    customs = load_custom_passthroughs()
+    cred_mode = gateway_credential_mode()
+    discovered = discover_passthrough_routes(url, key, models, detail, custom=customs)
+    usable = usable_passthrough_routes(discovered)
+    cov = gateway_coverage(passthrough=usable, custom=customs, credential_mode=cred_mode)
+    specs, forwarded = _passthrough_wiring(cov, cred_mode)
+
     shell_name, rc = detect_shell(shell)
-    pairs = build_env_pairs(url, key, only_providers=only)
+    pairs = build_env_pairs(url, key, only_providers=only,
+                            passthroughs=specs, forwarded_token_prefixes=forwarded)
     body = render_env_block_body(shell_name, pairs)
     block = GATEWAY_BLOCK.render(body)
 
@@ -3589,6 +3920,8 @@ def do_gateway_on(url=None, key=None, *, shell=None, only_discovered=False,
     plan = gateway_tool_plan(url, models, detail, home=home,
                              aikit_owned=_aikit_installed_targets(prior))
 
+    rows = gateway_coverage_rows(passthrough=usable, custom=customs,
+                                 credential_mode=cred_mode)
     print_info(f"Gateway: {url}")
     print_info(f"Models visible to this key: {len(models)}")
     if only_discovered:
@@ -3596,13 +3929,20 @@ def do_gateway_on(url=None, key=None, *, shell=None, only_discovered=False,
         print_info(f"Targeting providers in use: {targets}")
     else:
         print_info(f"Targeting all {len(GATEWAY_PROVIDERS)} providers at the env layer")
+    if cred_mode == GATEWAY_CRED_FORWARDED_TOKEN:
+        print_info("Credential mode: forwarded-token (your own subscription token is "
+                   "passed through; aikit sets base URLs but leaves auth tokens)")
+    if specs:
+        print_info(f"Passthrough-routed tool(s): "
+                   + ", ".join(f"{s.get('route')} ({s.get('auth_mode')})" for s in specs))
+        _warn_passthrough_401s(url, key, specs)
     sk.kv("Shell", shell_name)
     sk.kv("rc file", str(rc))
     print_info(f"{len(pairs)} environment variable(s) in the managed block")
     _print_gateway_tool_plan(plan, dry_run=dry_run)
-    # Account for every *other* detected agent (env-routed, pending, unsupported)
-    # so `on` — like `status`/`coverage` — never silently omits an installed tool.
-    _print_gateway_coverage_accounting(gateway_coverage_rows())
+    # Account for every *other* detected agent (env-routed, passthrough, pending,
+    # unsupported) so `on` — like `status`/`coverage` — never silently omits a tool.
+    _print_gateway_coverage_accounting(rows)
 
     if dry_run:
         print_info("Dry run — nothing will be written. Managed block preview:")
@@ -3771,9 +4111,12 @@ def do_gateway_status():
     rows = gateway_tool_status(manifest)
     sk.table([{"name": "Tool"}, {"name": "Detected"}, {"name": "Config"}], rows,
              title="Wrapped tools")
-    # Account for the *other* detected agents (env-routed, pending, unsupported) so
-    # status is honest about everything installed, not just the 9 wrapped tools.
-    _print_gateway_coverage_accounting(gateway_coverage_rows())
+    # Account for the *other* detected agents (env-routed, passthrough, pending,
+    # unsupported) so status is honest about everything installed, not just the wrapped
+    # tools. Custom passthroughs resolve offline; `verify` probes live built-in routes.
+    _print_gateway_coverage_accounting(
+        gateway_coverage_rows(custom=load_custom_passthroughs(),
+                              credential_mode=gateway_credential_mode()))
 
     # Drift detection — has the managed block been hand-edited or removed?
     markers = manifest.get("markers") or {}
@@ -3802,11 +4145,14 @@ def do_gateway_coverage():
     """Read-only: the full per-agent gateway coverage matrix (every agent in AGENTS).
 
     Shows how each tool reaches the gateway — native ``renderer``, ``env`` var,
-    still ``pending`` (a tracked gap with no route yet), or ``unsupported`` (a
-    first-party backend that can't target a gateway, with the reason) — so nothing
-    aikit knows about is left unaccounted for. Detection reflects what's installed
-    right now; the classification is static (independent of gateway on/off)."""
-    rows = gateway_coverage_rows()
+    ``passthrough`` (a native-protocol route), still ``pending`` (a tracked gap with no
+    route yet), or ``unsupported`` (no usable route and no override, with the reason) —
+    so nothing aikit knows about is left unaccounted for. Detection reflects what's
+    installed right now. User-declared custom passthroughs resolve offline; live
+    built-in route usability is a runtime property — run `aikit gateway verify`."""
+    customs = load_custom_passthroughs()
+    cred_mode = gateway_credential_mode()
+    rows = gateway_coverage_rows(custom=customs, credential_mode=cred_mode)
     table_rows = [
         [r["id"], "yes" if r["detected"] else "no", r["state"], r["detail"]]
         for r in rows
@@ -3821,11 +4167,54 @@ def do_gateway_coverage():
     tally = " · ".join(f"{counts[s]} {s}" for s in COVERAGE_STATE_ORDER if counts.get(s))
     detected = sum(1 for r in rows if r["detected"])
     print_info(f"{tally}  ({detected} detected)")
-    print_info("renderer/env reach the gateway; pending = tracked gap (no route yet); "
-               "unsupported = first-party backend, cannot target a gateway.")
+    print_info("renderer/env/passthrough reach the gateway; pending = tracked gap "
+               "(no route yet); unsupported = no usable native route and no override.")
+    print_info("Run 'aikit gateway verify' to probe live passthrough routes "
+               "(built-in route usability is gateway-dependent).")
     unrouted = _coverage_detected_unrouted(rows)
     if unrouted:
         print_warning("Detected but not routed: " + _format_coverage_group(unrouted))
+
+
+def do_gateway_verify(url=None, key=None):
+    """Probe each candidate passthrough route and report usability (read-only, safe).
+
+    This is the mandatory 'ensure the passthrough is doing its thing' step: a built-in
+    route is *always mounted*, so only a live probe (a cheap models-list GET — no tokens)
+    confirms the upstream credential forwards. Flags any mounted-but-401 route so a
+    mis-forwarding cred is surfaced, not silently broken (POK-62)."""
+    url, key = _resolve_gateway_credentials(url, key)
+    models, detail = discover_models(url, key)
+    customs = load_custom_passthroughs()
+    cred_mode = gateway_credential_mode()
+    discovered = discover_passthrough_routes(url, key, models, detail,
+                                             custom=customs, probe=True)
+    table_rows = []
+    for route, info in discovered.items():
+        table_rows.append([route, info.get("provider") or "", info.get("status") or "—",
+                           info.get("via") or "—", "yes" if info.get("usable") else "no"])
+    table_rows.sort(key=lambda r: (r[4] != "yes", r[0]))
+    sk.table([{"name": "Route"}, {"name": "Provider"}, {"name": "Probe"},
+              {"name": "Via"}, {"name": "Usable"}], table_rows,
+             title=f"Passthrough routes via {url}")
+
+    usable = usable_passthrough_routes(discovered)
+    unauth = sorted(r for r, i in discovered.items() if i.get("status") == "unauthorized")
+    if unauth:
+        print_warning("Mounted but unauthorized (upstream credential not forwarding): "
+                      + ", ".join(unauth)
+                      + " — the route exists, but its upstream key is missing/invalid "
+                      "on the gateway. Fix the gateway credential, not aikit.")
+    # How the vendor-native tools resolve given these live routes + any custom maps.
+    prows = gateway_coverage_rows(passthrough=usable, custom=customs,
+                                  credential_mode=cred_mode)
+    routed = [(r["id"], r["detail"]) for r in prows if r["state"] == COVERAGE_PASSTHROUGH]
+    if routed:
+        print_info("Tools resolved to passthrough: "
+                   + ", ".join(f"{i} → {d}" for i, d in routed))
+    print_info(f"{len(usable)} usable passthrough route(s). "
+               "Declare custom routes in the gateway config to wire tools without a "
+               "native LiteLLM route (see docs/aikit-gateway.md).")
 
 
 def do_gateway_models(url=None, key=None):
@@ -4525,7 +4914,12 @@ def build_parser():
     gw_sub.add_parser("status", help="Show gateway state, masked key, and drift")
 
     gw_sub.add_parser("coverage",
-                      help="Show per-agent gateway coverage (renderer/env/pending/unsupported)")
+                      help="Show per-agent gateway coverage (renderer/env/passthrough/pending/unsupported)")
+
+    gw_verify = gw_sub.add_parser(
+        "verify", help="Probe passthrough routes for usability (flags mounted-but-401)")
+    gw_verify.add_argument("-u", "--url", help="Gateway base URL override")
+    gw_verify.add_argument("-k", "--key", help="Virtual key override")
 
     gw_models = gw_sub.add_parser("models", help="List models the key can see (read-only)")
     gw_models.add_argument("-u", "--url", help="Gateway base URL override")
@@ -4611,6 +5005,8 @@ def cmd_gateway(args):
         do_gateway_purge(shell=args.shell, yes=args.yes, dry_run=args.dry_run)
     elif action == "coverage":
         do_gateway_coverage()
+    elif action == "verify":
+        do_gateway_verify(args.url, args.key)
     elif action == "models":
         do_gateway_models(args.url, args.key)
     else:  # "status" or no sub-action — the at-a-glance default

@@ -112,20 +112,81 @@ full matrix; `on` and `status` call out anything detected-but-not-routed inline.
 |-------|---------|----------------------|
 | **renderer** | aikit writes the tool's native config (the 9 tools above) | ✅ yes |
 | **env** | routed by a standard/provider env var the env block already sets | ✅ yes |
+| **passthrough** | routed through a native-protocol passthrough route (`/anthropic`, `/gemini`, a custom route…), resolved at runtime from live discovery or a declared mapping | ✅ yes |
 | **pending** | detected but not reliably routed yet — no renderer and no standard env var; a tracked gap | ❌ not yet |
-| **unsupported** | bound to a first-party backend (Google account, Cursor, GitHub, AWS/Kiro, Sourcegraph) — cannot target a third-party gateway | 🚫 by design |
+| **unsupported** | no usable native passthrough route **and** no OpenAI-compatible / base-URL override path — with the real reason | 🚫 by design |
 
 - **env-routed (5):** `claude` (`ANTHROPIC_BASE_URL`+`ANTHROPIC_AUTH_TOKEN`),
   `gemini` (`GEMINI_API_BASE`/`GOOGLE_GEMINI_BASE_URL`), `qwen`, `openclaw`, `sgpt`
   (all via `OPENAI_BASE_URL`). These need no native config — the env layer already
   carries them.
+- **passthrough:** any tool wired through a native-protocol route (base URL + auth var
+  aimed at the route). Empty by default — the vendor CLIs below have a real route but no
+  base-URL override — but a **declared custom mapping** (or a future tool that honours a
+  base-URL override) lands here, showing its route + credential mode.
 - **pending (6):** `openhands`, `kilo`, `cline`, `grok`, `kimi`, `blackbox`. aikit
   detects them but has no route wired yet; each row's *How / why* records the known
   route (e.g. openhands reads `LLM_BASE_URL` / `~/.openhands/settings.json`) so it can
   be picked up by a future renderer. They are shown, never hidden.
-- **unsupported (5):** `antigravity`, `cursor`, `copilot`, `kiro`, `amp`. These route
-  through a vendor's own backend and can't be aimed at your gateway — excluded on
-  purpose, with the reason spelled out.
+- **unsupported (5):** `antigravity`, `cursor`, `copilot`, `kiro`, `amp`. Routability
+  is a *runtime* property, so these are re-examined against the live gateway:
+  - `cursor` — LiteLLM **does** mount a `/cursor` (Cursor Cloud Agents) passthrough, and
+    `antigravity`'s Gemini backend has a `/gemini` route — but `cursor-agent` / `agy`
+    expose **no base-URL override** env var, so the tool can't be pointed at the route
+    yet. The reason now names that tool-side gap (not the gateway), and a native renderer
+    (Stage 8) or a custom mapping flips them to `passthrough`.
+  - `copilot`, `kiro`, `amp` — LiteLLM mounts **no** native route for GitHub Copilot,
+    Kiro, or Sourcegraph, so these stay `unsupported` unless you declare a custom route.
+
+### Passthrough discovery + `verify`
+
+A LiteLLM passthrough route is *always mounted* whenever the proxy runs — its presence
+proves nothing about whether the upstream credential forwards. So aikit **discovers**
+usable routes rather than assuming them:
+
+```
+usable routes = known built-in routes ∩ (provider-tag inference ∪ a live probe)
+                ∪ any user-declared custom routes
+```
+
+`aikit gateway verify` runs the probe — a cheap, safe models-list `GET` per candidate
+route (no tokens) — and reports each route's usability, **flagging any mounted-but-401
+route** so a mis-forwarding upstream key is surfaced, not silently broken:
+
+```bash
+aikit gateway verify          # probe passthrough routes; flag mounted-but-401
+```
+
+### Custom passthrough routes (the escape hatch)
+
+For a tool with no auto-discoverable native route (`amp`, `kiro`, `copilot`…), declare a
+mapping in the gateway config (`~/.aikit/gateway/config.json`):
+
+```json
+{
+  "base_url": "https://gw.example.com",
+  "key": "sk-…",
+  "credential_mode": "virtual_key",
+  "passthroughs": {
+    "amp": { "route": "/sourcegraph", "auth_var": "AMP_API_KEY", "base_url_var": "AMP_URL" }
+  }
+}
+```
+
+`route` is the gateway passthrough path; `base_url_var` is the tool's base-URL override
+env var (wired through the managed block); `auth_var` is set to the virtual key. A
+declared tool resolves to `passthrough` and is honoured by `coverage`/`status`/`verify`.
+`on` merge-saves the config, so hand-added `passthroughs` survive a re-`on`.
+
+### Credential modes
+
+- **`virtual_key`** (default) — the caller sends the gateway virtual key; LiteLLM injects
+  the shared upstream provider key. aikit sets the tool's auth var to the virtual key.
+- **`forwarded_token`** — the gateway endpoint has `forward_headers: true` and forwards
+  the caller's **own** token upstream (a personal subscription — this is what makes
+  **Claude Code Max** work). Set `"credential_mode": "forwarded_token"`; aikit then sets
+  base URLs but **leaves your auth token untouched** (so `/anthropic` keeps your OAuth
+  token). Set per-passthrough with a `credential_mode` in the mapping.
 
 ```bash
 aikit gateway coverage        # the full 25-row matrix: agent, detected?, state, how/why
@@ -238,10 +299,21 @@ reports *inactive (credentials saved)* with the URL + masked key and points you 
 ### `aikit gateway coverage`
 
 Read-only. Prints the full **25-row coverage matrix** — for every agent aikit knows:
-`detected?`, its coverage **state** (`renderer` / `env` / `pending` / `unsupported`),
-and *how / why* (the routing var or config path, or the reason it isn't routed) — plus
-a per-state tally. This is the honest, one-look answer to "does the gateway cover tool
-X, and if not, why?" See [Tool coverage](#tool-coverage) for what the states mean.
+`detected?`, its coverage **state** (`renderer` / `env` / `passthrough` / `pending` /
+`unsupported`), and *how / why* (the routing var or config path, or the reason it isn't
+routed) — plus a per-state tally. This is the honest, one-look answer to "does the
+gateway cover tool X, and if not, why?" Custom passthroughs resolve here offline; run
+`verify` to probe live built-in routes. See [Tool coverage](#tool-coverage) for what the
+states mean.
+
+### `aikit gateway verify`
+
+Read-only, safe. Probes each candidate **passthrough route** (a cheap models-list `GET`,
+no tokens) and reports its usability — and **flags any mounted-but-401 route**, where the
+route exists but the gateway's upstream credential isn't forwarding (the POK-62 failure
+mode). Run it after `on` to confirm the native routes you rely on actually work, or to
+debug why a passthrough tool isn't reaching a provider. `on` also warns inline if a route
+it's wiring probes 401.
 
 ### `aikit gateway models`
 
