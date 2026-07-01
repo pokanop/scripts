@@ -33,6 +33,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 from datetime import datetime, timezone
@@ -108,6 +109,25 @@ def _npm_prefix_quoted():
 def npm_install_cmd(package):
     """Install an npm package globally under ~/.local/bin."""
     return f"npm install -g {package} --prefix {_npm_prefix_quoted()}"
+
+
+def _npm_subprocess_env():
+    """Env overrides so npm subprocesses don't write under $HOME."""
+    cache = tempfile.mkdtemp(prefix="aikit-npm-")
+    return cache, {
+        "NPM_CONFIG_LOGLEVEL": "error",
+        "NPM_CONFIG_LOGS_MAX": "0",
+        "NPM_CONFIG_CACHE": cache,
+    }
+
+
+def _run_npm(cmd, timeout=10):
+    """Run an npm shell command without leaving files under $HOME."""
+    cache, env = _npm_subprocess_env()
+    try:
+        return run(cmd, timeout=timeout, env=env)
+    finally:
+        shutil.rmtree(cache, ignore_errors=True)
 
 
 def _path_entry_on_path(dir_path):
@@ -844,7 +864,7 @@ def _npm_global_prefixes():
         prefixes.append(path)
 
     add(_NPM_INSTALL_PREFIX)
-    exit_code, prefix, _ = run("npm config get prefix", timeout=10)
+    exit_code, prefix, _ = _run_npm("npm config get prefix", timeout=10)
     if exit_code == 0 and prefix:
         add(prefix.strip().strip('"'))
 
@@ -1107,7 +1127,9 @@ def fetch_latest_version(agent_key):
     kind = spec.get("type")
     try:
         if kind == "npm":
-            exit_code, stdout, _ = run(f"npm view {spec['package']} version", timeout=20)
+            exit_code, stdout, _ = _run_npm(
+                f"npm view {spec['package']} version", timeout=20,
+            )
             return stdout.strip() if exit_code == 0 and stdout else None
         if kind == "pip":
             data = json.loads(_http_get_text(f"https://pypi.org/pypi/{spec['package']}/json"))

@@ -373,3 +373,41 @@ def test_status_lists_wrapped_tools(aikit, gw, capsys):
     assert "installed by aikit" in rows["opencode"][2]
     assert "user config (kept)" in rows["aider"][2]
     assert "staged only" in rows["llm"][2]                       # target path varies
+
+
+def _home_files(home):
+    return sorted(str(p.relative_to(home)) for p in home.rglob("*") if p.is_file())
+
+
+@pytest.mark.skipif(shutil.which("npm") is None, reason="npm not installed")
+def test_gateway_dry_run_and_status_create_no_home_files(aikit, tmp_path, monkeypatch):
+    """Real tool detection (npm prefix lookup) must not leave stray files under $HOME."""
+    home = tmp_path / "home"
+    home.mkdir()
+    rc = home / ".zshrc"
+    rc.write_text("# rc\n")
+    gwdir = home / ".aikit" / "gateway"
+    gwdir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(aikit, "GATEWAY_DIR", gwdir)
+    monkeypatch.setattr(aikit, "GATEWAY_CONFIG_FILE", gwdir / "config.json")
+    monkeypatch.setattr(aikit, "GATEWAY_STATE_FILE", gwdir / "state.json")
+    monkeypatch.setattr(aikit, "detect_shell", lambda explicit=None: ("zsh", rc))
+    monkeypatch.setattr(aikit, "discover_models", lambda u, k, **kw: (MODELS, DETAIL))
+
+    before = _home_files(home)
+    aikit.do_gateway_on(BASE, SECRET, dry_run=True)
+    assert _home_files(home) == before
+
+    aikit.save_gateway_config(BASE, SECRET)
+    pairs = aikit.build_env_pairs(BASE, SECRET)
+    body = aikit.render_env_block_body("zsh", pairs)
+    block = aikit.GATEWAY_BLOCK.render(body)
+    manifest = aikit.build_manifest(
+        BASE, "zsh", rc, block, model_count=len(MODELS), only_discovered=False,
+    )
+    aikit.write_manifest(manifest)
+    setup_files = _home_files(home)
+
+    aikit.do_gateway_status()
+    assert _home_files(home) == setup_files
