@@ -62,6 +62,13 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.15.0 — 2026-07-01
+- **Added Devin CLI** (Cognition AI) to the agent registry — `curl` install on macOS/Linux,
+  PowerShell installer on Windows, OAuth via `devin login`, and `update_via_install` for
+  updates. Gateway coverage classifies Devin as `unsupported` (proprietary Cognition AI
+  backend, no OpenAI-compatible passthrough). Version checks use the official CDN manifest
+  (`json_url`). Agent count 25 → 26. (POK-71)
+
 ### 1.14.0 — 2026-07-01
 - **Native config renderers for config-driven agents (close coverage gaps).** Three new
   Stage-3 renderers wrap tools that were detected but not reliably routed, plus env

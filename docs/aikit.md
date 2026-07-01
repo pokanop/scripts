@@ -1,6 +1,6 @@
 # 🤖 aikit — AI Coding Agent CLI Installer & Manager
 
-**Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.**
+**Install, update, authenticate, and manage 26 AI coding agent CLIs from one tool.**
 
 `aikit` · Python 3 · `rich` · `flask` · `requests`
 
@@ -25,7 +25,7 @@ aikit setup
 
 ---
 
-## Agents (25)
+## Agents (26)
 
 | # | Agent | Install | Auth |
 |---|-------|---------|------|
@@ -54,6 +54,7 @@ aikit setup
 | 23 | 🔮 **LLM** | `pip` | `llm keys set <provider>` or provider env vars |
 | 24 | ▶️ **Continue CLI** | `curl` script | `cn login` (Continue account) or `ANTHROPIC_API_KEY` |
 | 25 | 🐚 **Shell GPT** | `pip` | `sgpt` first-run key prompt or `OPENAI_API_KEY` |
+| 26 | 🧩 **Devin CLI** | `curl` script | `devin login` OAuth (Cognition AI account) |
 
 ---
 
@@ -65,7 +66,7 @@ aikit setup
 | `aikit install [agents...]` | Install agents (multi-select picker if none) |
 | `aikit update [agents...]` | Update agents (all installed if none) |
 | `aikit uninstall [agent...]` | Remove agents |
-| `aikit list` | Status table of all 25 agents |
+| `aikit list` | Status table of all 26 agents |
 | `aikit auth [agent]` | Guided authentication setup |
 | `aikit doctor` | Diagnose environment and agent health |
 | `aikit serve` | Start web dashboard |
@@ -84,7 +85,7 @@ Select agents to install
    2. [ ] 🛸 Antigravity
    3. [X] 🖱️ Cursor CLI
   ...
-  Selected: 1/25  cursor
+  Selected: 1/26  cursor
 ```
 
 Press `Space` or enter numbers to toggle. Press `Enter` to confirm. Press `q` to cancel.
@@ -169,7 +170,7 @@ logged.
 
 ```
 aikit                          # Single-file Python script (~1,600 lines)
-├── Agent registry             # 25 agents, each with platform-aware install commands
+├── Agent registry             # 26 agents, each with platform-aware install commands
 ├── Subprocess runner          # Install/update/uninstall execution
 ├── Config system              # JSON-based, three-tier loading, env var overrides
 ├── Rich TUI                   # Tables, panels, interactive multi-select picker

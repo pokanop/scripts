@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.14.0
-Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.
+aikit — AI Coding Agent CLI Installer & Manager  v1.15.0
+Install, update, authenticate, and manage 26 AI coding agent CLIs from one tool.
 
 Architecture:
     Agent registry → platform-aware install → auth multiplexing → web dashboard
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 
 import scriptkit as sk
 
@@ -199,7 +199,7 @@ def resolve_uninstall_cmd(agent):
 
 
 # =============================================================================
-# Agent Registry — 25 coding agents, platform-aware install commands
+# Agent Registry — 26 coding agents, platform-aware install commands
 # =============================================================================
 
 _CURRENT_PLATFORM = platform.system()  # "Linux", "Darwin", "Windows"
@@ -770,6 +770,34 @@ AGENTS = {
         "requires": ["python3", "pip"],
         "tags": ["sgpt", "shell-gpt", "shell", "open-source"],
     },
+    "devin": {
+        "name": "Devin CLI",
+        "bin": "devin",
+        "vendor": "Cognition AI",
+        "homepage": "https://devin.ai/cli",
+        "icon": "🧩",
+        "install": {
+            "Linux": "curl -fsSL https://cli.devin.ai/install.sh | bash",
+            "Darwin": "curl -fsSL https://cli.devin.ai/install.sh | bash",
+            "Windows": 'powershell -c "irm https://static.devin.ai/cli/setup.ps1 | iex"',
+        },
+        "version_cmd": "devin --version",
+        "update_cmd": None,
+        "update_via_install": True,
+        "path_markers": ["/.devin/", "/.local/share/devin/", "devin"],
+        "version_check": {
+            "type": "json_url",
+            "url": "https://static.devin.ai/cli/current/manifest.json",
+            "key": "version",
+        },
+        "uninstall_cmd": None,
+        "auth_type": "oauth_browser",
+        "auth_env_vars": [],
+        "auth_cmd": "devin login",
+        "auth_note": "Run 'devin login' for Cognition AI account OAuth. Requires a Devin subscription (free trial available).",
+        "requires": ["curl"],
+        "tags": ["devin", "cognition", "autonomous", "cloud-handoff", "multi-model"],
+    },
 }
 
 
@@ -1136,6 +1164,9 @@ def fetch_latest_version(agent_key):
             return data.get("info", {}).get("version")
         if kind == "url_text":
             return _http_get_text(spec["url"]).splitlines()[0].strip()
+        if kind == "json_url":
+            data = json.loads(_http_get_text(spec["url"]))
+            return data.get(spec.get("key", "version"))
         if kind == "github_release":
             data = json.loads(_http_get_text(f"https://api.github.com/repos/{spec['repo']}/releases/latest"))
             tag = data.get("tag_name", "")
@@ -3604,6 +3635,8 @@ GATEWAY_COVERAGE = {
                     "reason": "no native LiteLLM passthrough route for Sourcegraph's backend; AMP_URL points at Amp instances only — declare a custom mapping to route it",
                     "passthrough": {"protocol": "amp", "route": None,
                                     "auth_var": "AMP_API_KEY", "base_url_var": None}},
+    "devin":       {"state": COVERAGE_UNSUPPORTED,
+                    "reason": "Devin CLI routes through Cognition AI's proprietary backend — no OpenAI-compatible passthrough route or env-var base-URL override available"},
 }
 
 

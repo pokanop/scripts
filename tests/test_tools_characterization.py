@@ -373,7 +373,7 @@ def test_aikit_validate_agent_keys_ok(tool_loader):
 
 def test_aikit_new_agent_registry_entries(tool_loader):
     m = tool_loader("aikit")
-    assert len(m.AGENTS) == 25
+    assert len(m.AGENTS) == 26
     goose = m.AGENTS["goose"]
     assert goose["bin"] == "goose"
     assert goose["update_cmd"] == "goose update"
@@ -409,6 +409,21 @@ def test_aikit_amp_registry_entry(tool_loader):
     assert "ampcode.com/install.sh" in amp["install"]["Linux"]
     assert "ampcode.com/install.sh" in amp["install"]["Darwin"]
     assert "install.ps1" in amp["install"]["Windows"]
+
+
+def test_aikit_devin_registry_entry(tool_loader):
+    m = tool_loader("aikit")
+    devin = m.AGENTS["devin"]
+    assert devin["bin"] == "devin"
+    assert devin["vendor"] == "Cognition AI"
+    assert devin["auth_cmd"] == "devin login"
+    assert devin["auth_type"] == "oauth_browser"
+    assert devin.get("update_via_install") is True
+    assert devin["version_check"]["type"] == "json_url"
+    assert "static.devin.ai" in devin["version_check"]["url"]
+    assert "cli.devin.ai/install.sh" in devin["install"]["Linux"]
+    assert "setup.ps1" in devin["install"]["Windows"]
+    assert "Devin subscription" in devin["auth_note"]
 
 
 def test_aikit_resolve_update_cmd_amp(tool_loader, monkeypatch):
@@ -744,6 +759,7 @@ def test_aikit_auth_registry_login_commands(tool_loader):
     assert "BAILIAN_CODING_PLAN_API_KEY" in m.AGENTS["qwen"]["auth_env_vars"]
     assert "MOONSHOT_API_KEY" not in m.AGENTS["kimi"]["auth_env_vars"]
     assert m.AGENTS["kiro"]["auth_cmd"] == "kiro-cli login"
+    assert m.AGENTS["devin"]["auth_cmd"] == "devin login"
 
 
 def test_aikit_discover_auth_env_var(tool_loader, monkeypatch):
