@@ -783,7 +783,6 @@ AGENTS = {
         },
         "version_cmd": "droid --version",
         "update_cmd": "droid update",
-        "update_via_install": True,
         "path_markers": ["/.factory/", "droid"],
         "version_check": {
             "type": "cmd_text",

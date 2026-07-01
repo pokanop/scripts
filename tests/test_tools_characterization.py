@@ -417,7 +417,7 @@ def test_aikit_droid_registry_entry(tool_loader):
     assert droid["bin"] == "droid"
     assert droid["vendor"] == "Factory AI"
     assert droid["update_cmd"] == "droid update"
-    assert droid.get("update_via_install") is True
+    assert droid.get("update_via_install") is None
     assert droid["auth_type"] == "oauth_browser"
     assert droid["install"]["Windows"] is None
     assert "app.factory.ai/cli" in droid["install"]["Linux"]
