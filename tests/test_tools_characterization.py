@@ -7,6 +7,7 @@ after the tools are rewired onto the shared library.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -499,6 +500,16 @@ def test_aikit_npm_global_prefixes_includes_nvm_from_path(tool_loader, monkeypat
     monkeypatch.setenv("PATH", f"{nvm_bin}{os.pathsep}")
     prefixes = m._npm_global_prefixes()
     assert (tmp_path / ".nvm" / "versions" / "node" / "v99.0.0") in prefixes
+
+
+@pytest.mark.skipif(shutil.which("npm") is None, reason="npm not installed")
+def test_aikit_npm_global_prefixes_writes_no_home_files(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    m._npm_global_prefixes()
+    assert not list(home.rglob("*"))
 
 
 def test_aikit_npm_uninstall_cmd_targets_all_prefixes(tool_loader, monkeypatch, tmp_path):
