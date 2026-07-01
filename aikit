@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.14.0
-Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.
+aikit — AI Coding Agent CLI Installer & Manager  v1.15.0
+Install, update, authenticate, and manage 31 AI coding agent CLIs from one tool.
 
 Architecture:
     Agent registry → platform-aware install → auth multiplexing → web dashboard
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 
 import scriptkit as sk
 
@@ -199,7 +199,7 @@ def resolve_uninstall_cmd(agent):
 
 
 # =============================================================================
-# Agent Registry — 25 coding agents, platform-aware install commands
+# Agent Registry — 31 coding agents, platform-aware install commands
 # =============================================================================
 
 _CURRENT_PLATFORM = platform.system()  # "Linux", "Darwin", "Windows"
@@ -384,6 +384,28 @@ AGENTS = {
         "requires": ["node", "npm"],
         "tags": ["qwen", "alibaba", "open-source", "multi-protocol"],
     },
+    "qodo": {
+        "name": "Qodo Gen CLI",
+        "bin": "qodo",
+        "vendor": "QodoAI",
+        "homepage": "https://qodo.ai/features/qodo-cli/",
+        "icon": "🎯",
+        "install": {
+            "Linux": npm_install_cmd("@qodo/command"),
+            "Darwin": npm_install_cmd("@qodo/command"),
+            "Windows": npm_install_cmd("@qodo/command"),
+        },
+        "version_cmd": "qodo --version",
+        "update_cmd": npm_install_cmd("@qodo/command@latest"),
+        "path_markers": ["@qodo/command", "@qodo/gen"],
+        "version_check": {"type": "npm", "package": "@qodo/command"},
+        "uninstall_cmd": None,
+        "auth_type": "account_or_byok",
+        "auth_env_vars": ["QODO_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
+        "auth_note": "Run 'qodo login' to sign in with a Qodo account (free tier). Or set QODO_API_KEY, or OPENAI_API_KEY / ANTHROPIC_API_KEY for BYOK. 'qodo --model={model-name}' selects a specific model.",
+        "requires": ["node", "npm"],
+        "tags": ["qodo", "quality", "test-coverage", "code-review", "mcp", "ci-cd", "free-tier"],
+    },
     "copilot": {
         "name": "GitHub Copilot CLI",
         "bin": "copilot",
@@ -526,6 +548,30 @@ AGENTS = {
         "auth_note": "Run 'pi' then '/login' for subscription OAuth (Claude, ChatGPT, Copilot) or API keys. Or set provider env vars.",
         "requires": ["node", "npm"],
         "tags": ["pi", "minimal", "customizable", "extensions", "self-modifying"],
+    },
+    "plandex": {
+        "name": "Plandex",
+        "bin": "plandex",
+        "bin_aliases": ["pdx"],
+        "vendor": "Plandex AI",
+        "homepage": "https://plandex.ai",
+        "icon": "📐",
+        "install": {
+            "Linux": "curl -sL https://plandex.ai/install.sh | bash",
+            "Darwin": "curl -sL https://plandex.ai/install.sh | bash",
+            "Windows": 'wsl -d Ubuntu bash -lc "curl -sL https://plandex.ai/install.sh | bash"',
+        },
+        "version_cmd": "plandex --version",
+        "update_cmd": None,
+        "update_via_install": True,
+        "path_markers": ["/.plandex-v2/", "/.plandex-home-v2/"],
+        "version_check": {"type": "github_release", "repo": "plandex-ai/plandex", "tag_prefix": "cli/v"},
+        "uninstall_cmd": binary_uninstall_cmd("plandex", extra_paths=["$HOME/.local/bin/pdx"]),
+        "auth_type": "api_key",
+        "auth_env_vars": ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"],
+        "auth_note": "Set OPENROUTER_API_KEY (recommended — access to 200+ models) or individual provider keys. Run 'plandex new' to start your first plan. Plandex Cloud has wound down; use local or self-hosted mode.",
+        "requires": ["curl"],
+        "tags": ["plandex", "pdx", "open-source", "large-tasks", "diff-sandbox", "go"],
     },
     "openclaw": {
         "name": "OpenClaw",
@@ -769,6 +815,105 @@ AGENTS = {
         "auth_note": "Run 'sgpt' once to store your API key in ~/.config/shell_gpt/.sgptrc, or set OPENAI_API_KEY.",
         "requires": ["python3", "pip"],
         "tags": ["sgpt", "shell-gpt", "shell", "open-source"],
+    },
+    "devin": {
+        "name": "Devin CLI",
+        "bin": "devin",
+        "vendor": "Cognition AI",
+        "homepage": "https://devin.ai/cli",
+        "icon": "🧩",
+        "install": {
+            "Linux": "curl -fsSL https://cli.devin.ai/install.sh | bash",
+            "Darwin": "curl -fsSL https://cli.devin.ai/install.sh | bash",
+            "Windows": 'powershell -c "irm https://static.devin.ai/cli/setup.ps1 | iex"',
+        },
+        "version_cmd": "devin --version",
+        "update_cmd": None,
+        "update_via_install": True,
+        "path_markers": ["/.devin/", "/.local/share/devin/", "devin"],
+        "version_check": {
+            "type": "json_url",
+            "url": "https://static.devin.ai/cli/current/manifest.json",
+            "key": "version",
+        },
+        "uninstall_cmd": None,
+        "auth_type": "oauth_browser",
+        "auth_env_vars": [],
+        "auth_cmd": "devin login",
+        "auth_note": "Run 'devin login' for Cognition AI account OAuth. Requires a Devin subscription (free trial available).",
+        "requires": ["curl"],
+        "tags": ["devin", "cognition", "autonomous", "cloud-handoff", "multi-model"],
+    },
+    "auggie": {
+        "name": "Auggie",
+        "bin": "auggie",
+        "vendor": "Augment Code",
+        "homepage": "https://www.augmentcode.com/product/cli",
+        "icon": "🔋",
+        "install": {
+            "Linux": npm_install_cmd("@augmentcode/auggie"),
+            "Darwin": npm_install_cmd("@augmentcode/auggie"),
+            "Windows": npm_install_cmd("@augmentcode/auggie"),
+        },
+        "version_cmd": "auggie --version",
+        "update_cmd": npm_install_cmd("@augmentcode/auggie@latest"),
+        "path_markers": ["@augmentcode/auggie", "/.augment/"],
+        "version_check": {"type": "npm", "package": "@augmentcode/auggie"},
+        "uninstall_cmd": None,
+        "auth_type": "oauth_browser",
+        "auth_env_vars": [],
+        "auth_cmd": "auggie login",
+        "auth_note": "Run 'auggie login' for Augment account OAuth (browser). Free tier available; paid plans from $60/month.",
+        "requires": ["node", "npm"],
+        "tags": ["augment", "auggie", "codebase-understanding", "mcp", "free-tier"],
+    },
+    "droid": {
+        "name": "Droid",
+        "bin": "droid",
+        "vendor": "Factory AI",
+        "homepage": "https://factory.ai/product/cli",
+        "icon": "🏭",
+        "install": {
+            "Linux": "curl -fsSL https://app.factory.ai/cli | sh",
+            "Darwin": "curl -fsSL https://app.factory.ai/cli | sh",
+            "Windows": None,
+        },
+        "version_cmd": "droid --version",
+        "update_cmd": "droid update",
+        "path_markers": ["/.factory/", "droid"],
+        "version_check": {
+            "type": "cmd_text",
+            "cmd": "droid update --check",
+            "available_substr": "Update available",
+        },
+        "uninstall_cmd": None,
+        "auth_type": "oauth_browser",
+        "auth_env_vars": [],
+        "auth_note": "Run 'droid' on first use for Factory AI account OAuth. Free account required; enterprise plans available.",
+        "requires": ["curl"],
+        "tags": ["droid", "factory", "terminal-bench", "multi-model", "enterprise", "ci-cd"],
+    },
+    "openinterpreter": {
+        "name": "Open Interpreter",
+        "bin": "interpreter",
+        "vendor": "Open Interpreter",
+        "homepage": "https://openinterpreter.com",
+        "icon": "🖥️",
+        "install": {
+            "Linux": "pip install open-interpreter --break-system-packages 2>/dev/null || pip install open-interpreter",
+            "Darwin": "pip install open-interpreter --break-system-packages 2>/dev/null || pip install open-interpreter",
+            "Windows": "pip install open-interpreter",
+        },
+        "version_cmd": "interpreter --version",
+        "update_cmd": "pip install --upgrade open-interpreter --break-system-packages 2>/dev/null || pip install --upgrade open-interpreter",
+        "path_markers": ["/.config/open-interpreter"],
+        "version_check": {"type": "pip", "package": "open-interpreter"},
+        "uninstall_cmd": "pip uninstall -y open-interpreter",
+        "auth_type": "api_key",
+        "auth_env_vars": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"],
+        "auth_note": "Set OPENAI_API_KEY (or other provider env var) before running 'interpreter'. On first run, 'interpreter' prompts for an API key if none is set. Use '--local' for Ollama-hosted models.",
+        "requires": ["python3", "pip"],
+        "tags": ["interpreter", "open-source", "code-execution", "local-llm", "provider-agnostic"],
     },
 }
 
@@ -1136,6 +1281,9 @@ def fetch_latest_version(agent_key):
             return data.get("info", {}).get("version")
         if kind == "url_text":
             return _http_get_text(spec["url"]).splitlines()[0].strip()
+        if kind == "json_url":
+            data = json.loads(_http_get_text(spec["url"]))
+            return data.get(spec.get("key", "version"))
         if kind == "github_release":
             data = json.loads(_http_get_text(f"https://api.github.com/repos/{spec['repo']}/releases/latest"))
             tag = data.get("tag_name", "")
@@ -3558,7 +3706,9 @@ GATEWAY_COVERAGE = {
     "claude":   {"state": COVERAGE_ENV, "via": "ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN (/anthropic route)"},
     "gemini":   {"state": COVERAGE_ENV, "via": "GEMINI_API_BASE / GOOGLE_GEMINI_BASE_URL (/gemini route)"},
     "openclaw": {"state": COVERAGE_ENV, "via": "OPENAI_BASE_URL / ANTHROPIC_BASE_URL"},
+    "plandex":  {"state": COVERAGE_ENV, "via": "OPENAI_API_BASE + OPENAI_API_KEY"},
     "sgpt":     {"state": COVERAGE_ENV, "via": "OPENAI_BASE_URL + OPENAI_API_KEY"},
+    "openinterpreter": {"state": COVERAGE_ENV, "via": "OPENAI_BASE_URL + OPENAI_API_KEY (LiteLLM backend)"},
     # openhands reads LLM_* (not OPENAI_*) and only with `--override-with-envs`; its
     # on-disk agent_settings.json needs a literal key aikit won't write to a shared file,
     # so env (with the flag) is the reliable path. The `via` states the caveat plainly.
@@ -3574,6 +3724,8 @@ GATEWAY_COVERAGE = {
                   "reason": "no MOONSHOT_API_BASE; needs ~/.kimi/config.toml provider (type=openai_legacy) base_url"},
     "blackbox":  {"state": COVERAGE_PENDING,
                   "reason": "auth is proprietary BLACKBOX_API_KEY via 'blackbox configure' (not a provider var the env layer sets); no verified OPENAI_BASE_URL support — Stage-7: probe live install for a settable base_url (likely renderer)"},
+    "qodo":      {"state": COVERAGE_PENDING,
+                  "reason": "Qodo-cloud auth (QODO_API_KEY / ~/.qodo/auth.key); no verified OPENAI_BASE_URL or ANTHROPIC_BASE_URL for LLM routing — needs a renderer if BYOK endpoint override is confirmed"},
     # -- unsupported / passthrough-candidate: first-party CLIs. Each declares its
     #    native protocol + the LiteLLM passthrough route that wraps it (verified against
     #    llm_passthrough_endpoints.py), the auth var the tool reads, and whether the
@@ -3604,6 +3756,12 @@ GATEWAY_COVERAGE = {
                     "reason": "no native LiteLLM passthrough route for Sourcegraph's backend; AMP_URL points at Amp instances only — declare a custom mapping to route it",
                     "passthrough": {"protocol": "amp", "route": None,
                                     "auth_var": "AMP_API_KEY", "base_url_var": None}},
+    "devin":       {"state": COVERAGE_UNSUPPORTED,
+                    "reason": "Devin CLI routes through Cognition AI's proprietary backend — no OpenAI-compatible passthrough route or env-var base-URL override available"},
+    "auggie":      {"state": COVERAGE_UNSUPPORTED,
+                    "reason": "Augment's backend is proprietary — no OpenAI-compatible passthrough route or base-URL override exposed; cannot be routed via the LiteLLM gateway"},
+    "droid":       {"state": COVERAGE_UNSUPPORTED,
+                    "reason": "Droid routes through Factory AI's proprietary backend — no OpenAI-compatible passthrough route or env-var base-URL override exposed"},
 }
 
 

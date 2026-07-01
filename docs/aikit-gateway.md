@@ -105,7 +105,7 @@ shows, per tool, whether its config is *installed by aikit*, *user-owned (kept)*
 
 ## Tool coverage
 
-aikit knows 25 agents, but not all of them can be pointed at a third-party gateway.
+aikit knows 31 agents, but not all of them can be pointed at a third-party gateway.
 Rather than silently route the ones it can and ignore the rest, aikit tracks a
 **coverage state** for *every* agent and reports it — so you always know what's
 wrapped, what isn't yet, and what never will be. `aikit gateway coverage` prints the
@@ -119,8 +119,9 @@ full matrix; `on` and `status` call out anything detected-but-not-routed inline.
 | **pending** | detected but not reliably routed yet — no renderer and no standard env var; a tracked gap | ❌ not yet |
 | **unsupported** | no usable native passthrough route **and** no OpenAI-compatible / base-URL override path — with the real reason | 🚫 by design |
 
-- **env-routed (5):** `claude` (`ANTHROPIC_BASE_URL`+`ANTHROPIC_AUTH_TOKEN`),
+- **env-routed (7):** `claude` (`ANTHROPIC_BASE_URL`+`ANTHROPIC_AUTH_TOKEN`),
   `gemini` (`GEMINI_API_BASE`/`GOOGLE_GEMINI_BASE_URL`), `openclaw`, `sgpt` (via
+  `OPENAI_BASE_URL`), `plandex` (via `OPENAI_API_BASE`), `openinterpreter` (via
   `OPENAI_BASE_URL`), and `openhands`. OpenHands reads `LLM_*` (not `OPENAI_*`) and only
   with `openhands --override-with-envs`, so `on` exports `LLM_BASE_URL`+`LLM_API_KEY` and
   the coverage row states that caveat (its on-disk `agent_settings.json`, if present,
@@ -129,13 +130,13 @@ full matrix; `on` and `status` call out anything detected-but-not-routed inline.
   aimed at the route). Empty by default — the vendor CLIs below have a real route but no
   base-URL override — but a **declared custom mapping** (or a future tool that honours a
   base-URL override) lands here, showing its route + credential mode.
-- **pending (3):** `grok`, `kimi`, `blackbox`. aikit detects them but has no route wired
-  yet; each row's *How / why* records the config path a future renderer must write (e.g.
+- **pending (4):** `grok`, `kimi`, `blackbox`, `qodo`. aikit detects them but has no route
+  wired yet; each row's *How / why* records the config path a future renderer must write (e.g.
   grok needs `~/.grok/config.toml [model.*] base_url`) so the gap stays tracked, never
   hidden. (`kilo`, `cline`, `qwen` graduated to `renderer` and `openhands` to `env` in
   1.14.0.)
-- **unsupported (5):** `antigravity`, `cursor`, `copilot`, `kiro`, `amp`. Routability
-  is a *runtime* property, so these are re-examined against the live gateway:
+- **unsupported (8):** `antigravity`, `cursor`, `copilot`, `kiro`, `amp`, `devin`, `auggie`,
+  `droid`. Routability is a *runtime* property, so these are re-examined against the live gateway:
   - `cursor` — LiteLLM **does** mount a `/cursor` (Cursor Cloud Agents) passthrough, and
     `antigravity`'s Gemini backend has a `/gemini` route — but `cursor-agent` / `agy`
     expose **no base-URL override** env var, so the tool can't be pointed at the route
@@ -143,6 +144,9 @@ full matrix; `on` and `status` call out anything detected-but-not-routed inline.
     (Stage 8) or a custom mapping flips them to `passthrough`.
   - `copilot`, `kiro`, `amp` — LiteLLM mounts **no** native route for GitHub Copilot,
     Kiro, or Sourcegraph, so these stay `unsupported` unless you declare a custom route.
+  - `devin`, `auggie`, `droid` — route through Cognition, Augment, and Factory's
+    proprietary backends respectively, with no OpenAI-compatible passthrough route or
+    base-URL override, so no custom route wires them either.
 
 ### Passthrough discovery + `verify`
 
@@ -195,7 +199,7 @@ declared tool resolves to `passthrough` and is honoured by `coverage`/`status`/`
   token). Set per-passthrough with a `credential_mode` in the mapping.
 
 ```bash
-aikit gateway coverage        # the full 25-row matrix: agent, detected?, state, how/why
+aikit gateway coverage        # the full 31-row matrix: agent, detected?, state, how/why
 ```
 
 > The guarantee: **no detected agent is silently omitted.** If aikit ever gains an
@@ -304,7 +308,7 @@ reports *inactive (credentials saved)* with the URL + masked key and points you 
 
 ### `aikit gateway coverage`
 
-Read-only. Prints the full **25-row coverage matrix** — for every agent aikit knows:
+Read-only. Prints the full **31-row coverage matrix** — for every agent aikit knows:
 `detected?`, its coverage **state** (`renderer` / `env` / `passthrough` / `pending` /
 `unsupported`), and *how / why* (the routing var or config path, or the reason it isn't
 routed) — plus a per-state tally. This is the honest, one-look answer to "does the

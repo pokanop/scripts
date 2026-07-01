@@ -62,6 +62,30 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.15.0 — 2026-07-01
+- **Six new agents added to the registry (25 → 31)**, each with platform-aware install,
+  auth, and gateway-coverage classification:
+  - **Qodo Gen CLI** (`qodo`, QodoAI) — npm install (`@qodo/command`); `qodo login` /
+    `QODO_API_KEY`, BYOK via provider keys. Coverage: **pending** (Qodo-cloud auth; no
+    verified base-URL override for LLM routing yet). (POK-74)
+  - **Plandex** (`plandex` / `pdx`, Plandex AI) — curl install, GitHub-release version
+    checks (`cli/v*`), re-install for updates, Windows via WSL. Auth is provider keys
+    (`OPENROUTER_API_KEY` recommended). Coverage: **env** via `OPENAI_API_BASE`. Plandex
+    Cloud has wound down; use local/self-hosted mode. (POK-72)
+  - **Devin CLI** (`devin`, Cognition AI) — curl install (PowerShell on Windows), OAuth
+    via `devin login`, re-install for updates, CDN-manifest version checks (`json_url`).
+    Coverage: **unsupported** (proprietary Cognition AI backend). (POK-71)
+  - **Auggie** (`auggie`, Augment Code) — npm install (`@augmentcode/auggie`), browser
+    OAuth via `auggie login`. Coverage: **unsupported** (proprietary Augment backend). (POK-70)
+  - **Droid** (`droid`, Factory AI) — curl install (Linux/macOS; Windows unsupported),
+    `droid update`, OAuth on first run. Coverage: **unsupported** (proprietary Factory AI
+    backend). (POK-75)
+  - **Open Interpreter** (`openinterpreter`, `interpreter`) — pip install, provider API
+    keys or first-run prompt, `--local` for Ollama. Coverage: **env** via
+    `OPENAI_BASE_URL`. (POK-73)
+- **Gateway coverage baseline is now `12 renderer · 7 env · 4 pending · 8 unsupported`**
+  across 31 agents. Adds a `json_url` version-check kind (used by Devin). (POK-65)
+
 ### 1.14.0 — 2026-07-01
 - **Native config renderers for config-driven agents (close coverage gaps).** Three new
   Stage-3 renderers wrap tools that were detected but not reliably routed, plus env
