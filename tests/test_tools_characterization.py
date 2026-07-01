@@ -373,7 +373,7 @@ def test_aikit_validate_agent_keys_ok(tool_loader):
 
 def test_aikit_new_agent_registry_entries(tool_loader):
     m = tool_loader("aikit")
-    assert len(m.AGENTS) == 25
+    assert len(m.AGENTS) == 26
     goose = m.AGENTS["goose"]
     assert goose["bin"] == "goose"
     assert goose["update_cmd"] == "goose update"
@@ -439,6 +439,11 @@ def test_aikit_gateway_cli_registry_entries(tool_loader):
     assert sgpt["bin"] == "sgpt"
     assert sgpt["version_check"]["package"] == "shell-gpt"
     assert "OPENAI_API_KEY" in sgpt["auth_env_vars"]
+    oi = m.AGENTS["openinterpreter"]
+    assert oi["bin"] == "interpreter"
+    assert oi["version_check"]["package"] == "open-interpreter"
+    assert "OPENAI_API_KEY" in oi["auth_env_vars"]
+    assert "pip install open-interpreter" in oi["install"]["Linux"]
 
 
 def test_aikit_resolve_update_cmd_gemini(tool_loader, monkeypatch):

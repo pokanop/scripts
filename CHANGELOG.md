@@ -62,6 +62,12 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.15.0 — 2026-07-01
+- **Open Interpreter agent.** New `openinterpreter` registry entry for the
+  `interpreter` CLI (`pip install open-interpreter`). Gateway coverage classifies
+  it as `env` — routed via `OPENAI_BASE_URL` + `OPENAI_API_KEY` through its
+  LiteLLM backend. Agent count 25 → 26. (POK-73)
+
 ### 1.14.0 — 2026-07-01
 - **Native config renderers for config-driven agents (close coverage gaps).** Three new
   Stage-3 renderers wrap tools that were detected but not reliably routed, plus env

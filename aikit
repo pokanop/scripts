@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.14.0
-Install, update, authenticate, and manage 25 AI coding agent CLIs from one tool.
+aikit — AI Coding Agent CLI Installer & Manager  v1.15.0
+Install, update, authenticate, and manage 26 AI coding agent CLIs from one tool.
 
 Architecture:
     Agent registry → platform-aware install → auth multiplexing → web dashboard
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.14.0"
+__version__ = "1.15.0"
 
 import scriptkit as sk
 
@@ -199,7 +199,7 @@ def resolve_uninstall_cmd(agent):
 
 
 # =============================================================================
-# Agent Registry — 25 coding agents, platform-aware install commands
+# Agent Registry — 26 coding agents, platform-aware install commands
 # =============================================================================
 
 _CURRENT_PLATFORM = platform.system()  # "Linux", "Darwin", "Windows"
@@ -769,6 +769,28 @@ AGENTS = {
         "auth_note": "Run 'sgpt' once to store your API key in ~/.config/shell_gpt/.sgptrc, or set OPENAI_API_KEY.",
         "requires": ["python3", "pip"],
         "tags": ["sgpt", "shell-gpt", "shell", "open-source"],
+    },
+    "openinterpreter": {
+        "name": "Open Interpreter",
+        "bin": "interpreter",
+        "vendor": "Open Interpreter",
+        "homepage": "https://openinterpreter.com",
+        "icon": "🖥️",
+        "install": {
+            "Linux": "pip install open-interpreter --break-system-packages 2>/dev/null || pip install open-interpreter",
+            "Darwin": "pip install open-interpreter --break-system-packages 2>/dev/null || pip install open-interpreter",
+            "Windows": "pip install open-interpreter",
+        },
+        "version_cmd": "interpreter --version",
+        "update_cmd": "pip install --upgrade open-interpreter --break-system-packages 2>/dev/null || pip install --upgrade open-interpreter",
+        "path_markers": ["/.config/open-interpreter"],
+        "version_check": {"type": "pip", "package": "open-interpreter"},
+        "uninstall_cmd": "pip uninstall -y open-interpreter",
+        "auth_type": "api_key",
+        "auth_env_vars": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"],
+        "auth_note": "Set OPENAI_API_KEY (or other provider env var) before running 'interpreter'. On first run, 'interpreter' prompts for an API key if none is set. Use '--local' for Ollama-hosted models.",
+        "requires": ["python3", "pip"],
+        "tags": ["interpreter", "open-source", "code-execution", "local-llm", "provider-agnostic"],
     },
 }
 
@@ -3559,6 +3581,7 @@ GATEWAY_COVERAGE = {
     "gemini":   {"state": COVERAGE_ENV, "via": "GEMINI_API_BASE / GOOGLE_GEMINI_BASE_URL (/gemini route)"},
     "openclaw": {"state": COVERAGE_ENV, "via": "OPENAI_BASE_URL / ANTHROPIC_BASE_URL"},
     "sgpt":     {"state": COVERAGE_ENV, "via": "OPENAI_BASE_URL + OPENAI_API_KEY"},
+    "openinterpreter": {"state": COVERAGE_ENV, "via": "OPENAI_BASE_URL + OPENAI_API_KEY (LiteLLM backend)"},
     # openhands reads LLM_* (not OPENAI_*) and only with `--override-with-envs`; its
     # on-disk agent_settings.json needs a literal key aikit won't write to a shared file,
     # so env (with the flag) is the reliable path. The `via` states the caveat plainly.
