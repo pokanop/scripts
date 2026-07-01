@@ -2570,6 +2570,11 @@ def discover_auth(agent_key):
             cred_path = factory_dir / cred_name
             if cred_path.exists() and cred_path.stat().st_size > 0:
                 return {"auth_configured": True, "method": "cred_file", "source": str(cred_path)}
+        # settings files are written on authenticated use, not on mere invocation:
+        # verified on a real install (POK-76) — running droid unauthenticated seeds
+        # ~/.factory/{cache,logs,sessions,certs,telemetry,host.json} but no
+        # settings.json, so this stays a needs-auth signal. Same best-effort
+        # heuristic amp uses for ~/.config/amp/settings.json.
         for cfg_name in ("settings.json", "settings.local.json"):
             cfg_path = factory_dir / cfg_name
             if cfg_path.exists() and cfg_path.stat().st_size > 0:
