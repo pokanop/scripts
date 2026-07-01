@@ -373,7 +373,7 @@ def test_aikit_validate_agent_keys_ok(tool_loader):
 
 def test_aikit_new_agent_registry_entries(tool_loader):
     m = tool_loader("aikit")
-    assert len(m.AGENTS) == 25
+    assert len(m.AGENTS) == 31
     goose = m.AGENTS["goose"]
     assert goose["bin"] == "goose"
     assert goose["update_cmd"] == "goose update"
@@ -411,6 +411,37 @@ def test_aikit_amp_registry_entry(tool_loader):
     assert "install.ps1" in amp["install"]["Windows"]
 
 
+def test_aikit_devin_registry_entry(tool_loader):
+    m = tool_loader("aikit")
+    devin = m.AGENTS["devin"]
+    assert devin["bin"] == "devin"
+    assert devin["vendor"] == "Cognition AI"
+    assert devin["auth_cmd"] == "devin login"
+    assert devin["auth_type"] == "oauth_browser"
+    assert devin.get("update_via_install") is True
+    assert devin["version_check"]["type"] == "json_url"
+    assert "static.devin.ai" in devin["version_check"]["url"]
+    assert "cli.devin.ai/install.sh" in devin["install"]["Linux"]
+    assert "setup.ps1" in devin["install"]["Windows"]
+    assert "Devin subscription" in devin["auth_note"]
+
+
+def test_aikit_droid_registry_entry(tool_loader):
+    m = tool_loader("aikit")
+    droid = m.AGENTS["droid"]
+    assert droid["bin"] == "droid"
+    assert droid["vendor"] == "Factory AI"
+    assert droid["update_cmd"] == "droid update"
+    assert droid.get("update_via_install") is None
+    assert droid["auth_type"] == "oauth_browser"
+    assert droid["install"]["Windows"] is None
+    assert "app.factory.ai/cli" in droid["install"]["Linux"]
+    assert droid["version_check"]["cmd"] == "droid update --check"
+    cov = m.gateway_coverage()
+    assert cov["droid"]["state"] == "unsupported"
+    assert "proprietary" in cov["droid"]["reason"]
+
+
 def test_aikit_resolve_update_cmd_amp(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "amp")
@@ -439,6 +470,11 @@ def test_aikit_gateway_cli_registry_entries(tool_loader):
     assert sgpt["bin"] == "sgpt"
     assert sgpt["version_check"]["package"] == "shell-gpt"
     assert "OPENAI_API_KEY" in sgpt["auth_env_vars"]
+    oi = m.AGENTS["openinterpreter"]
+    assert oi["bin"] == "interpreter"
+    assert oi["version_check"]["package"] == "open-interpreter"
+    assert "OPENAI_API_KEY" in oi["auth_env_vars"]
+    assert "pip install open-interpreter" in oi["install"]["Linux"]
 
 
 def test_aikit_resolve_update_cmd_gemini(tool_loader, monkeypatch):
@@ -744,6 +780,7 @@ def test_aikit_auth_registry_login_commands(tool_loader):
     assert "BAILIAN_CODING_PLAN_API_KEY" in m.AGENTS["qwen"]["auth_env_vars"]
     assert "MOONSHOT_API_KEY" not in m.AGENTS["kimi"]["auth_env_vars"]
     assert m.AGENTS["kiro"]["auth_cmd"] == "kiro-cli login"
+    assert m.AGENTS["devin"]["auth_cmd"] == "devin login"
 
 
 def test_aikit_discover_auth_env_var(tool_loader, monkeypatch):

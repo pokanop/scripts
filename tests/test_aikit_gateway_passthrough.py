@@ -164,13 +164,13 @@ def test_passthrough_state_is_registered_and_routed(aikit):
 
 def test_static_coverage_is_the_declared_baseline(aikit):
     # With no discovery + no custom maps, the model is the static declared view (POK-67
-    # baseline: renderers cover kilo/cline/qwen, openhands is env). The 5 vendor tools are
+    # baseline: renderers cover kilo/cline/qwen, openhands is env). The 8 vendor tools are
     # still unsupported — routability is a runtime property, unchanged without discovery.
     cov = aikit.gateway_coverage()
     counts: dict = {}
     for c in cov.values():
         counts[c["state"]] = counts.get(c["state"], 0) + 1
-    assert counts == {"renderer": 12, "env": 5, "pending": 3, "unsupported": 5}
+    assert counts == {"renderer": 12, "env": 7, "pending": 4, "unsupported": 8}
     assert cov["cursor"]["state"] == "unsupported"
 
 
