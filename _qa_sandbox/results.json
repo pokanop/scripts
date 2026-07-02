@@ -1,0 +1,125 @@
+{
+  "results": [
+    {
+      "key": "claude",
+      "passed": true,
+      "exit_code": 0,
+      "detected_after": false,
+      "config_pruned": true,
+      "leftover_files": [],
+      "stderr_tail": []
+    },
+    {
+      "key": "antigravity",
+      "passed": true,
+      "exit_code": 0,
+      "detected_after": false,
+      "config_pruned": true,
+      "leftover_files": [],
+      "stderr_tail": []
+    },
+    {
+      "key": "cursor",
+      "passed": true,
+      "exit_code": 0,
+      "detected_after": false,
+      "config_pruned": true,
+      "leftover_files": [],
+      "stderr_tail": []
+    },
+    {
+      "key": "hermes",
+      "passed": true,
+      "exit_code": 0,
+      "detected_after": false,
+      "config_pruned": true,
+      "leftover_files": [],
+      "stderr_tail": []
+    },
+    {
+      "key": "codex",
+      "passed": true,
+      "exit_code": 0,
+      "detected_after": false,
+      "config_pruned": true,
+      "leftover_files": [],
+      "stderr_tail": []
+    },
+    {
+      "key": "copilot",
+      "passed": true,
+      "exit_code": 0,
+      "detected_after": false,
+      "config_pruned": true,
+      "leftover_files": [],
+      "stderr_tail": []
+    },
+    {
+      "key": "grok",
+      "passed": true,
+      "exit_code": 0,
+      "detected_after": false,
+      "config_pruned": true,
+      "leftover_files": [],
+      "stderr_tail": []
+    },
+    {
+      "key": "kiro",
+      "passed": true,
+      "exit_code": 0,
+      "detected_after": false,
+      "config_pruned": true,
+      "leftover_files": [],
+      "stderr_tail": []
+    },
+    {
+      "key": "openclaw",
+      "passed": true,
+      "exit_code": 0,
+      "detected_after": false,
+      "config_pruned": true,
+      "leftover_files": [],
+      "stderr_tail": []
+    },
+    {
+      "key": "devin",
+      "passed": true,
+      "exit_code": 0,
+      "detected_after": false,
+      "config_pruned": true,
+      "leftover_files": [],
+      "stderr_tail": []
+    },
+    {
+      "key": "droid",
+      "passed": true,
+      "exit_code": 0,
+      "detected_after": false,
+      "config_pruned": true,
+      "leftover_files": [],
+      "stderr_tail": []
+    }
+  ],
+  "combined": {
+    "scenario": "cursor+grok combined",
+    "steps": [
+      {
+        "uninstalled": "cursor",
+        "cursor_detected_after": false,
+        "cursor_pruned": true,
+        "grok_still_detected": true,
+        "grok_still_in_config": true
+      },
+      {
+        "uninstalled": "grok",
+        "grok_detected_after": false,
+        "grok_pruned": true
+      }
+    ],
+    "pre_cursor": true,
+    "pre_grok": true,
+    "passed": true
+  },
+  "passed": 11,
+  "total": 11
+}
