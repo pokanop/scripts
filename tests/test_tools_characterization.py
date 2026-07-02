@@ -1113,6 +1113,40 @@ def test_aikit_uninstall_prunes_config_entry(tool_loader, monkeypatch, tmp_path)
     assert "kilo" not in saved.get("agents", {})
 
 
+def test_aikit_uninstall_signals_failure_when_no_uninstall_command(tool_loader, monkeypatch):
+    # POK-82: an installed agent with no automated uninstall command must make
+    # `aikit uninstall` exit non-zero (previously it exited 0 and misled callers).
+    m = tool_loader("aikit")
+
+    monkeypatch.setattr(m, "validate_agent_keys", lambda keys: None)
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: True)
+    monkeypatch.setattr(m, "resolve_uninstall_cmd", lambda _agent: None)
+    monkeypatch.setattr(m, "discover_and_persist", lambda: None)
+    monkeypatch.setattr(m, "load_config", lambda: {"agents": {}, "settings": {}})
+    monkeypatch.setattr(m, "save_config", lambda _cfg: None)
+
+    rc = m._do_uninstall_impl(["claude"], yes=True)
+
+    assert rc == 1
+
+
+def test_aikit_uninstall_signals_success_when_uninstall_command_runs(tool_loader, monkeypatch):
+    # Installed agent WITH an automated uninstall command keeps exit 0.
+    m = tool_loader("aikit")
+
+    monkeypatch.setattr(m, "validate_agent_keys", lambda keys: None)
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: True)
+    monkeypatch.setattr(m, "resolve_uninstall_cmd", lambda _agent: "true")
+    monkeypatch.setattr(m, "run", lambda *_a, **_k: (0, "", ""))
+    monkeypatch.setattr(m, "discover_and_persist", lambda: None)
+    monkeypatch.setattr(m, "load_config", lambda: {"agents": {}, "settings": {}})
+    monkeypatch.setattr(m, "save_config", lambda _cfg: None)
+
+    rc = m._do_uninstall_impl(["claude"], yes=True)
+
+    assert rc == 0
+
+
 def test_aikit_discover_prunes_uninstalled_agents(tool_loader, monkeypatch, tmp_path):
     m = tool_loader("aikit")
     cfg_dir = tmp_path / ".aikit"
