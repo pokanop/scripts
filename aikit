@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.15.1
+aikit — AI Coding Agent CLI Installer & Manager  v1.15.3
 Install, update, authenticate, and manage 31 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.15.2"
+__version__ = "1.15.3"
 
 import scriptkit as sk
 
@@ -2229,9 +2229,13 @@ def _do_update_impl(agent_keys, *, force=False):
 
 
 def do_uninstall(agent_keys, yes=False):
-    """Uninstall agents."""
+    """Uninstall agents.
+
+    Returns the count of installed agents that had no automated uninstall
+    command (i.e. were not removed). Callers should exit non-zero when > 0.
+    """
     try:
-        _do_uninstall_impl(agent_keys, yes)
+        return _do_uninstall_impl(agent_keys, yes)
     except KeyboardInterrupt:
         console.print("\n[yellow]⏹ Uninstall interrupted.[/yellow]")
         sys.exit(130)
@@ -2269,6 +2273,7 @@ def _do_uninstall_impl(agent_keys, yes):
 
     config = load_config()
     removed = []
+    no_uninstall_cmd = []
 
     for i, key in enumerate(agent_keys, 1):
         agent = AGENTS[key]
@@ -2305,7 +2310,10 @@ def _do_uninstall_impl(agent_keys, yes):
             else:
                 print_warning(f"{icon} {agent['name']} uninstall may be incomplete: {stderr[:100]}")
         else:
-            print_info(f"{icon} {agent['name']} has no automated uninstall — remove manually")
+            no_uninstall_cmd.append(key)
+            print_warning(
+                f"{icon} {agent['name']} has no automated uninstall — remove manually"
+            )
             bin_name = resolve_agent_bin(key) or agent["bin"]
             print_info(f"  Typically: rm $(which {bin_name})")
 
@@ -2321,6 +2329,8 @@ def _do_uninstall_impl(agent_keys, yes):
         console.print(f"\n[bold green]✅ Uninstalled:[/bold green] {', '.join(removed)}")
     else:
         print_warning("No agents were fully removed — binaries may still be on PATH.")
+
+    return len(no_uninstall_cmd)
 
 
 # =============================================================================
@@ -5314,7 +5324,8 @@ def cmd_update(args):
 
 
 def cmd_uninstall(args):
-    do_uninstall(args.agents, yes=args.yes)
+    no_uninstall_cmd = do_uninstall(args.agents, yes=args.yes)
+    return 1 if no_uninstall_cmd else None
 
 
 def cmd_list(args):

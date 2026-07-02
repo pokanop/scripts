@@ -62,6 +62,15 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.15.3 — 2026-07-02
+- **Fix: `aikit uninstall` now exits non-zero when an installed agent has no
+  automated uninstall command** (POK-82). Previously it exited `0` with a
+  "has no automated uninstall — remove manually" message, misleading scripts
+  and CI into treating the no-op as success. The message (and its
+  `rm $(which <bin>)` hint) is preserved; only the exit code changes (now `1`).
+  "agent not found" (still `1` via `AikitError`) and "agent not installed"
+  (still `0`) behavior is unchanged.
+
 ### 1.15.2 — 2026-07-02
 - **Fix: curl-installed agent uninstall now removes vendor data dirs** (POK-80).
   `binary_uninstall_cmd()` gained optional `vendor_dirs` (`rm -rf`) and
