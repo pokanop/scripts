@@ -62,6 +62,22 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.15.4 — 2026-07-02
+- **Fix: five POK-65 agents falsely showed "needs auth" when authenticated** (POK-78).
+  `auggie`, `devin`, `qodo`, `openinterpreter`, and `plandex` were registered without
+  per-agent `discover_auth()` branches (same latent gap POK-76 fixed for `droid`):
+  - **Auggie** — register `AUGMENT_SESSION_AUTH`; detect `~/.augment/session.json`
+    from `auggie login`.
+  - **Devin** — register `WINDSURF_API_KEY`; detect credential files under
+    `~/.local/share/devin/` and `~/.devin/` from `devin auth login`.
+  - **Qodo** — detect `~/.qodo/auth.key` (`QODO_API_KEY` already covered generically).
+  - **Open Interpreter** — detect API keys in
+    `~/.config/open-interpreter/profiles/*.yaml` (env vars already covered).
+  - **Plandex** — detect `~/.plandex-home-v2/auth.json` from `plandex sign-in`
+    (provider env vars already covered).
+  - Unauthenticated installs (logs/cache only, no creds, no env, no recorded auth)
+    still report needs-auth — no false positives. Fifteen regression tests added.
+
 ### 1.15.3 — 2026-07-02
 - ⚠ **Fix: `aikit uninstall` now exits non-zero when an installed agent has no
   automated uninstall command** (POK-82). Previously it exited `0` with a

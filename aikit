@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.15.3
+aikit — AI Coding Agent CLI Installer & Manager  v1.15.4
 Install, update, authenticate, and manage 31 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.15.3"
+__version__ = "1.15.4"
 
 import scriptkit as sk
 
@@ -920,9 +920,9 @@ AGENTS = {
             ],
         ),
         "auth_type": "oauth_browser",
-        "auth_env_vars": [],
+        "auth_env_vars": ["WINDSURF_API_KEY"],
         "auth_cmd": "devin login",
-        "auth_note": "Run 'devin login' for Cognition AI account OAuth. Requires a Devin subscription (free trial available).",
+        "auth_note": "Run 'devin auth login' for Cognition AI account OAuth. Requires a Devin subscription (free trial available). For ACP/headless, set WINDSURF_API_KEY.",
         "requires": ["curl"],
         "tags": ["devin", "cognition", "autonomous", "cloud-handoff", "multi-model"],
     },
@@ -943,9 +943,9 @@ AGENTS = {
         "version_check": {"type": "npm", "package": "@augmentcode/auggie"},
         "uninstall_cmd": None,
         "auth_type": "oauth_browser",
-        "auth_env_vars": [],
+        "auth_env_vars": ["AUGMENT_SESSION_AUTH"],
         "auth_cmd": "auggie login",
-        "auth_note": "Run 'auggie login' for Augment account OAuth (browser). Free tier available; paid plans from $60/month.",
+        "auth_note": "Run 'auggie login' for Augment account OAuth (browser). Free tier available; paid plans from $60/month. For CI/headless, set AUGMENT_SESSION_AUTH (session JSON from `auggie token print`).",
         "requires": ["node", "npm"],
         "tags": ["augment", "auggie", "codebase-understanding", "mcp", "free-tier"],
     },
@@ -2684,6 +2684,84 @@ def discover_auth(agent_key):
             cfg_path = factory_dir / cfg_name
             if cfg_path.exists() and cfg_path.stat().st_size > 0:
                 return {"auth_configured": True, "method": "config_file", "source": str(cfg_path)}
+
+    # Auggie (Augment Code): `auggie login` writes ~/.augment/session.json;
+    # headless/CI uses $AUGMENT_SESSION_AUTH (session JSON from `auggie token print`).
+    if agent_key == "auggie":
+        session_file = home / ".augment" / "session.json"
+        if session_file.exists() and session_file.stat().st_size > 0:
+            try:
+                data = json.loads(session_file.read_text())
+                if data:
+                    return {"auth_configured": True, "method": "cred_file", "source": str(session_file)}
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    # Devin CLI: `devin auth login` stores credentials under ~/.local/share/devin/
+    # (and legacy ~/.devin/); ACP/headless can use $WINDSURF_API_KEY (checked above).
+    if agent_key == "devin":
+        for devin_root in (home / ".local" / "share" / "devin", home / ".devin"):
+            for cred_name in (
+                "auth.json", "credentials.json", "credentials.toml",
+                "session.json", "tokens.json",
+            ):
+                cred_path = devin_root / cred_name
+                if cred_path.exists() and cred_path.stat().st_size > 0:
+                    return {"auth_configured": True, "method": "cred_file", "source": str(cred_path)}
+            cli_dir = devin_root / "cli"
+            if cli_dir.is_dir():
+                for cred_name in (
+                    "auth.json", "credentials.json", "credentials.toml",
+                    "session.json", "tokens.json",
+                ):
+                    cred_path = cli_dir / cred_name
+                    if cred_path.exists() and cred_path.stat().st_size > 0:
+                        return {"auth_configured": True, "method": "cred_file", "source": str(cred_path)}
+
+    # Qodo: `qodo login` / SDK auth can persist ~/.qodo/auth.key; $QODO_API_KEY is
+    # checked generically above.
+    if agent_key == "qodo":
+        auth_key = home / ".qodo" / "auth.key"
+        if auth_key.exists() and auth_key.stat().st_size > 0:
+            return {"auth_configured": True, "method": "cred_file", "source": str(auth_key)}
+
+    # Open Interpreter: YAML profiles under ~/.config/open-interpreter/profiles/
+    # may hold api_key when env vars are unset.
+    if agent_key == "openinterpreter":
+        profiles_dir = home / ".config" / "open-interpreter" / "profiles"
+        if profiles_dir.is_dir():
+            for profile_path in profiles_dir.glob("*.yaml"):
+                try:
+                    if profile_path.stat().st_size > 0:
+                        cfg_text = profile_path.read_text()
+                        if _config_text_has_credentials(cfg_text):
+                            return {"auth_configured": True, "method": "config_file", "source": str(profile_path)}
+                except OSError:
+                    pass
+        for cfg_path in [
+            home / ".config" / "open-interpreter" / "config.yaml",
+            home / ".config" / "open-interpreter" / "default.yaml",
+        ]:
+            if cfg_path.exists() and cfg_path.stat().st_size > 0:
+                try:
+                    cfg_text = cfg_path.read_text()
+                    if _config_text_has_credentials(cfg_text):
+                        return {"auth_configured": True, "method": "config_file", "source": str(cfg_path)}
+                except OSError:
+                    pass
+
+    # Plandex: `plandex sign-in` persists ~/.plandex-home-v2/auth.json; provider
+    # keys are env-only (checked generically above).
+    if agent_key == "plandex":
+        for plandex_home in (home / ".plandex-home-v2", home / ".plandex-home"):
+            auth_file = plandex_home / "auth.json"
+            if auth_file.exists() and auth_file.stat().st_size > 0:
+                try:
+                    data = json.loads(auth_file.read_text())
+                    if data:
+                        return {"auth_configured": True, "method": "cred_file", "source": str(auth_file)}
+                except (json.JSONDecodeError, OSError):
+                    pass
 
     # For agents with auth_env_vars, check shell profile files
     if env_vars and not auth_type == "oauth_browser":
