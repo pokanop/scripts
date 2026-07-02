@@ -156,6 +156,9 @@ def binary_uninstall_cmd(bin_name, *, extra_paths=(), vendor_dirs=(), vendor_fil
     vendor_files: loose config files under $HOME (rm -f).
 
     /usr/local/bin removal without root silently no-ops (rm -f).
+
+    When an uninstall command includes vendor_dirs or vendor_files,
+    ``aikit uninstall`` prompts for confirmation unless ``-y`` is passed.
     """
     paths = [f"$HOME/.local/bin/{bin_name}", f"/usr/local/bin/{bin_name}", *extra_paths]
     if _CURRENT_PLATFORM == "Windows":
@@ -217,6 +220,13 @@ def resolve_uninstall_cmd(agent):
     if callable(cmd):
         return cmd()
     return cmd
+
+
+def uninstall_removes_vendor_data(uninstall_cmd):
+    """True when an uninstall command deletes agent config/data beyond PATH shims."""
+    if not uninstall_cmd:
+        return False
+    return "rm -rf" in uninstall_cmd or uninstall_cmd.count("rm -f") > 1
 
 
 # =============================================================================
@@ -300,7 +310,8 @@ AGENTS = {
         "uninstall_cmd": binary_uninstall_cmd(
             "cursor-agent",
             extra_paths=["$HOME/.local/bin/agent"],
-            vendor_dirs=["$HOME/.local/share/cursor-agent", "$HOME/.cursor"],
+            vendor_dirs=["$HOME/.local/share/cursor-agent"],
+            vendor_files=["$HOME/.cursor/cli-config.json"],
         ),
         "auth_type": "oauth_browser",
         "auth_env_vars": ["CURSOR_API_KEY"],
@@ -2228,6 +2239,19 @@ def _do_uninstall_impl(agent_keys, yes):
         return
 
     validate_agent_keys(agent_keys)
+
+    vendor_cleanup_keys = [
+        key for key in agent_keys
+        if uninstall_removes_vendor_data(resolve_uninstall_cmd(AGENTS[key]))
+    ]
+    if vendor_cleanup_keys and not yes:
+        names = _agent_names(vendor_cleanup_keys)
+        if not _prompt_yes_no(
+            f"Uninstall will permanently remove vendor config/data for: {names}. Continue?",
+            default=False,
+        ):
+            console.print("[yellow]⏹ Cancelled.[/yellow]")
+            return
 
     config = load_config()
     removed = []
@@ -5188,7 +5212,8 @@ def build_parser():
     # uninstall
     uninstall_p = sub.add_parser("uninstall", help="Remove agents")
     uninstall_p.add_argument("agents", nargs="*", help="Agent keys to uninstall (none = interactive picker)")
-    uninstall_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmations")
+    uninstall_p.add_argument("-y", "--yes", action="store_true",
+                             help="Skip confirmations (including vendor config/data removal)")
 
     # list
     sub.add_parser("list", help="Show all agents and installation status")

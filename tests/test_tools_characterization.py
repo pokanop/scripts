@@ -335,9 +335,10 @@ def test_aikit_curl_installed_agent_uninstall_cmds(tool_loader):
                 ".local/bin/cursor-agent",
                 ".local/bin/agent",
                 ".local/share/cursor-agent",
-                ".cursor",
+                ".cursor/cli-config.json",
             ],
             "needs_rf": True,
+            "no_rf_paths": [".cursor"],
         },
         "hermes": {
             "paths": [".local/bin/hermes", ".hermes"],
@@ -385,6 +386,8 @@ def test_aikit_curl_installed_agent_uninstall_cmds(tool_loader):
             assert path in cmd, f"{key}: missing {path}"
         if spec.get("needs_rf"):
             assert "rm -rf" in cmd, f"{key}: missing vendor dir cleanup"
+        for path in spec.get("no_rf_paths", []):
+            assert f"rm -rf $HOME/{path}" not in cmd, f"{key}: must not rm -rf {path}"
 
 
 def test_aikit_resolve_update_cmd_kilo(tool_loader, monkeypatch):
@@ -1017,6 +1020,45 @@ def test_aikit_auth_picker_only_installed(tool_loader, monkeypatch):
         only_installed=True,
     )
     assert result == ["codex"]
+
+
+def test_aikit_uninstall_prompts_before_vendor_data_removal(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    prompts = []
+    runs = []
+
+    monkeypatch.setattr(m, "_prompt_yes_no", lambda msg, default: prompts.append(msg) or False)
+    monkeypatch.setattr(m, "validate_agent_keys", lambda keys: None)
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: True)
+    monkeypatch.setattr(m, "run", lambda *args, **kwargs: runs.append(args) or (0, "", ""))
+    monkeypatch.setattr(m, "discover_and_persist", lambda: None)
+    monkeypatch.setattr(m, "load_config", lambda: {"agents": {}, "settings": {}})
+    monkeypatch.setattr(m, "save_config", lambda _cfg: None)
+
+    m._do_uninstall_impl(["claude"], yes=False)
+
+    assert prompts
+    assert "vendor config/data" in prompts[0]
+    assert not runs
+
+
+def test_aikit_uninstall_skips_vendor_prompt_with_yes(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    prompts = []
+    runs = []
+
+    monkeypatch.setattr(m, "_prompt_yes_no", lambda msg, default: prompts.append(msg) or False)
+    monkeypatch.setattr(m, "validate_agent_keys", lambda keys: None)
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: True)
+    monkeypatch.setattr(m, "run", lambda *args, **kwargs: runs.append(args) or (0, "", ""))
+    monkeypatch.setattr(m, "discover_and_persist", lambda: None)
+    monkeypatch.setattr(m, "load_config", lambda: {"agents": {}, "settings": {}})
+    monkeypatch.setattr(m, "save_config", lambda _cfg: None)
+
+    m._do_uninstall_impl(["claude"], yes=True)
+
+    assert not prompts
+    assert runs
 
 
 def test_aikit_uninstall_prunes_config_entry(tool_loader, monkeypatch, tmp_path):
