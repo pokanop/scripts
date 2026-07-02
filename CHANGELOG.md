@@ -63,7 +63,7 @@ Newest entries on top, within each tool.
 ## aikit
 
 ### 1.15.3 — 2026-07-02
-- **Fix: `aikit uninstall` now exits non-zero when an installed agent has no
+- ⚠ **Fix: `aikit uninstall` now exits non-zero when an installed agent has no
   automated uninstall command** (POK-82). Previously it exited `0` with a
   "has no automated uninstall — remove manually" message, misleading scripts
   and CI into treating the no-op as success. The message (and its
