@@ -487,14 +487,26 @@ def test_aikit_devin_registry_entry(tool_loader):
     devin = m.AGENTS["devin"]
     assert devin["bin"] == "devin"
     assert devin["vendor"] == "Cognition AI"
-    assert devin["auth_cmd"] == "devin login"
+    assert devin["auth_cmd"] == "devin auth login"
     assert devin["auth_type"] == "oauth_browser"
+    assert "WINDSURF_API_KEY" in devin["auth_env_vars"]
     assert devin.get("update_via_install") is True
     assert devin["version_check"]["type"] == "json_url"
     assert "static.devin.ai" in devin["version_check"]["url"]
     assert "cli.devin.ai/install.sh" in devin["install"]["Linux"]
     assert "setup.ps1" in devin["install"]["Windows"]
     assert "Devin subscription" in devin["auth_note"]
+
+
+def test_aikit_auggie_registry_entry(tool_loader):
+    m = tool_loader("aikit")
+    auggie = m.AGENTS["auggie"]
+    assert auggie["bin"] == "auggie"
+    assert auggie["vendor"] == "Augment Code"
+    assert auggie["auth_cmd"] == "auggie login"
+    assert auggie["auth_type"] == "oauth_browser"
+    assert "AUGMENT_SESSION_AUTH" in auggie["auth_env_vars"]
+    assert auggie["version_check"]["package"] == "@augmentcode/auggie"
 
 
 def test_aikit_droid_registry_entry(tool_loader):
@@ -872,7 +884,7 @@ def test_aikit_auth_registry_login_commands(tool_loader):
     assert "BAILIAN_CODING_PLAN_API_KEY" in m.AGENTS["qwen"]["auth_env_vars"]
     assert "MOONSHOT_API_KEY" not in m.AGENTS["kimi"]["auth_env_vars"]
     assert m.AGENTS["kiro"]["auth_cmd"] == "kiro-cli login"
-    assert m.AGENTS["devin"]["auth_cmd"] == "devin login"
+    assert m.AGENTS["devin"]["auth_cmd"] == "devin auth login"
 
 
 def test_aikit_discover_auth_env_var(tool_loader, monkeypatch):
@@ -969,6 +981,192 @@ def test_aikit_discover_auth_droid_unauthenticated(tool_loader, monkeypatch, tmp
     monkeypatch.delenv("FACTORY_API_KEY", raising=False)
     monkeypatch.setattr(m, "load_config", lambda: {"agents": {}})
     result = m.discover_auth("droid")
+    assert result["auth_configured"] is False
+
+
+def test_aikit_discover_auth_auggie_env_var(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setenv("AUGMENT_SESSION_AUTH", '{"accessToken":"tok"}')
+    result = m.discover_auth("auggie")
+    assert result["auth_configured"] is True
+    assert result["method"] == "env_var"
+    assert result["source"] == "$AUGMENT_SESSION_AUTH"
+
+
+def test_aikit_discover_auth_auggie_session_file(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    session = home / ".augment" / "session.json"
+    session.parent.mkdir(parents=True)
+    session.write_text('{"accessToken":"tok","tenantURL":"https://api.example"}')
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("AUGMENT_SESSION_AUTH", raising=False)
+    result = m.discover_auth("auggie")
+    assert result["auth_configured"] is True
+    assert result["method"] == "cred_file"
+    assert result["source"] == str(session)
+
+
+def test_aikit_discover_auth_auggie_unauthenticated(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    (home / ".augment" / "cache").mkdir(parents=True)
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("AUGMENT_SESSION_AUTH", raising=False)
+    monkeypatch.setattr(m, "load_config", lambda: {"agents": {}})
+    result = m.discover_auth("auggie")
+    assert result["auth_configured"] is False
+
+
+def test_aikit_discover_auth_devin_env_var(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setenv("WINDSURF_API_KEY", "cog_test_key")
+    result = m.discover_auth("devin")
+    assert result["auth_configured"] is True
+    assert result["method"] == "env_var"
+    assert result["source"] == "$WINDSURF_API_KEY"
+
+
+def test_aikit_discover_auth_devin_cred_file(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    cred_file = home / ".local" / "share" / "devin" / "credentials.json"
+    cred_file.parent.mkdir(parents=True)
+    cred_file.write_text('{"token":"abc"}')
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("WINDSURF_API_KEY", raising=False)
+    result = m.discover_auth("devin")
+    assert result["auth_configured"] is True
+    assert result["method"] == "cred_file"
+    assert result["source"] == str(cred_file)
+
+
+def test_aikit_discover_auth_devin_unauthenticated(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    (home / ".local" / "share" / "devin" / "cli" / "logs").mkdir(parents=True)
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("WINDSURF_API_KEY", raising=False)
+    monkeypatch.setattr(m, "load_config", lambda: {"agents": {}})
+    result = m.discover_auth("devin")
+    assert result["auth_configured"] is False
+
+
+def test_aikit_discover_auth_qodo_env_var(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setenv("QODO_API_KEY", "qodo-test-key")
+    result = m.discover_auth("qodo")
+    assert result["auth_configured"] is True
+    assert result["method"] == "env_var"
+    assert result["source"] == "$QODO_API_KEY"
+
+
+def test_aikit_discover_auth_qodo_auth_key_file(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    auth_key = home / ".qodo" / "auth.key"
+    auth_key.parent.mkdir(parents=True)
+    auth_key.write_text("qodo-test-key")
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("QODO_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    result = m.discover_auth("qodo")
+    assert result["auth_configured"] is True
+    assert result["method"] == "cred_file"
+    assert result["source"] == str(auth_key)
+
+
+def test_aikit_discover_auth_qodo_unauthenticated(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    (home / ".qodo").mkdir(parents=True)
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("QODO_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(m, "load_config", lambda: {"agents": {}})
+    result = m.discover_auth("qodo")
+    assert result["auth_configured"] is False
+
+
+def test_aikit_discover_auth_openinterpreter_env_var(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
+    result = m.discover_auth("openinterpreter")
+    assert result["auth_configured"] is True
+    assert result["method"] == "env_var"
+    assert result["source"] == "$OPENAI_API_KEY"
+
+
+def test_aikit_discover_auth_openinterpreter_profile_file(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    profile = home / ".config" / "open-interpreter" / "profiles" / "default.yaml"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("llm:\n  model: gpt-4o\n  api_key: sk-test-key\n")
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    result = m.discover_auth("openinterpreter")
+    assert result["auth_configured"] is True
+    assert result["method"] == "config_file"
+    assert result["source"] == str(profile)
+
+
+def test_aikit_discover_auth_openinterpreter_unauthenticated(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    profile = home / ".config" / "open-interpreter" / "profiles" / "default.yaml"
+    profile.parent.mkdir(parents=True)
+    profile.write_text("llm:\n  model: gpt-4o\n  temperature: 0\n")
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(m, "load_config", lambda: {"agents": {}})
+    result = m.discover_auth("openinterpreter")
+    assert result["auth_configured"] is False
+
+
+def test_aikit_discover_auth_plandex_env_var(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    result = m.discover_auth("plandex")
+    assert result["auth_configured"] is True
+    assert result["method"] == "env_var"
+    assert result["source"] == "$OPENROUTER_API_KEY"
+
+
+def test_aikit_discover_auth_plandex_auth_file(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    auth_file = home / ".plandex-home-v2" / "auth.json"
+    auth_file.parent.mkdir(parents=True)
+    auth_file.write_text('{"token":"abc","email":"user@example.com"}')
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    result = m.discover_auth("plandex")
+    assert result["auth_configured"] is True
+    assert result["method"] == "cred_file"
+    assert result["source"] == str(auth_file)
+
+
+def test_aikit_discover_auth_plandex_unauthenticated(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    home = tmp_path / "home"
+    (home / ".plandex-v2" / "plans").mkdir(parents=True)
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setattr(m, "load_config", lambda: {"agents": {}})
+    result = m.discover_auth("plandex")
     assert result["auth_configured"] is False
 
 
