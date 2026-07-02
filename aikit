@@ -921,7 +921,7 @@ AGENTS = {
         ),
         "auth_type": "oauth_browser",
         "auth_env_vars": ["WINDSURF_API_KEY"],
-        "auth_cmd": "devin login",
+        "auth_cmd": "devin auth login",
         "auth_note": "Run 'devin auth login' for Cognition AI account OAuth. Requires a Devin subscription (free trial available). For ACP/headless, set WINDSURF_API_KEY.",
         "requires": ["curl"],
         "tags": ["devin", "cognition", "autonomous", "cloud-handoff", "multi-model"],

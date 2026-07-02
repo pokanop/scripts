@@ -69,7 +69,8 @@ Newest entries on top, within each tool.
   - **Auggie** — register `AUGMENT_SESSION_AUTH`; detect `~/.augment/session.json`
     from `auggie login`.
   - **Devin** — register `WINDSURF_API_KEY`; detect credential files under
-    `~/.local/share/devin/` and `~/.devin/` from `devin auth login`.
+    `~/.local/share/devin/` and `~/.devin/` from `devin auth login`; fix `auth_cmd`
+    to match (`devin auth login`, was `devin login`).
   - **Qodo** — detect `~/.qodo/auth.key` (`QODO_API_KEY` already covered generically).
   - **Open Interpreter** — detect API keys in
     `~/.config/open-interpreter/profiles/*.yaml` (env vars already covered).

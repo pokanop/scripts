@@ -487,7 +487,7 @@ def test_aikit_devin_registry_entry(tool_loader):
     devin = m.AGENTS["devin"]
     assert devin["bin"] == "devin"
     assert devin["vendor"] == "Cognition AI"
-    assert devin["auth_cmd"] == "devin login"
+    assert devin["auth_cmd"] == "devin auth login"
     assert devin["auth_type"] == "oauth_browser"
     assert "WINDSURF_API_KEY" in devin["auth_env_vars"]
     assert devin.get("update_via_install") is True
@@ -884,7 +884,7 @@ def test_aikit_auth_registry_login_commands(tool_loader):
     assert "BAILIAN_CODING_PLAN_API_KEY" in m.AGENTS["qwen"]["auth_env_vars"]
     assert "MOONSHOT_API_KEY" not in m.AGENTS["kimi"]["auth_env_vars"]
     assert m.AGENTS["kiro"]["auth_cmd"] == "kiro-cli login"
-    assert m.AGENTS["devin"]["auth_cmd"] == "devin login"
+    assert m.AGENTS["devin"]["auth_cmd"] == "devin auth login"
 
 
 def test_aikit_discover_auth_env_var(tool_loader, monkeypatch):
