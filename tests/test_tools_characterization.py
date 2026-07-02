@@ -322,23 +322,69 @@ def test_aikit_kimi_bin_and_uninstall(tool_loader, monkeypatch, tmp_path):
 def test_aikit_curl_installed_agent_uninstall_cmds(tool_loader):
     m = tool_loader("aikit")
     cases = {
-        "claude": [".local/bin/claude"],
-        "antigravity": [".local/bin/agy"],
-        "cursor": [".local/bin/cursor-agent", ".local/bin/agent"],
-        "hermes": [".local/bin/hermes"],
-        "codex": [".local/bin/codex"],
-        "copilot": [".local/bin/copilot"],
-        "grok": [".grok/bin/grok", ".grok/bin/agent", ".local/bin/agent"],
-        "kiro": [".local/bin/kiro-cli", ".local/bin/kiro", ".local/bin/kiro-cli-chat", ".local/bin/q"],
-        "openclaw": [".local/bin/openclaw"],
-        "devin": [".local/bin/devin"],
-        "droid": [".local/bin/droid"],
+        "claude": {
+            "paths": [".local/bin/claude", ".claude", ".claude.json"],
+            "needs_rf": True,
+        },
+        "antigravity": {
+            "paths": [".local/bin/agy", ".gemini/antigravity-cli"],
+            "needs_rf": True,
+        },
+        "cursor": {
+            "paths": [
+                ".local/bin/cursor-agent",
+                ".local/bin/agent",
+                ".local/share/cursor-agent",
+                ".cursor",
+            ],
+            "needs_rf": True,
+        },
+        "hermes": {
+            "paths": [".local/bin/hermes", ".hermes"],
+            "needs_rf": True,
+        },
+        "codex": {
+            "paths": [".local/bin/codex", ".codex"],
+            "needs_rf": True,
+        },
+        "copilot": {
+            "paths": [".local/bin/copilot", ".copilot"],
+            "needs_rf": True,
+        },
+        "grok": {
+            "paths": [".local/bin/grok", ".local/bin/agent", ".grok"],
+            "needs_rf": True,
+        },
+        "kiro": {
+            "paths": [
+                ".local/bin/kiro-cli",
+                ".local/bin/kiro",
+                ".local/bin/kiro-cli-chat",
+                ".local/bin/q",
+                ".kiro",
+            ],
+            "needs_rf": True,
+        },
+        "openclaw": {
+            "paths": [".local/bin/openclaw", ".openclaw"],
+            "needs_rf": True,
+        },
+        "devin": {
+            "paths": [".local/bin/devin", ".local/share/devin"],
+            "needs_rf": True,
+        },
+        "droid": {
+            "paths": [".local/bin/droid", ".factory"],
+            "needs_rf": True,
+        },
     }
-    for key, paths in cases.items():
+    for key, spec in cases.items():
         cmd = m.resolve_uninstall_cmd(m.AGENTS[key])
         assert cmd and "rm -f" in cmd, key
-        for path in paths:
+        for path in spec["paths"]:
             assert path in cmd, f"{key}: missing {path}"
+        if spec.get("needs_rf"):
+            assert "rm -rf" in cmd, f"{key}: missing vendor dir cleanup"
 
 
 def test_aikit_resolve_update_cmd_kilo(tool_loader, monkeypatch):
