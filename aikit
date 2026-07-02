@@ -177,6 +177,20 @@ def openhands_uninstall_cmd():
     return uv + binary_uninstall_cmd("openhands")
 
 
+def pip_agent_uninstall_cmd(pip_package, *, bin_name=None, uv_tool=None, pipx_package=None):
+    """Pip-installed agent: pip/pipx/uv uninstall fallbacks + optional binary cleanup."""
+    pipx_package = pipx_package or pip_package
+    uv_tool = uv_tool or pip_package
+    parts = [
+        f"pip uninstall -y {pip_package} 2>/dev/null",
+        f"command -v pipx >/dev/null 2>&1 && pipx uninstall {pipx_package} 2>/dev/null",
+        f"command -v uv >/dev/null 2>&1 && uv tool uninstall {uv_tool} 2>/dev/null",
+    ]
+    if bin_name:
+        parts.append(binary_uninstall_cmd(bin_name))
+    return " ; ".join(parts)
+
+
 def kimi_uninstall_cmd():
     """Kimi Code: remove curl-installed binary from ~/.kimi-code and PATH shims."""
     return " ; ".join([
@@ -485,7 +499,7 @@ AGENTS = {
         "version_cmd": "aider --version",
         "update_cmd": "pip install --upgrade aider-chat --break-system-packages 2>/dev/null || pip install --upgrade aider-chat",
         "version_check": {"type": "pip", "package": "aider-chat"},
-        "uninstall_cmd": "pip uninstall -y aider-chat",
+        "uninstall_cmd": pip_agent_uninstall_cmd("aider-chat", bin_name="aider"),
         "auth_type": "api_key",
         "auth_env_vars": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"],
         "auth_note": "Set provider API keys via environment variables. Pass --api-key <provider>=<key> on invocation.",
@@ -785,7 +799,7 @@ AGENTS = {
         "version_cmd": "llm --version",
         "update_cmd": "pip install --upgrade llm --break-system-packages 2>/dev/null || pip install --upgrade llm",
         "version_check": {"type": "pip", "package": "llm"},
-        "uninstall_cmd": "pip uninstall -y llm",
+        "uninstall_cmd": pip_agent_uninstall_cmd("llm", bin_name="llm"),
         "auth_type": "api_key",
         "auth_env_vars": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"],
         "auth_note": "Run 'llm keys set openai' (or provider name) to store keys, or set provider env vars.",
@@ -829,7 +843,7 @@ AGENTS = {
         "version_cmd": "sgpt --version",
         "update_cmd": "pip install --upgrade shell-gpt --break-system-packages 2>/dev/null || pip install --upgrade shell-gpt",
         "version_check": {"type": "pip", "package": "shell-gpt"},
-        "uninstall_cmd": "pip uninstall -y shell-gpt",
+        "uninstall_cmd": pip_agent_uninstall_cmd("shell-gpt", bin_name="sgpt"),
         "auth_type": "api_key",
         "auth_env_vars": ["OPENAI_API_KEY"],
         "auth_note": "Run 'sgpt' once to store your API key in ~/.config/shell_gpt/.sgptrc, or set OPENAI_API_KEY.",
@@ -928,7 +942,7 @@ AGENTS = {
         "update_cmd": "pip install --upgrade open-interpreter --break-system-packages 2>/dev/null || pip install --upgrade open-interpreter",
         "path_markers": ["/.config/open-interpreter"],
         "version_check": {"type": "pip", "package": "open-interpreter"},
-        "uninstall_cmd": "pip uninstall -y open-interpreter",
+        "uninstall_cmd": pip_agent_uninstall_cmd("open-interpreter", bin_name="interpreter"),
         "auth_type": "api_key",
         "auth_env_vars": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"],
         "auth_note": "Set OPENAI_API_KEY (or other provider env var) before running 'interpreter'. On first run, 'interpreter' prompts for an API key if none is set. Use '--local' for Ollama-hosted models.",

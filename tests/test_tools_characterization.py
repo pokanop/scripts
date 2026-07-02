@@ -485,7 +485,7 @@ def test_aikit_gateway_cli_registry_entries(tool_loader):
     assert llm["bin"] == "llm"
     assert llm["version_check"]["package"] == "llm"
     assert "pip install llm" in llm["install"]["Linux"]
-    assert llm["uninstall_cmd"] == "pip uninstall -y llm"
+    assert "pip uninstall -y llm" in llm["uninstall_cmd"]
     continue_cli = m.AGENTS["continue"]
     assert continue_cli["bin"] == "cn"
     assert continue_cli["auth_cmd"] == "cn login"
@@ -643,6 +643,24 @@ def test_aikit_uninstall_cmds_for_new_agents(tool_loader):
     goose = m.resolve_uninstall_cmd(m.AGENTS["goose"])
     assert goose and "rm -f" in goose and ".local/bin/goose" in goose
     assert "brew uninstall" not in goose
+
+
+def test_aikit_pip_agent_uninstall_cmds(tool_loader):
+    m = tool_loader("aikit")
+    cases = [
+        ("aider", "aider-chat", "aider"),
+        ("llm", "llm", "llm"),
+        ("sgpt", "shell-gpt", "sgpt"),
+        ("openinterpreter", "open-interpreter", "interpreter"),
+    ]
+    for key, pip_pkg, bin_name in cases:
+        cmd = m.resolve_uninstall_cmd(m.AGENTS[key])
+        assert cmd and f"pip uninstall -y {pip_pkg}" in cmd
+        assert f"pipx uninstall {pip_pkg}" in cmd
+        assert f"uv tool uninstall {pip_pkg}" in cmd
+        assert "command -v uv >/dev/null 2>&1" in cmd
+        assert "command -v pipx >/dev/null 2>&1" in cmd
+        assert f".local/bin/{bin_name}" in cmd
 
 
 def test_aikit_goose_uninstall_uses_brew_only_for_homebrew_install(tool_loader, monkeypatch, tmp_path):
