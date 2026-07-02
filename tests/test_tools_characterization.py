@@ -319,6 +319,28 @@ def test_aikit_kimi_bin_and_uninstall(tool_loader, monkeypatch, tmp_path):
     assert ".local/bin/kimi" in uninstall
 
 
+def test_aikit_curl_installed_agent_uninstall_cmds(tool_loader):
+    m = tool_loader("aikit")
+    cases = {
+        "claude": [".local/bin/claude"],
+        "antigravity": [".local/bin/agy"],
+        "cursor": [".local/bin/cursor-agent", ".local/bin/agent"],
+        "hermes": [".local/bin/hermes"],
+        "codex": [".local/bin/codex"],
+        "copilot": [".local/bin/copilot"],
+        "grok": [".grok/bin/grok", ".grok/bin/agent", ".local/bin/agent"],
+        "kiro": [".local/bin/kiro-cli", ".local/bin/kiro", ".local/bin/kiro-cli-chat", ".local/bin/q"],
+        "openclaw": [".local/bin/openclaw"],
+        "devin": [".local/bin/devin"],
+        "droid": [".local/bin/droid"],
+    }
+    for key, paths in cases.items():
+        cmd = m.resolve_uninstall_cmd(m.AGENTS[key])
+        assert cmd and "rm -f" in cmd, key
+        for path in paths:
+            assert path in cmd, f"{key}: missing {path}"
+
+
 def test_aikit_resolve_update_cmd_kilo(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "kilo")
