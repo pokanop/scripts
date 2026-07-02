@@ -62,6 +62,18 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.15.2 — 2026-07-02
+- **Fix: curl-installed agent uninstall now removes vendor data dirs** (POK-80).
+  `binary_uninstall_cmd()` gained optional `vendor_dirs` (`rm -rf`) and
+  `vendor_files` (`rm -f`) parameters. All 11 curl-installed agents (claude,
+  antigravity, cursor, hermes, codex, copilot, grok, kiro, openclaw, devin,
+  droid) now clean up their on-disk config/state directories on
+  `aikit uninstall -y <key>`, not just PATH shims. `/usr/local/bin` removal
+  without root still silently no-ops (`rm -f`). Interactive uninstall prompts
+  before removing vendor config/data unless `-y` is passed. Cursor CLI cleanup
+  is scoped to `~/.cursor/cli-config.json` and `~/.local/share/cursor-agent`
+  so the desktop IDE's `~/.cursor` tree is preserved.
+
 ### 1.15.1 — 2026-07-01
 - **Fix: droid always showed "needs auth" even when authenticated** (POK-76). `droid`
   was registered without any `auth_env_vars` and had no per-agent branch in

@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.15.1"
+__version__ = "1.15.2"
 
 import scriptkit as sk
 
@@ -148,13 +148,28 @@ def _path_entry_on_path(dir_path):
     return False
 
 
-def binary_uninstall_cmd(bin_name, *, extra_paths=()):
-    """Remove a curl-installed CLI binary from standard install locations."""
+def binary_uninstall_cmd(bin_name, *, extra_paths=(), vendor_dirs=(), vendor_files=()):
+    """Remove a curl-installed CLI binary from standard install locations.
+
+    extra_paths: additional binary shim paths (rm -f).
+    vendor_dirs: agent data directories created at install/runtime (rm -rf).
+    vendor_files: loose config files under $HOME (rm -f).
+
+    /usr/local/bin removal without root silently no-ops (rm -f).
+
+    When an uninstall command includes vendor_dirs or vendor_files,
+    ``aikit uninstall`` prompts for confirmation unless ``-y`` is passed.
+    """
     paths = [f"$HOME/.local/bin/{bin_name}", f"/usr/local/bin/{bin_name}", *extra_paths]
     if _CURRENT_PLATFORM == "Windows":
         win = f"{bin_name}.exe" if not bin_name.endswith(".exe") else bin_name
         paths.extend([f"$USERPROFILE/.local/bin/{win}", f"$USERPROFILE/goose/{win}"])
-    return "rm -f " + " ".join(paths)
+    parts = ["rm -f " + " ".join(paths)]
+    if vendor_files:
+        parts.append("rm -f " + " ".join(vendor_files))
+    if vendor_dirs:
+        parts.append("rm -rf " + " ".join(vendor_dirs))
+    return " ; ".join(parts)
 
 
 def goose_uninstall_cmd():
@@ -200,15 +215,11 @@ def kimi_uninstall_cmd():
 
 
 def grok_uninstall_cmd():
-    """Grok Build: remove curl-installed binaries from ~/.grok/bin and PATH shims."""
+    """Grok Build: remove ~/.grok data dir and PATH shims (incl. shared 'agent' alias)."""
     return binary_uninstall_cmd(
         "grok",
-        extra_paths=[
-            "$HOME/.grok/bin/grok",
-            "$HOME/.grok/bin/agent",
-            "$HOME/.local/bin/agent",
-            "/usr/local/bin/agent",
-        ],
+        extra_paths=["$HOME/.local/bin/agent", "/usr/local/bin/agent"],
+        vendor_dirs=["$HOME/.grok"],
     )
 
 
@@ -223,6 +234,13 @@ def resolve_uninstall_cmd(agent):
     if callable(cmd):
         return cmd()
     return cmd
+
+
+def uninstall_removes_vendor_data(uninstall_cmd):
+    """True when an uninstall command deletes agent config/data beyond PATH shims."""
+    if not uninstall_cmd:
+        return False
+    return "rm -rf" in uninstall_cmd or uninstall_cmd.count("rm -f") > 1
 
 
 # =============================================================================
@@ -246,7 +264,11 @@ AGENTS = {
         "version_cmd": "claude --version",
         "update_cmd": "claude update",
         "version_check": {"type": "url_text", "url": "https://downloads.claude.ai/latest"},
-        "uninstall_cmd": binary_uninstall_cmd("claude"),
+        "uninstall_cmd": binary_uninstall_cmd(
+            "claude",
+            vendor_dirs=["$HOME/.claude"],
+            vendor_files=["$HOME/.claude.json"],
+        ),
         "auth_type": "oauth_browser",
         "auth_env_vars": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"],
         "auth_note": "Run 'claude' for browser OAuth (Pro/Max/Team). Or set ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN, or CLAUDE_CODE_OAUTH_TOKEN from 'claude setup-token' for CI.",
@@ -267,7 +289,16 @@ AGENTS = {
         "version_cmd": "agy --version",
         "update_cmd": "agy update",
         "version_check": {"type": "antigravity_manifest"},
-        "uninstall_cmd": binary_uninstall_cmd("agy"),
+        "uninstall_cmd": binary_uninstall_cmd(
+            "agy",
+            vendor_dirs=[
+                "$HOME/.gemini/antigravity-cli",
+                "$HOME/.agy",
+                "$HOME/.antigravity",
+                "$HOME/.config/antigravity",
+                "$HOME/.cache/antigravity",
+            ],
+        ),
         "auth_type": "oauth_browser",
         "auth_env_vars": [],
         "auth_note": "Run 'agy' and authenticate with your Google account in browser.",
@@ -290,7 +321,12 @@ AGENTS = {
         "version_cmd": "cursor-agent --version",
         "update_cmd": "cursor-agent update",
         "version_check": {"type": "cursor_install_script", "url": "https://cursor.com/install"},
-        "uninstall_cmd": binary_uninstall_cmd("cursor-agent", extra_paths=["$HOME/.local/bin/agent"]),
+        "uninstall_cmd": binary_uninstall_cmd(
+            "cursor-agent",
+            extra_paths=["$HOME/.local/bin/agent"],
+            vendor_dirs=["$HOME/.local/share/cursor-agent"],
+            vendor_files=["$HOME/.cursor/cli-config.json"],
+        ),
         "auth_type": "oauth_browser",
         "auth_env_vars": ["CURSOR_API_KEY"],
         "auth_cmd": "agent login",
@@ -316,7 +352,7 @@ AGENTS = {
             "cmd": "hermes update --check",
             "available_substr": "Update available",
         },
-        "uninstall_cmd": binary_uninstall_cmd("hermes"),
+        "uninstall_cmd": binary_uninstall_cmd("hermes", vendor_dirs=["$HOME/.hermes"]),
         "auth_type": "oauth_portal",
         "auth_env_vars": ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"],
         "auth_note": "Run 'hermes setup --portal' for Nous Portal OAuth, or 'hermes model' for API keys.",
@@ -337,7 +373,7 @@ AGENTS = {
         "version_cmd": "codex --version",
         "update_cmd": "codex update",
         "version_check": {"type": "github_release", "repo": "openai/codex", "tag_prefix": "rust-v"},
-        "uninstall_cmd": binary_uninstall_cmd("codex"),
+        "uninstall_cmd": binary_uninstall_cmd("codex", vendor_dirs=["$HOME/.codex"]),
         "auth_type": "oauth_browser",
         "auth_env_vars": ["OPENAI_API_KEY"],
         "auth_cmd": "codex login",
@@ -447,7 +483,7 @@ AGENTS = {
         "version_cmd": "copilot --version",
         "update_cmd": "curl -fsSL https://gh.io/copilot-install | bash",
         "version_check": {"type": "github_release", "repo": "github/copilot-cli", "tag_prefix": "v"},
-        "uninstall_cmd": binary_uninstall_cmd("copilot"),
+        "uninstall_cmd": binary_uninstall_cmd("copilot", vendor_dirs=["$HOME/.copilot"]),
         "auth_type": "oauth_browser",
         "auth_env_vars": ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"],
         "auth_cmd": "copilot login",
@@ -553,6 +589,7 @@ AGENTS = {
                 "$HOME/.local/bin/kiro-cli-chat",
                 "$HOME/.local/bin/q",
             ],
+            vendor_dirs=["$HOME/.kiro", "$HOME/.config/kiro"],
         ),
         "auth_type": "oauth_browser",
         "auth_env_vars": ["KIRO_API_KEY"],
@@ -620,7 +657,10 @@ AGENTS = {
         },
         "version_cmd": "openclaw --version",
         "update_cmd": "openclaw update",
-        "uninstall_cmd": binary_uninstall_cmd("openclaw"),
+        "uninstall_cmd": binary_uninstall_cmd(
+            "openclaw",
+            vendor_dirs=["$HOME/.openclaw", "$HOME/.claw", "$HOME/.config/openclaw"],
+        ),
         "auth_type": "oauth_onboard",
         "auth_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
         "auth_note": "Run 'openclaw onboard' for guided setup and auth.",
@@ -870,7 +910,15 @@ AGENTS = {
             "url": "https://static.devin.ai/cli/current/manifest.json",
             "key": "version",
         },
-        "uninstall_cmd": binary_uninstall_cmd("devin"),
+        "uninstall_cmd": binary_uninstall_cmd(
+            "devin",
+            vendor_dirs=[
+                "$HOME/.devin",
+                "$HOME/.local/share/devin",
+                "$HOME/.local/share/cognition",
+                "$HOME/.local/share/chisel",
+            ],
+        ),
         "auth_type": "oauth_browser",
         "auth_env_vars": [],
         "auth_cmd": "devin login",
@@ -920,7 +968,7 @@ AGENTS = {
             "cmd": "droid update --check",
             "available_substr": "Update available",
         },
-        "uninstall_cmd": binary_uninstall_cmd("droid"),
+        "uninstall_cmd": binary_uninstall_cmd("droid", vendor_dirs=["$HOME/.factory"]),
         "auth_type": "oauth_browser",
         "auth_env_vars": ["FACTORY_API_KEY"],
         "auth_note": "Run 'droid' on first use for Factory AI account OAuth, or set FACTORY_API_KEY (fk-…) for headless/BYOK. Free account required; enterprise plans available.",
@@ -2205,6 +2253,19 @@ def _do_uninstall_impl(agent_keys, yes):
         return
 
     validate_agent_keys(agent_keys)
+
+    vendor_cleanup_keys = [
+        key for key in agent_keys
+        if uninstall_removes_vendor_data(resolve_uninstall_cmd(AGENTS[key]))
+    ]
+    if vendor_cleanup_keys and not yes:
+        names = _agent_names(vendor_cleanup_keys)
+        if not _prompt_yes_no(
+            f"Uninstall will permanently remove vendor config/data for: {names}. Continue?",
+            default=False,
+        ):
+            console.print("[yellow]⏹ Cancelled.[/yellow]")
+            return
 
     config = load_config()
     removed = []
@@ -5165,7 +5226,8 @@ def build_parser():
     # uninstall
     uninstall_p = sub.add_parser("uninstall", help="Remove agents")
     uninstall_p.add_argument("agents", nargs="*", help="Agent keys to uninstall (none = interactive picker)")
-    uninstall_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmations")
+    uninstall_p.add_argument("-y", "--yes", action="store_true",
+                             help="Skip confirmations (including vendor config/data removal)")
 
     # list
     sub.add_parser("list", help="Show all agents and installation status")
