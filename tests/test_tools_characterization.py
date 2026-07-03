@@ -108,6 +108,60 @@ def test_pluck_path_to_env_key(tool_loader):
     assert m.path_to_env_key("a.b[2]") == "A_B_2"
 
 
+# --- pluck: end-to-end file operations ------------------------------------
+# The pure helpers above never touch the dispatch → handler_for → load/save
+# path — which is the entire tool. These round-trips pin that path end to end:
+# a regression in the format-handler wiring or the TOML writer breaks get/set
+# for real files (and no assertion above would notice). JSON and .env need no
+# third-party deps so they always run; YAML/TOML skip if their writer is absent.
+_PLUCK_SAMPLES = {
+    "json": ('{"model": "gpt-4o", "web": {"port": 8080}}', "web.port", 8080),
+    "env": ("MODEL=gpt-4o\n", "MODEL", "gpt-4o"),
+    "yaml": ("model: gpt-4o\nweb:\n  port: 8080\n", "web.port", 8080),
+    "toml": ('model = "gpt-4o"\n[web]\nport = 8080\n', "web.port", 8080),
+}
+
+
+def _run_pluck(*args):
+    return subprocess.run(
+        [sys.executable, str(REPO_ROOT / "pluck"), *args],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "NO_COLOR": "1"},
+    )
+
+
+def _require_writer(fmt):
+    """Skip when the optional writer for ``fmt`` isn't installed."""
+    if fmt == "yaml":
+        pytest.importorskip("ruamel.yaml")
+    if fmt == "toml":
+        pytest.importorskip("tomli_w")
+
+
+@pytest.mark.parametrize("fmt", ["json", "env", "yaml", "toml"])
+def test_pluck_get_reads_value(tmp_path, fmt):
+    """`pluck get` resolves a path in every format (reading needs no writer)."""
+    body, key, expected = _PLUCK_SAMPLES[fmt]
+    cfg = tmp_path / f"config.{fmt}"
+    cfg.write_text(body)
+    proc = _run_pluck("get", "--json", str(cfg), key)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == expected
+
+
+@pytest.mark.parametrize("fmt", ["json", "env", "yaml", "toml"])
+def test_pluck_set_roundtrips(tmp_path, fmt):
+    """`pluck set` writes a value that `pluck get` reads back, every format."""
+    _require_writer(fmt)
+    body, key, _ = _PLUCK_SAMPLES[fmt]
+    cfg = tmp_path / f"config.{fmt}"
+    cfg.write_text(body)
+    assert _run_pluck("set", str(cfg), key, "xyzzy-42").returncode == 0
+    proc = _run_pluck("get", "--json", str(cfg), key)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == "xyzzy-42"
+
+
 # --- netsy -----------------------------------------------------------------
 def test_netsy_parse_subnet_valid(tool_loader):
     m = tool_loader("netsy")

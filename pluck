@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pluck — Config Key-Path Tool  v1.1.0
+pluck — Config Key-Path Tool  v1.1.1
 Copy, merge, read, set, and diff values at dot-separated paths across
 YAML, JSON, TOML, and .env files — one CLI, format-agnostic operations.
 
@@ -39,17 +39,25 @@ from io import StringIO
 from pathlib import Path
 from typing import Any, Optional
 
-import tomli_w
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
+# Optional write-side deps. Reading is covered by the stdlib (json / tomllib)
+# or a hand-rolled parser (.env); only *writing* YAML/TOML needs these, so we
+# import them lazily and surface a clean error at the point of use instead of
+# crashing the whole module (and every unrelated command) when they're absent.
 try:
     from ruamel.yaml import YAML
 except ImportError:
     YAML = None  # type: ignore[misc, assignment]
 
-__version__ = "1.1.0"
+try:
+    import tomli_w
+except ImportError:
+    tomli_w = None  # type: ignore[assignment]
+
+__version__ = "1.1.1"
 
 ICON = "🪶"
 TAGLINE = "copy, merge, and edit config key paths (yaml · json · toml · env)"
@@ -334,6 +342,18 @@ def yaml_engine() -> YAML:
     return y
 
 
+def toml_writer():
+    """Return the TOML writer module, or raise if it isn't installed.
+
+    Reading TOML uses stdlib ``tomllib``; only *writing* needs ``tomli_w``,
+    so the dependency is optional at import time and enforced here, at the
+    single point where a TOML value is serialized.
+    """
+    if tomli_w is None:
+        raise PluckError("tomli-w is required to write TOML (pip install tomli-w)")
+    return tomli_w
+
+
 @dataclass
 class LoadedConfig:
     data: Any
@@ -523,10 +543,10 @@ class TomlHandler(FormatHandler):
 
     def save(self, loaded: LoadedConfig, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(tomli_w.dumps(loaded.data))
+        path.write_text(toml_writer().dumps(loaded.data), encoding="utf-8")
 
     def dump_preview(self, data: Any) -> str:
-        return tomli_w.dumps(data).decode("utf-8").rstrip() or "(empty)"
+        return toml_writer().dumps(data).rstrip() or "(empty)"
 
 
 class EnvHandler(FormatHandler):
@@ -562,7 +582,10 @@ class EnvHandler(FormatHandler):
         return "\n".join(lines) or "(empty)"
 
 
-HANDLERS: dict[ConfigFormat, FormatHandler] = {
+# Keyed by ConfigFormat. Named distinctly from the command-dispatch ``HANDLERS``
+# below (str command → cmd_* fn); the two must not collide or ``handler_for``
+# would look a format enum up in the command table.
+FORMAT_HANDLERS: dict[ConfigFormat, FormatHandler] = {
     ConfigFormat.YAML: YamlHandler(),
     ConfigFormat.JSON: JsonHandler(),
     ConfigFormat.TOML: TomlHandler(),
@@ -571,7 +594,7 @@ HANDLERS: dict[ConfigFormat, FormatHandler] = {
 
 
 def handler_for(fmt: ConfigFormat) -> FormatHandler:
-    return HANDLERS[fmt]
+    return FORMAT_HANDLERS[fmt]
 
 
 def load_config(path: Path, fmt: Optional[str] = None) -> LoadedConfig:
@@ -681,7 +704,7 @@ def show_value(title: str, loaded: LoadedConfig, value: Any) -> None:
             text = json.dumps(value, indent=2, default=str)
             lexer = "json"
         elif loaded.format == ConfigFormat.TOML:
-            text = tomli_w.dumps(value).decode("utf-8").rstrip() or "(empty)"
+            text = toml_writer().dumps(value).rstrip() or "(empty)"
             lexer = "toml"
         else:
             text = str(value)
