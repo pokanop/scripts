@@ -24,7 +24,7 @@ voxtract = ["yt-dlp", "demucs", "spotipy", "spotdl"]
 all = [
     "pokanop-scripts[medcat,keyferry,aikit,pluck,netsy,voxtract]",
 ]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "ruamel.yaml"]
 
 [tool.setuptools]
 py-modules = []
