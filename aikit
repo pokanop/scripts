@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.15.4
+aikit — AI Coding Agent CLI Installer & Manager  v1.15.5
 Install, update, authenticate, and manage 31 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.15.4"
+__version__ = "1.15.5"
 
 import scriptkit as sk
 
@@ -1056,23 +1056,111 @@ def _npm_global_bin_dirs():
 # Subprocess helpers
 # =============================================================================
 
-def run(cmd, timeout=300, shell=True, capture=True, env=None):
-    """Run a shell command. Returns (exit_code, stdout, stderr)."""
-    run_env = {**os.environ, **env} if env else None
+def _terminate_process_tree(proc, pgid, first_signal, *, grace=2.0):
+    """Tear down ``proc`` and every process it spawned, then reap it.
+
+    ``run`` starts captured children with ``start_new_session=True`` so the
+    child leads its own process group (pgid == pid); signalling the *group*
+    therefore reaches the shell, the real installer it exec'd (npm/pip/curl/…),
+    and any grandchildren. We send ``first_signal`` (``SIGINT`` for a Ctrl-C,
+    ``SIGTERM`` for a timeout) so a well-behaved tree can unwind, then always
+    ``SIGKILL`` the whole group — a child that swallows the first signal, or a
+    backgrounded step the shell already ``wait``-ed past, must not outlive the
+    abort. Behaviour is identical in tmux and a plain terminal because aikit,
+    not the tty, owns the teardown.
+
+    ``pgid`` is ``None`` for a non-isolated run (``capture=False`` or a platform
+    without process groups); we then tear down only the single process, never a
+    group, so we can't hit aikit itself.
+    """
+    def _reap(timeout):
+        try:
+            proc.wait(timeout=timeout)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+
+    if pgid is not None and hasattr(os, "killpg"):
+        def _signal_group(sig):
+            try:
+                os.killpg(pgid, sig)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+        _signal_group(first_signal)
+        _reap(grace)                    # let a well-behaved tree exit on its own
+        _signal_group(signal.SIGKILL)   # then guarantee no member survives
+        _reap(grace)
+        return
+
+    # Non-isolated / non-POSIX fallback: terminate just the direct child.
+    if proc.poll() is not None:
+        return
     try:
-        result = subprocess.run(
+        proc.terminate()
+    except OSError:
+        return
+    if not _reap(grace):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        _reap(grace)
+
+
+def run(cmd, timeout=300, shell=True, capture=True, env=None):
+    """Run a shell command. Returns (exit_code, stdout, stderr).
+
+    Captured commands run in their own session/process group
+    (``start_new_session``) with stdin closed, so an interrupt or timeout tears
+    down the *entire* subprocess tree rather than just the immediate shell. On
+    Ctrl-C we signal the whole group and re-raise, letting the single
+    termination point in ``sk.run_cli`` exit 130 — no installer subprocess
+    survives the interrupt, in tmux or a plain terminal alike. A timeout kills
+    the tree the same way and reports it instead of leaking a runaway process.
+    """
+    run_env = {**os.environ, **env} if env else None
+    pipe = subprocess.PIPE if capture else None
+    # Isolate captured commands in their own session so we can tear down the
+    # whole tree on abort — POSIX only (start_new_session/killpg are no-ops or
+    # absent elsewhere; there we fall back to single-process teardown).
+    isolate = capture and os.name == "posix"
+    try:
+        proc = subprocess.Popen(
             cmd,
             shell=shell,
-            capture_output=capture,
+            stdin=subprocess.DEVNULL if capture else None,
+            stdout=pipe,
+            stderr=pipe,
             text=True,
-            timeout=timeout,
             env=run_env,
+            start_new_session=isolate,
         )
-        return result.returncode, result.stdout.strip(), result.stderr.strip()
-    except subprocess.TimeoutExpired:
-        return -1, "", f"Command timed out after {timeout}s: {cmd}"
     except Exception as e:
         return -1, "", str(e)
+
+    # With start_new_session the child leads its own group, so pgid == pid;
+    # capture it up front so teardown can reach the whole tree even after the
+    # group leader itself has exited.
+    pgid = proc.pid if isolate else None
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(proc, pgid, signal.SIGTERM)
+        try:  # drain whatever the child emitted before we killed it
+            stdout, stderr = proc.communicate(timeout=5)
+        except (subprocess.TimeoutExpired, ValueError):
+            stdout, stderr = "", ""
+        return -1, (stdout or "").strip(), f"Command timed out after {timeout}s: {cmd}"
+    except KeyboardInterrupt:
+        _terminate_process_tree(proc, pgid, signal.SIGINT)
+        raise
+    except Exception as e:
+        _terminate_process_tree(proc, pgid, signal.SIGTERM)
+        return -1, "", str(e)
+
+    return proc.returncode, (stdout or "").strip(), (stderr or "").strip()
 
 
 def _npm_global_prefixes():

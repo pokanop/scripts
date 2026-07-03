@@ -7,7 +7,8 @@ inline ``\\r`` progress with no dependency at all.
 
 from __future__ import annotations
 
-import concurrent.futures
+import queue
+import threading
 from contextlib import contextmanager
 
 from . import style
@@ -78,6 +79,13 @@ def parallel_map(fn, items, description: str = "Working", max_workers: int = 8):
     """Run ``fn`` over ``items`` concurrently, showing combined progress.
 
     Returns results in completion order. Exceptions propagate from the worker.
+
+    Workers are daemon threads and the main thread collects their results
+    through a queue polled with a short timeout, so a Ctrl-C is raised promptly
+    in the main thread and the interpreter can exit without waiting on in-flight
+    work. A plain ``ThreadPoolExecutor`` would instead block at shutdown until
+    every started task finished — e.g. a version check stuck in a 20s network
+    timeout — making the interrupt look like a hang (POK-85).
     """
     items = list(items)
     results = []
@@ -109,15 +117,48 @@ def parallel_map(fn, items, description: str = "Working", max_workers: int = 8):
         progress_cm = None
 
     workers = max(1, min(max_workers, len(items)))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(fn, it) for it in items]
-        if progress_cm is not None:
-            with progress_cm as progress:
-                task = progress.add_task(description, total=len(items))
-                for fut in concurrent.futures.as_completed(futures):
-                    results.append(fut.result())
-                    progress.advance(task)
-        else:
-            for fut in concurrent.futures.as_completed(futures):
-                results.append(fut.result())
+    pending = queue.Queue()
+    for item in items:
+        pending.put(item)
+    completed = queue.Queue()  # (ok: bool, payload: result | exception)
+
+    def _worker():
+        while True:
+            try:
+                item = pending.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                completed.put((True, fn(item)))
+            except BaseException as exc:  # surfaced in the main thread below
+                completed.put((False, exc))
+
+    for i in range(workers):
+        threading.Thread(
+            target=_worker, name=f"parallel_map-{i}", daemon=True
+        ).start()
+
+    def _drain(on_done=None):
+        for _ in range(len(items)):
+            # Poll with a timeout so a pending SIGINT is raised here between
+            # waits instead of being held off by an untimed blocking get().
+            while True:
+                try:
+                    ok, payload = completed.get(timeout=0.1)
+                    break
+                except queue.Empty:
+                    continue
+            if not ok:
+                raise payload
+            results.append(payload)
+            if on_done is not None:
+                on_done()
+
+    if progress_cm is not None:
+        with progress_cm as progress:
+            task = progress.add_task(description, total=len(items))
+            _drain(lambda: progress.advance(task))
+    else:
+        _drain()
+
     return results

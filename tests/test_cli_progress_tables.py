@@ -101,6 +101,56 @@ def test_parallel_map_empty(no_color):
     assert progress.parallel_map(lambda x: x, []) == []
 
 
+def test_parallel_map_preserves_completion_order(no_color):
+    import time
+
+    order = progress.parallel_map(
+        lambda d: (time.sleep(d / 100.0) or d), [5, 1, 3, 2], max_workers=4
+    )
+    assert order[0] == 1 and order[-1] == 5
+
+
+def test_parallel_map_worker_exception_propagates(no_color):
+    with pytest.raises(ZeroDivisionError):
+        progress.parallel_map(lambda x: 1 / 0 if x == 2 else x, [1, 2, 3], max_workers=3)
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX signals")
+def test_parallel_map_interrupt_is_prompt(no_color):
+    """Ctrl-C surfaces promptly instead of blocking on in-flight workers.
+
+    Regression for POK-85: the old ThreadPoolExecutor implementation blocked at
+    shutdown until every started task finished (e.g. a 20s network timeout), so
+    the interrupt looked like a hang. Daemon workers + an interruptible
+    collection loop mean the interpreter can bail immediately.
+    """
+    import os
+    import signal
+    import threading
+    import time
+
+    slow_finished = []
+    fired = threading.Event()
+
+    def fn(x):
+        if x == 0:
+            fired.set()
+            os.kill(os.getpid(), signal.SIGINT)  # signal handled on main thread
+            return x
+        time.sleep(5)  # an in-flight worker we must NOT wait for
+        slow_finished.append(x)
+        return x
+
+    start = time.perf_counter()
+    with pytest.raises(KeyboardInterrupt):
+        progress.parallel_map(fn, [0, 1, 2, 3], "interrupt", max_workers=4)
+    elapsed = time.perf_counter() - start
+
+    assert fired.is_set()
+    assert elapsed < 3.0, f"interrupt took {elapsed:.2f}s; slow workers were awaited"
+    assert slow_finished == [], "in-flight workers should be abandoned, not awaited"
+
+
 def test_status_contextmanager(no_color, capsys):
     with progress.status("working") as st:
         st.update("still working")

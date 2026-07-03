@@ -10,6 +10,19 @@ Newest entries on top, within each tool.
 
 ## scriptkit
 
+### 1.2.1 — 2026-07-03
+- **Fix: `parallel_map` now honors Ctrl-C promptly instead of hanging** (POK-85).
+  It ran on a `ThreadPoolExecutor` whose context-manager exit blocks until every
+  in-flight task finishes, so an interrupt stalled until the slowest worker
+  returned (e.g. a version check stuck in a 20s network timeout) — the interrupt
+  looked like a hang. Workers are now daemon threads and the main thread collects
+  results through a queue polled with a short timeout, so `KeyboardInterrupt` is
+  raised in the main thread right away and the interpreter can exit without
+  waiting on abandoned work. Public signature, return value (results in
+  completion order), progress rendering, and worker-exception propagation are
+  unchanged; new regression tests cover completion order, exception propagation,
+  and prompt-interrupt.
+
 ### 1.2.0 — 2026-06-30
 - **New `blocks` module** (`scriptkit.blocks`): `sk.ManagedBlock(begin, end)` plus
   the pure helpers `render_block` / `find_block` / `has_block` / `upsert_block` /
@@ -61,6 +74,24 @@ Newest entries on top, within each tool.
 ---
 
 ## aikit
+
+### 1.15.5 — 2026-07-03
+- **Fix: Ctrl-C during `aikit update` (and `install`) now exits cleanly and kills
+  the whole update tree** (POK-85). `run()` executed each update/install command
+  with `subprocess.run(shell=True, capture_output=True)`, which on interrupt only
+  killed the immediate shell — the real installer it spawned (npm/pip/curl and
+  their children) was orphaned and kept running, so aborting an update never truly
+  returned control (most visible under tmux). Captured commands now launch in
+  their own session/process group (`start_new_session`) with stdin closed, and an
+  interrupt or timeout tears down the **entire** group (SIGINT/SIGTERM → SIGKILL)
+  before re-raising, so `sk.run_cli` still exits `130`. aikit — not the terminal —
+  owns the teardown, so behavior is identical in tmux and a plain shell. A timeout
+  now also kills the whole tree instead of leaking a runaway process. Exit codes,
+  return shape, and output are unchanged; regression tests cover session
+  isolation, timeout tree-teardown, and interrupt tree-teardown.
+- Depends on `scriptkit` 1.2.1, which fixes `parallel_map` so Ctrl-C during agent
+  discovery (`aikit`, `doctor`, `setup`, first run) no longer hangs until every
+  in-flight version check finishes.
 
 ### 1.15.4 — 2026-07-02
 - **Fix: five POK-65 agents falsely showed "needs auth" when authenticated** (POK-78).
