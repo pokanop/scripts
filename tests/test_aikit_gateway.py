@@ -154,6 +154,83 @@ def test_gateway_auth_headers_are_bearer_only(aikit):
     assert "x-api-key" not in headers
 
 
+# --- Python TLS preflight (POK-94) ------------------------------------------
+@pytest.mark.parametrize("version, modern", [
+    ("OpenSSL 3.0.20 7 Apr 2026", True),
+    ("OpenSSL 1.1.1w  11 Sep 2023", True),
+    ("OpenSSL 1.1.1  11 Sep 2018", True),
+    ("OpenSSL 1.0.2k-fips  26 Jan 2017", False),
+    ("LibreSSL 2.8.3", False),
+    ("LibreSSL 3.3.6", False),
+    ("BoringSSL some-build", True),
+])
+def test_parse_python_ssl_version(aikit, version, modern):
+    name, parts, is_modern = aikit._parse_python_ssl_version(version)
+    assert is_modern is modern
+    if version.startswith("LibreSSL"):
+        assert name == "LibreSSL"
+    elif version.startswith("OpenSSL"):
+        assert name == "OpenSSL"
+        assert parts[0] >= 1
+
+
+def test_require_modern_python_tls_ok(aikit, monkeypatch):
+    monkeypatch.setattr(aikit, "_python_ssl_version_str",
+                        lambda: "OpenSSL 3.0.20 7 Apr 2026")
+    aikit.require_modern_python_tls()  # no raise
+
+
+def test_require_modern_python_tls_libressl(aikit, monkeypatch):
+    monkeypatch.setattr(aikit, "_python_ssl_version_str",
+                        lambda: "LibreSSL 2.8.3")
+    with pytest.raises(aikit.AikitError, match="modern TLS ciphers"):
+        aikit.require_modern_python_tls()
+
+
+def test_require_modern_python_tls_legacy_openssl(aikit, monkeypatch):
+    monkeypatch.setattr(aikit, "_python_ssl_version_str",
+                        lambda: "OpenSSL 1.0.2k-fips  26 Jan 2017")
+    with pytest.raises(aikit.AikitError, match="OpenSSL < 1.1.1"):
+        aikit.require_modern_python_tls()
+
+
+def test_gateway_get_json_surfaces_legacy_tls_before_network(aikit, monkeypatch):
+    monkeypatch.setattr(aikit, "_python_ssl_version_str",
+                        lambda: "LibreSSL 2.8.3")
+
+    def boom(*a, **kw):
+        raise AssertionError("network should not be called when TLS preflight fails")
+
+    monkeypatch.setattr("requests.get", boom)
+    with pytest.raises(aikit.AikitError, match="modern TLS ciphers"):
+        aikit._gateway_get_json("https://gw.example.com/v1/models", "sk-x")
+
+
+def test_gateway_get_json_handshake_failure_hint(aikit, monkeypatch):
+    import requests
+
+    monkeypatch.setattr(aikit, "_python_ssl_version_str",
+                        lambda: "OpenSSL 3.0.20 7 Apr 2026")
+    monkeypatch.setattr(aikit, "require_modern_python_tls", lambda: None)
+
+    def fake_get(*a, **kw):
+        raise requests.exceptions.SSLError(
+            "[SSL: SSLV3_ALERT_HANDSHAKE_FAILURE] handshake failure (_ssl.c:1006)"
+        )
+
+    monkeypatch.setattr("requests.get", fake_get)
+    with pytest.raises(aikit.AikitError, match="modern TLS ciphers"):
+        aikit._gateway_get_json("https://gw.example.com/v1/models", "sk-x")
+
+
+def test_check_python_tls_doctor(aikit, monkeypatch):
+    monkeypatch.setattr(aikit, "_python_ssl_version_str",
+                        lambda: "LibreSSL 2.8.3")
+    chk = aikit.check_python_tls()
+    assert chk.state == "fail"
+    assert "modern TLS ciphers" in chk.hint
+
+
 def test_gateway_get_json_rejects_invalid_key_without_x_api_key_mask(aikit, monkeypatch):
     """POK-88: a lenient x-api-key must not bypass Bearer enforcement."""
     import requests

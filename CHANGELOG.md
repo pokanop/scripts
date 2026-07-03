@@ -75,6 +75,15 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.15.6 — 2026-07-03
+- **Fix: detect LibreSSL / legacy OpenSSL before gateway TLS handshake failures** (POK-94).
+  macOS system Python (LibreSSL 2.x) and other Pythons linked against OpenSSL
+  < 1.1.1 fail Cloudflare-protected gateways with an opaque
+  `SSLV3_ALERT_HANDSHAKE_FAILURE`. Gateway HTTP clients now run a TLS preflight
+  and raise an actionable error (e.g. `brew install python@3.12` on macOS) instead
+  of the raw handshake failure. `aikit doctor` adds a **Python TLS** prerequisite
+  check. No change for Linux / Homebrew Python linked against OpenSSL 1.1.1+.
+
 ### 1.15.5 — 2026-07-03
 - **Fix: Ctrl-C during `aikit update` (and `install`) now exits cleanly and kills
   the whole update tree** (POK-85). `run()` executed each update/install command
