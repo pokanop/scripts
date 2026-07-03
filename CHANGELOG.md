@@ -62,6 +62,13 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.15.5 — 2026-07-03
+- **Fix: invalid virtual key no longer silently accepted during model discovery** (POK-88).
+  Gateway HTTP clients (`gateway models`, `gateway on`, passthrough probes, doctor
+  reachability) sent both `Authorization: Bearer` and `x-api-key`. On gateways that
+  enforce Bearer but accept any `x-api-key`, a typo'd key looked valid. Clients now
+  send Bearer only, matching LiteLLM virtual-key semantics.
+
 ### 1.15.4 — 2026-07-02
 - **Fix: five POK-65 agents falsely showed "needs auth" when authenticated** (POK-78).
   `auggie`, `devin`, `qodo`, `openinterpreter`, and `plandex` were registered without

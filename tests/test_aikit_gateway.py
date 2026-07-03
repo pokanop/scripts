@@ -148,6 +148,33 @@ def test_discover_models_surfaces_v1_models_error(aikit):
         aikit.discover_models("https://gw", "k", getter=fake_getter)
 
 
+def test_gateway_auth_headers_are_bearer_only(aikit):
+    headers = aikit._gateway_auth_headers("sk-test")
+    assert headers["Authorization"] == "Bearer sk-test"
+    assert "x-api-key" not in headers
+
+
+def test_gateway_get_json_rejects_invalid_key_without_x_api_key_mask(aikit, monkeypatch):
+    """POK-88: a lenient x-api-key must not bypass Bearer enforcement."""
+    import requests
+
+    def fake_get(url, headers=None, timeout=None):
+        auth = (headers or {}).get("Authorization", "")
+        if (headers or {}).get("x-api-key"):
+            # Gateway accepts any x-api-key — would have masked a bad bearer if sent.
+            return type("Resp", (), {"status_code": 200, "ok": True,
+                                      "json": lambda self: {"data": []}})()
+        if auth == "Bearer sk-valid":
+            return type("Resp", (), {"status_code": 200, "ok": True,
+                                      "json": lambda self: {"data": []}})()
+        return type("Resp", (), {"status_code": 401, "ok": False})()
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    with pytest.raises(aikit.AikitError, match="rejected the key"):
+        aikit._gateway_get_json("https://gw/v1/models", "sk-bogus")
+    aikit._gateway_get_json("https://gw/v1/models", "sk-valid")
+
+
 def test_providers_in_use(aikit):
     models = ["openai/gpt-4o", "anthropic/claude", "bogusprov/x", "bare-model"]
     detail = {"openai/gpt-4o": {"provider": "openai"}}
