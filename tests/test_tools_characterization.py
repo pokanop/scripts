@@ -745,6 +745,40 @@ def test_aikit_goose_uninstall_uses_brew_only_for_homebrew_install(tool_loader, 
     assert kimi and ".kimi-code/bin/kimi" in kimi
 
 
+def test_aikit_npm_agent_uninstall_derived_from_version_check(tool_loader):
+    # POK-87: npm agents omit explicit uninstall_cmd; npm uninstall is derived.
+    m = tool_loader("aikit")
+    npm_agents = [
+        ("kilo", "@kilocode/cli"),
+        ("opencode", "opencode-ai"),
+        ("qwen", "@qwen-code/qwen-code"),
+        ("qodo", "@qodo/command"),
+        ("pi", "@earendil-works/pi-coding-agent"),
+        ("blackbox", "@blackboxai/cli"),
+        ("cline", "cline"),
+        ("crush", "@charmland/crush"),
+        ("amp", "@ampcode/cli"),
+        ("gemini", "@google/gemini-cli"),
+        ("continue", "@continuedev/cli"),
+        ("auggie", "@augmentcode/auggie"),
+    ]
+    for key, package in npm_agents:
+        agent = m.AGENTS[key]
+        assert "uninstall_cmd" not in agent, key
+        cmd = m.resolve_uninstall_cmd(agent)
+        assert cmd and f"npm uninstall -g {package}" in cmd, key
+
+
+def test_aikit_explicit_uninstall_cmd_none_blocks_npm_derivation(tool_loader):
+    # POK-87: explicit uninstall_cmd: None means manual-only, even for npm agents.
+    m = tool_loader("aikit")
+    agent = {
+        **m.AGENTS["opencode"],
+        "uninstall_cmd": None,
+    }
+    assert m.resolve_uninstall_cmd(agent) is None
+
+
 def test_aikit_resolve_update_cmd_openhands_reinstall(tool_loader):
     m = tool_loader("aikit")
     cmd = m.resolve_update_cmd("openhands")

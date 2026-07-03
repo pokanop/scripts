@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.15.4
+aikit — AI Coding Agent CLI Installer & Manager  v1.15.5
 Install, update, authenticate, and manage 31 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.15.4"
+__version__ = "1.15.5"
 
 import scriptkit as sk
 
@@ -224,16 +224,25 @@ def grok_uninstall_cmd():
 
 
 def resolve_uninstall_cmd(agent):
-    """Return the platform-specific uninstall command for an agent."""
+    """Return the platform-specific uninstall command for an agent.
+
+    Precedence:
+    1. Explicit ``uninstall_cmd`` in the registry (including ``None`` for manual-only).
+    2. Derived ``npm uninstall -g`` when ``version_check.type`` is ``npm`` and a
+       package name is set.
+    """
+    if "uninstall_cmd" in agent:
+        cmd = agent["uninstall_cmd"]
+        if isinstance(cmd, dict):
+            return cmd.get(_CURRENT_PLATFORM)
+        if callable(cmd):
+            return cmd()
+        return cmd
+
     version_check = agent.get("version_check", {})
     if version_check.get("type") == "npm" and version_check.get("package"):
         return npm_uninstall_cmd(version_check["package"])
-    cmd = agent.get("uninstall_cmd")
-    if isinstance(cmd, dict):
-        return cmd.get(_CURRENT_PLATFORM)
-    if callable(cmd):
-        return cmd()
-    return cmd
+    return None
 
 
 def uninstall_removes_vendor_data(uninstall_cmd):
@@ -396,7 +405,6 @@ AGENTS = {
         "update_cmd": npm_install_cmd("@kilocode/cli@latest"),
         "path_markers": ["@kilocode/cli", "/.config/kilo"],
         "version_check": {"type": "npm", "package": "@kilocode/cli"},
-        "uninstall_cmd": None,
         "auth_type": "account_or_byok",
         "auth_env_vars": [],
         "auth_note": "Run 'kilo auth login' for Kilo account OAuth, or 'kilo' then '/connect' for BYOK provider keys.",
@@ -418,7 +426,6 @@ AGENTS = {
         "update_cmd": "opencode upgrade",
         "path_markers": ["/.opencode/"],
         "version_check": {"type": "npm", "package": "opencode-ai"},
-        "uninstall_cmd": None,
         "auth_type": "provider_keys",
         "auth_env_vars": ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
         "auth_note": "Run 'opencode auth login' to add provider API keys. Use 'opencode auth list' to verify.",
@@ -440,7 +447,6 @@ AGENTS = {
         "update_cmd": "qwen upgrade",
         "path_markers": ["/.qwen/", "qwen-code"],
         "version_check": {"type": "npm", "package": "@qwen-code/qwen-code"},
-        "uninstall_cmd": None,
         "auth_type": "account_or_byok",
         "auth_env_vars": ["DASHSCOPE_API_KEY", "BAILIAN_CODING_PLAN_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
         "auth_note": "Run 'qwen' and use '/auth' for Qwen OAuth, Coding Plan, or API keys. Or configure ~/.qwen/settings.json / env vars.",
@@ -462,7 +468,6 @@ AGENTS = {
         "update_cmd": npm_install_cmd("@qodo/command@latest"),
         "path_markers": ["@qodo/command", "@qodo/gen"],
         "version_check": {"type": "npm", "package": "@qodo/command"},
-        "uninstall_cmd": None,
         "auth_type": "account_or_byok",
         "auth_env_vars": ["QODO_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
         "auth_note": "Run 'qodo login' to sign in with a Qodo account (free tier). Or set QODO_API_KEY, or OPENAI_API_KEY / ANTHROPIC_API_KEY for BYOK. 'qodo --model={model-name}' selects a specific model.",
@@ -613,7 +618,6 @@ AGENTS = {
         "update_cmd": "pi update --self",
         "path_markers": ["pi-coding-agent", "/.pi/"],
         "version_check": {"type": "npm", "package": "@earendil-works/pi-coding-agent"},
-        "uninstall_cmd": None,
         "auth_type": "account_or_byok",
         "auth_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY"],
         "auth_note": "Run 'pi' then '/login' for subscription OAuth (Claude, ChatGPT, Copilot) or API keys. Or set provider env vars.",
@@ -682,7 +686,6 @@ AGENTS = {
         "update_cmd": "blackbox update",
         "path_markers": ["blackbox", "/.blackbox"],
         "version_check": {"type": "npm", "package": "@blackboxai/cli"},
-        "uninstall_cmd": None,
         "auth_type": "api_key",
         "auth_env_vars": ["BLACKBOX_API_KEY"],
         "auth_note": "Get API key from https://app.blackbox.ai/dashboard then run 'blackbox configure'.",
@@ -726,7 +729,6 @@ AGENTS = {
         "update_cmd": "cline update",
         "path_markers": ["/.cline/", "node_modules/cline"],
         "version_check": {"type": "npm", "package": "cline"},
-        "uninstall_cmd": None,
         "auth_type": "account_or_byok",
         "auth_env_vars": ["CLINE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"],
         "auth_note": "Run 'cline auth' for OAuth (Cline, ChatGPT) or provider API keys.",
@@ -773,7 +775,6 @@ AGENTS = {
         "update_cmd": npm_install_cmd("@charmland/crush@latest"),
         "path_markers": ["/.config/crush", "/.local/share/crush", "@charmland/crush"],
         "version_check": {"type": "npm", "package": "@charmland/crush"},
-        "uninstall_cmd": None,
         "auth_type": "provider_keys",
         "auth_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY"],
         "auth_note": "Run 'crush login' for OAuth providers, or set provider env vars. Crush prompts on first run if no key is set.",
@@ -795,7 +796,6 @@ AGENTS = {
         "update_cmd": "amp update",
         "path_markers": ["/.config/amp", "@ampcode/cli"],
         "version_check": {"type": "npm", "package": "@ampcode/cli"},
-        "uninstall_cmd": None,
         "auth_type": "oauth_browser",
         "auth_env_vars": ["AMP_API_KEY"],
         "auth_cmd": "amp login",
@@ -818,7 +818,6 @@ AGENTS = {
         "update_cmd": npm_install_cmd("@google/gemini-cli@latest"),
         "path_markers": ["@google/gemini-cli", "/.gemini/"],
         "version_check": {"type": "npm", "package": "@google/gemini-cli"},
-        "uninstall_cmd": None,
         "auth_type": "account_or_byok",
         "auth_env_vars": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         "auth_note": "Run 'gemini' for Google account OAuth, or set GEMINI_API_KEY (AI Studio) / GOOGLE_API_KEY (Vertex AI).",
@@ -861,7 +860,6 @@ AGENTS = {
         "update_cmd": npm_install_cmd("@continuedev/cli@latest"),
         "path_markers": ["@continuedev/cli", "/.continue/"],
         "version_check": {"type": "npm", "package": "@continuedev/cli"},
-        "uninstall_cmd": None,
         "auth_type": "oauth_browser",
         "auth_env_vars": ["ANTHROPIC_API_KEY"],
         "auth_cmd": "cn login",
@@ -941,7 +939,6 @@ AGENTS = {
         "update_cmd": npm_install_cmd("@augmentcode/auggie@latest"),
         "path_markers": ["@augmentcode/auggie", "/.augment/"],
         "version_check": {"type": "npm", "package": "@augmentcode/auggie"},
-        "uninstall_cmd": None,
         "auth_type": "oauth_browser",
         "auth_env_vars": ["AUGMENT_SESSION_AUTH"],
         "auth_cmd": "auggie login",
