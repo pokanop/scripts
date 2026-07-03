@@ -704,8 +704,18 @@ def show_value(title: str, loaded: LoadedConfig, value: Any) -> None:
             text = json.dumps(value, indent=2, default=str)
             lexer = "json"
         elif loaded.format == ConfigFormat.TOML:
-            text = toml_writer().dumps(value).rstrip() or "(empty)"
-            lexer = "toml"
+            # Render as TOML only when we actually can: a bare scalar/list has no
+            # standalone TOML representation (a TOML document is always a table),
+            # and serializing a table back needs the optional tomli-w writer.
+            # Otherwise fall back to JSON — it needs no writer and reads fine for
+            # a `get`, so a pure read never requires tomli-w (stdlib tomllib does
+            # the reading).
+            if isinstance(value, dict) and tomli_w is not None:
+                text = tomli_w.dumps(value).rstrip() or "(empty)"
+                lexer = "toml"
+            else:
+                text = json.dumps(value, indent=2, default=str)
+                lexer = "json"
         else:
             text = str(value)
             lexer = "bash"

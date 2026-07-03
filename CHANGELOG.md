@@ -566,6 +566,13 @@ Newest entries on top, within each tool.
 - Added end-to-end `get`/`set` round-trip characterization tests across all four
   formats so the dispatch → handler → load/save path is covered (the prior suite
   pinned only pure helpers + `--help`).
+- Made the default `get`/`diff` TOML *display* writer-free: it no longer calls the
+  `tomli-w` writer on a pure read (which failed in the `tomli-w`-absent venv), and
+  a bare scalar/list value now renders as JSON instead of crashing (`tomli_w.dumps`
+  requires a top-level table — `get config.toml a.scalar.path` used to raise). TOML
+  tables still render as TOML when the writer is present. Pinned the default
+  (non-`--json`) display path in the characterization tests, including with the
+  writer absent.
 
 ### 1.1.0 — 2026-06-26
 - Added the brand emoji 🪶 to the identity banner (`ICON` now wired into the parser).
