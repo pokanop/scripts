@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.15.4
+aikit — AI Coding Agent CLI Installer & Manager  v1.15.5
 Install, update, authenticate, and manage 31 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.15.4"
+__version__ = "1.15.5"
 
 import scriptkit as sk
 
@@ -2879,8 +2879,9 @@ def _do_auth_impl(agent_key):
     icon = agent["icon"]
 
     if not detect_agent_bin(agent_key):
-        print_error(f"{icon} {agent['name']} is not installed. Run 'aikit install {agent_key}' first.")
-        return
+        raise AikitError(
+            f"{icon} {agent['name']} is not installed. Run 'aikit install {agent_key}' first."
+        )
 
     auth_type = agent.get("auth_type", "unknown")
     auth_note = agent.get("auth_note", "")

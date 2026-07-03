@@ -62,6 +62,12 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.15.5 — 2026-07-03
+- ⚠ **Fix: `aikit auth <agent>` now exits non-zero when the agent is not installed**
+  (POK-90). Previously it printed the "is not installed. Run 'aikit install …' first."
+  error but exited `0`, misleading scripts and CI. The message is unchanged; exit
+  code is now `1` via `AikitError`, consistent with unknown-agent validation.
+
 ### 1.15.4 — 2026-07-02
 - **Fix: five POK-65 agents falsely showed "needs auth" when authenticated** (POK-78).
   `auggie`, `devin`, `qodo`, `openinterpreter`, and `plandex` were registered without
