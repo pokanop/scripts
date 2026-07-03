@@ -3311,6 +3311,20 @@ def _normalize_gateway_url(url):
 
 
 # --- model discovery client ------------------------------------------------
+def _gateway_auth_headers(key):
+    """Auth headers for gateway HTTP clients.
+
+    LiteLLM virtual keys authenticate via ``Authorization: Bearer``. Also sending
+    ``x-api-key`` can mask a rejected key on gateways that enforce Bearer but accept
+    any ``x-api-key`` (POK-88).
+    """
+    return {
+        "Authorization": f"Bearer {key}",
+        "Accept": "application/json",
+        "User-Agent": f"aikit/{__version__}",
+    }
+
+
 def _gateway_get_json(url, key, timeout=20):
     """GET ``url`` with gateway auth headers; return parsed JSON.
 
@@ -3319,12 +3333,7 @@ def _gateway_get_json(url, key, timeout=20):
     """
     import requests
 
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "x-api-key": key,
-        "Accept": "application/json",
-        "User-Agent": f"aikit/{__version__}",
-    }
+    headers = _gateway_auth_headers(key)
     try:
         resp = requests.get(url, headers=headers, timeout=timeout)
     except requests.exceptions.RequestException as e:
@@ -3435,12 +3444,7 @@ def _probe_status(url, key, *, timeout=6):
     """
     import requests
 
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "x-api-key": key,
-        "Accept": "application/json",
-        "User-Agent": f"aikit/{__version__}",
-    }
+    headers = _gateway_auth_headers(key)
     try:
         return requests.get(url, headers=headers, timeout=timeout).status_code
     except requests.exceptions.RequestException:

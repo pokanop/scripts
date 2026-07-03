@@ -96,6 +96,11 @@ Newest entries on top, within each tool.
   (POK-90). Previously it printed the "is not installed. Run 'aikit install …' first."
   error but exited `0`, misleading scripts and CI. The message is unchanged; exit
   code is now `1` via `AikitError`, consistent with unknown-agent validation.
+- **Fix: invalid virtual key no longer silently accepted during model discovery** (POK-88).
+  Gateway HTTP clients (`gateway models`, `gateway on`, passthrough probes, doctor
+  reachability) sent both `Authorization: Bearer` and `x-api-key`. On gateways that
+  enforce Bearer but accept any `x-api-key`, a typo'd key looked valid. Clients now
+  send Bearer only, matching LiteLLM virtual-key semantics.
 
 ### 1.15.4 — 2026-07-02
 - **Fix: five POK-65 agents falsely showed "needs auth" when authenticated** (POK-78).
