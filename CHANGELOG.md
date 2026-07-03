@@ -502,6 +502,24 @@ Newest entries on top, within each tool.
 
 ## pluck
 
+### 1.1.1 — 2026-07-03
+- Fixed a name collision that broke **every** file operation: the command
+  dispatch table (`HANDLERS`) shadowed the format-handler map of the same name,
+  so `handler_for` looked format enums up in the command table and `get`/`set`/
+  `copy`/`merge`/`diff` crashed with an unhandled `KeyError` on all formats.
+  Renamed the format map to `FORMAT_HANDLERS`.
+- `tomli_w` is now imported lazily (like `ruamel.yaml`): reading TOML uses stdlib
+  `tomllib`, so pluck imports and runs its non-TOML-writing commands even when
+  the optional `tomli-w` writer is absent (previously the missing dep crashed the
+  whole module — and its characterization suite — at import). Writing TOML without
+  it now raises a clean `PluckError` instead.
+- Fixed TOML writing: `tomli_w.dumps()` returns `str`, but `save`/`dump_preview`/
+  the `get` display path treated it as `bytes` (`write_bytes` / `.decode()`),
+  raising `TypeError`/`AttributeError` on any TOML write or preview.
+- Added end-to-end `get`/`set` round-trip characterization tests across all four
+  formats so the dispatch → handler → load/save path is covered (the prior suite
+  pinned only pure helpers + `--help`).
+
 ### 1.1.0 — 2026-06-26
 - Added the brand emoji 🪶 to the identity banner (`ICON` now wired into the parser).
 - `doctor` rebuilt on the shared `sk.doctor` renderer (Python / Formats sections).
