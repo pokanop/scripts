@@ -124,7 +124,7 @@ Dashboard features:
 | `/api/install/<key>` | POST | Install an agent |
 | `/api/update/<key>` | POST | Update an agent |
 | `/api/doctor` | GET | Environment diagnostics |
-| `/api/config` | GET/POST | Read/update configuration |
+| `/api/config` | GET/POST | Read config (GET) or deep-merge a partial update (POST) |
 
 ---
 
@@ -142,6 +142,12 @@ aikit config list                    # Show all (secrets masked)
 aikit config get settings.web_port   # Get a specific value
 aikit config set settings.web_port 9000  # Set a value
 ```
+
+`POST /api/config` accepts a partial JSON object and **deep-merges** it into the
+loaded config (same semantics as `aikit config set` for nested keys). Only known
+top-level keys (`version`, `agents`, `settings`) are accepted; unknown keys or
+wrong types return HTTP 400. An empty nested object (e.g. `"agents": {}`) does
+not wipe sibling keys under that section.
 
 ---
 

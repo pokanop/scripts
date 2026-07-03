@@ -1038,6 +1038,22 @@ def save_config(config):
     CONFIG_FILE.chmod(0o600)
 
 
+def _validate_config_patch(patch):
+    """Validate a POST /api/config body. Returns an error string or None."""
+    if not isinstance(patch, dict):
+        return "Request body must be a JSON object"
+    unknown = set(patch) - set(DEFAULT_CONFIG)
+    if unknown:
+        return f"Unknown config keys: {', '.join(sorted(unknown))}"
+    if "version" in patch and not isinstance(patch["version"], int):
+        return "version must be an integer"
+    if "agents" in patch and not isinstance(patch["agents"], dict):
+        return "agents must be an object"
+    if "settings" in patch and not isinstance(patch["settings"], dict):
+        return "settings must be an object"
+    return None
+
+
 def _needs_setup():
     return not SETUP_MARKER.exists()
 
@@ -5061,12 +5077,13 @@ def create_flask_app():
     @app.route("/api/config", methods=["GET", "POST"])
     def api_config():
         if request.method == "POST":
-            try:
-                new_config = request.get_json()
-                save_config(new_config)
-                return jsonify({"ok": True})
-            except Exception as e:
-                return jsonify({"error": str(e)}), 400
+            patch = request.get_json(silent=True)
+            err = _validate_config_patch(patch)
+            if err:
+                return jsonify({"error": err}), 400
+            config = load_config()
+            save_config(_deep_merge(config, patch))
+            return jsonify({"ok": True})
 
         config = load_config()
         def mask(obj):
