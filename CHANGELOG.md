@@ -92,6 +92,10 @@ Newest entries on top, within each tool.
 - Depends on `scriptkit` 1.2.1, which fixes `parallel_map` so Ctrl-C during agent
   discovery (`aikit`, `doctor`, `setup`, first run) no longer hangs until every
   in-flight version check finishes.
+- ⚠ **Fix: `aikit auth <agent>` now exits non-zero when the agent is not installed**
+  (POK-90). Previously it printed the "is not installed. Run 'aikit install …' first."
+  error but exited `0`, misleading scripts and CI. The message is unchanged; exit
+  code is now `1` via `AikitError`, consistent with unknown-agent validation.
 
 ### 1.15.4 — 2026-07-02
 - **Fix: five POK-65 agents falsely showed "needs auth" when authenticated** (POK-78).

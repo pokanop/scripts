@@ -2967,8 +2967,9 @@ def _do_auth_impl(agent_key):
     icon = agent["icon"]
 
     if not detect_agent_bin(agent_key):
-        print_error(f"{icon} {agent['name']} is not installed. Run 'aikit install {agent_key}' first.")
-        return
+        raise AikitError(
+            f"{icon} {agent['name']} is not installed. Run 'aikit install {agent_key}' first."
+        )
 
     auth_type = agent.get("auth_type", "unknown")
     auth_note = agent.get("auth_note", "")

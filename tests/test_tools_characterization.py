@@ -1311,6 +1311,18 @@ def test_aikit_uninstall_prunes_config_entry(tool_loader, monkeypatch, tmp_path)
     assert "kilo" not in saved.get("agents", {})
 
 
+def test_aikit_auth_signals_failure_when_agent_not_installed(tool_loader, monkeypatch):
+    # POK-90: auth for a known-but-not-installed agent must raise AikitError so
+    # `aikit auth` exits non-zero (previously it printed an error and returned 0).
+    m = tool_loader("aikit")
+
+    monkeypatch.setattr(m, "validate_agent_keys", lambda keys: keys)
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: False)
+
+    with pytest.raises(m.AikitError, match="not installed"):
+        m._do_auth_impl("aider")
+
+
 def test_aikit_uninstall_signals_failure_when_no_uninstall_command(tool_loader, monkeypatch):
     # POK-82: an installed agent with no automated uninstall command must make
     # `aikit uninstall` exit non-zero (previously it exited 0 and misled callers).
