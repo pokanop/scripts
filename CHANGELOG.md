@@ -101,6 +101,13 @@ Newest entries on top, within each tool.
   reachability) sent both `Authorization: Bearer` and `x-api-key`. On gateways that
   enforce Bearer but accept any `x-api-key`, a typo'd key looked valid. Clients now
   send Bearer only, matching LiteLLM virtual-key semantics.
+- **Fix: npm agent uninstall registry now matches runtime behavior** (POK-87).
+  `resolve_uninstall_cmd()` checked npm `version_check` before the explicit
+  `uninstall_cmd`, so twelve agents with `"uninstall_cmd": None` still ran
+  `npm uninstall -g` — misleading maintainers who read the registry as
+  "manual-only". Explicit `uninstall_cmd` (including `None`) now wins; the dead
+  `None` rows were removed so npm uninstall is derived from `version_check`
+  when no explicit command is set.
 
 ### 1.15.4 — 2026-07-02
 - **Fix: five POK-65 agents falsely showed "needs auth" when authenticated** (POK-78).
