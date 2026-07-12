@@ -140,13 +140,45 @@ def _require_writer(fmt):
 
 @pytest.mark.parametrize("fmt", ["json", "env", "yaml", "toml"])
 def test_pluck_get_reads_value(tmp_path, fmt):
-    """`pluck get` resolves a path in every format (reading needs no writer)."""
+    """`pluck get` resolves a path in every format, via both output modes."""
     body, key, expected = _PLUCK_SAMPLES[fmt]
     cfg = tmp_path / f"config.{fmt}"
     cfg.write_text(body)
+    # machine-readable mode: exact value on stdout
     proc = _run_pluck("get", "--json", str(cfg), key)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout) == expected
+    # default (rich panel) display mode must also succeed and show the value
+    proc = _run_pluck("get", str(cfg), key)
+    assert proc.returncode == 0, proc.stderr
+    assert str(expected) in proc.stdout
+
+
+def test_pluck_get_toml_display_needs_no_writer(tmp_path):
+    """Default (panel) `get` on TOML must not require the tomli-w *writer*.
+
+    Reading TOML uses stdlib ``tomllib``; only rendering the value back as TOML
+    needed ``tomli_w``. Simulate the writer's absence by shadowing it with a
+    module that fails to import, and assert a plain `get` (no ``--json``) still
+    succeeds — the exact tomli-w-absent venv this issue targets. (``--json``
+    renders via ``json.dumps`` and never needed the writer.)
+    """
+    shim = tmp_path / "no_writer"
+    shim.mkdir()
+    (shim / "tomli_w.py").write_text('raise ImportError("simulated: tomli-w absent")\n')
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('model = "gpt-4o"\n[web]\nport = 8080\n')
+    env = {
+        **os.environ,
+        "NO_COLOR": "1",
+        "PYTHONPATH": str(shim) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+    }
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "pluck"), "get", str(cfg), "web.port"],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "8080" in proc.stdout
 
 
 @pytest.mark.parametrize("fmt", ["json", "env", "yaml", "toml"])
