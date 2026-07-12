@@ -209,4 +209,5 @@ sys.exit(sk.run_cli(main))                      # CliError → 1, Ctrl-C → 130
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).# self-hosted runner
+
