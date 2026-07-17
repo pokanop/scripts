@@ -92,6 +92,35 @@ def test_track_handles_generator(no_color):
     assert list(progress.track(gen, "x")) == [0, 1, 2]
 
 
+def test_track_bytes_yields_all_chunks(no_color):
+    chunks = [b"abc", b"", b"defg"]
+    assert list(progress.track_bytes(chunks, total=7)) == chunks
+
+
+def test_track_bytes_renders_transfer_details(monkeypatch):
+    import io
+
+    from rich.console import Console
+    import scriptkit.style as style
+
+    output = io.StringIO()
+    monkeypatch.setattr(
+        progress,
+        "console",
+        Console(file=output, force_terminal=True, width=100),
+    )
+    style.set_color(True)
+
+    assert list(progress.track_bytes([b"abc", b"def"], "Fetching", total=6)) == [
+        b"abc",
+        b"def",
+    ]
+    rendered = style.strip_ansi(output.getvalue())
+    assert "Fetching" in rendered
+    assert "100%" in rendered
+    assert "6/6 bytes" in rendered
+
+
 def test_parallel_map_results(no_color):
     out = progress.parallel_map(lambda x: x * 2, [1, 2, 3, 4], max_workers=2)
     assert sorted(out) == [2, 4, 6, 8]

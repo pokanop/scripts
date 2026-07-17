@@ -1682,6 +1682,135 @@ def test_medcat_search_menu_ctrl_c_propagates(tool_loader, monkeypatch):
         m.cmd_search(_SearchArgs())
 
 
+def test_medcat_direct_download_uses_shared_byte_progress(
+    tool_loader, monkeypatch, tmp_path
+):
+    m = tool_loader("medcat")
+
+    class Response:
+        status_code = 200
+        headers = {"content-length": "7"}
+
+        @staticmethod
+        def iter_content(chunk_size):
+            assert chunk_size == 65536
+            return iter([b"abc", b"defg"])
+
+    tracked = []
+
+    def track_bytes(chunks, description, total=None):
+        tracked.append((description, total))
+        yield from chunks
+
+    monkeypatch.setattr(m.shutil, "which", lambda name: None)
+    monkeypatch.setattr(m.requests, "get", lambda *a, **k: Response())
+    monkeypatch.setattr(m.sk, "track_bytes", track_bytes)
+    result = m.SearchResult(
+        title="book.epub",
+        source="direct",
+        download_url="https://example.test/book.epub",
+    )
+
+    assert m._download_direct_url(result, str(tmp_path)) is True
+    assert (tmp_path / "book.epub").read_bytes() == b"abcdefg"
+    assert tracked == [("Downloading book.epub", 7)]
+
+
+def test_medcat_archive_download_uses_metadata_size_for_progress(
+    tool_loader, monkeypatch, tmp_path
+):
+    m = tool_loader("medcat")
+
+    class MetadataResponse:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"files": [{"name": "book.epub", "size": "4", "source": "original"}]}
+
+    class DownloadResponse:
+        status_code = 200
+        headers = {}
+
+        @staticmethod
+        def iter_content(chunk_size):
+            assert chunk_size == 65536
+            return iter([b"book"])
+
+    tracked = []
+
+    def get(url, **kwargs):
+        return MetadataResponse() if "/metadata/" in url else DownloadResponse()
+
+    def track_bytes(chunks, description, total=None):
+        tracked.append((description, total))
+        yield from chunks
+
+    monkeypatch.setattr(m.shutil, "which", lambda name: None)
+    monkeypatch.setattr(m.requests, "get", get)
+    monkeypatch.setattr(m.sk, "track_bytes", track_bytes)
+    result = m.SearchResult(
+        title="Book",
+        source="archive",
+        identifier="example",
+        media_type="books",
+    )
+
+    assert m._archive_download(result, str(tmp_path)) is True
+    assert (tmp_path / "book.epub").read_bytes() == b"book"
+    assert tracked == [("Downloading book.epub", 4)]
+
+
+def test_medcat_youtube_download_keeps_native_progress_visible(
+    tool_loader, monkeypatch, tmp_path
+):
+    m = tool_loader("medcat")
+    calls = []
+
+    class Completed:
+        returncode = 0
+
+    def run(cmd, **kwargs):
+        calls.append(kwargs)
+        return Completed()
+
+    monkeypatch.setattr(m.shutil, "which", lambda name: "/usr/bin/yt-dlp")
+    monkeypatch.setattr(m.subprocess, "run", run)
+    result = m.SearchResult(
+        title="Video",
+        source="youtube",
+        download_url="https://youtube.test/watch?v=1",
+    )
+
+    assert m._youtube_download(result, str(tmp_path)) is True
+    assert calls == [{"timeout": 600}]
+
+
+def test_medcat_archive_cli_keeps_native_progress_visible(
+    tool_loader, monkeypatch, tmp_path
+):
+    m = tool_loader("medcat")
+    calls = []
+
+    class Completed:
+        returncode = 0
+
+    def run(cmd, **kwargs):
+        calls.append(kwargs)
+        return Completed()
+
+    monkeypatch.setattr(m.shutil, "which", lambda name: "/usr/bin/ia")
+    monkeypatch.setattr(m.subprocess, "run", run)
+    result = m.SearchResult(
+        title="Book",
+        source="archive",
+        identifier="example",
+    )
+
+    assert m._archive_download(result, str(tmp_path)) is True
+    assert calls == [{"timeout": 300}]
+
+
 # --- voxtract --------------------------------------------------------------
 def test_voxtract_parse_time(tool_loader):
     m = tool_loader("voxtract")

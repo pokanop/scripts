@@ -81,6 +81,8 @@ import scriptkit as sk
 
 ### Progress (`scriptkit.progress`)
 - `sk.track(iterable, "desc")` — iterate with a spinner+bar+M/N+elapsed (rich) or plainly.
+- `sk.track_bytes(chunks, "Downloading", total=bytes)` — stream byte chunks with a
+  spinner, bar, transferred size, speed, and ETA; omitted `total` pulses indeterminately.
 - `sk.status("message")` — context manager spinner for indeterminate work.
 - `sk.parallel_map(fn, items, "desc", max_workers=8)` — threaded map with combined progress.
 - `sk.bar(pct, width=30)` — a pure-string `[████░░░] 50%` for inline `\r` updates.

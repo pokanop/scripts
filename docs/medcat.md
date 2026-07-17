@@ -1,4 +1,4 @@
-# 📚 medcat — Media Stack Ingest Tool · v2.3.1
+# 📚 medcat — Media Stack Ingest Tool · v2.4.0
 
 **Ingest media files into your media stack with metadata enrichment.**
 
@@ -67,6 +67,10 @@ The `search` command also auto-detects URLs — paste a YouTube link as the sear
 ```bash
 medcat search https://youtube.com/watch?v=... --type music
 ```
+
+Downloads show live progress when the source supports it. Direct HTTP and
+Internet Archive transfers display bytes, speed, and ETA through `scriptkit`;
+`wget`, `yt-dlp`, and `ia` retain their native progress displays.
 
 ### URL Routing Table
 

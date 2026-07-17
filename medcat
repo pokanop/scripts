@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-medcat — Media Stack Ingest Tool  v2.3.1
+medcat — Media Stack Ingest Tool  v2.4.0
 Ingest media files into your media stack with metadata enrichment.
 
 Supported types: books (EPUB/PDF), comics (CBZ/CBR), audiobooks (M4B/MP3),
@@ -95,7 +95,7 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
 
-__version__ = "2.3.1"
+__version__ = "2.4.0"
 
 import scriptkit as sk
 
@@ -2593,13 +2593,13 @@ def _archive_download(result: SearchResult, dest_dir: str = None) -> bool:
         try:
             proc = subprocess.run(
                 ["ia", "download", "--destdir", dest, identifier],
-                capture_output=True, text=True, timeout=300,
+                timeout=300,
             )
             if proc.returncode == 0:
                 console.print(f"[green]  ✓ Downloaded to {escape(dest)}[/]")
                 return True
             else:
-                console.print(f"[yellow]  ⚠ ia CLI failed: {proc.stderr[:200]}[/]")
+                console.print(f"[yellow]  ⚠ ia CLI failed (exit {proc.returncode})[/]")
         except FileNotFoundError:
             pass
 
@@ -2657,11 +2657,21 @@ def _archive_download(result: SearchResult, dest_dir: str = None) -> bool:
             return False
 
         out_path = os.path.join(dest, target_file)
+        content_length = r.headers.get("content-length", "")
+        total = int(content_length) if content_length.isdigit() else None
+        if total is None:
+            file_info = next((f for f in files if f.get("name") == target_file), {})
+            archive_size = str(file_info.get("size", ""))
+            total = int(archive_size) if archive_size.isdigit() else None
+
         with open(out_path, "wb") as f:
-            downloaded = 0
-            for chunk in r.iter_content(chunk_size=8192):
-                f.write(chunk)
-                downloaded += len(chunk)
+            for chunk in sk.track_bytes(
+                r.iter_content(chunk_size=65536),
+                f"Downloading {target_file}",
+                total=total,
+            ):
+                if chunk:
+                    f.write(chunk)
 
         console.print(f"[green]  ✓ Downloaded to {escape(out_path)}[/]")
         return True
@@ -2801,12 +2811,14 @@ def _youtube_download(result: SearchResult, dest_dir: str = None,
 
     try:
         console.print("[dim]  Downloading from YouTube...[/]")
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        # Inherit the terminal so yt-dlp's native animated byte progress remains
+        # visible. Capturing both streams hid all progress until completion.
+        proc = subprocess.run(cmd, timeout=600)
         if proc.returncode == 0:
             console.print(f"[green]  ✓ Downloaded to {escape(dest)}[/]")
             return True
         else:
-            console.print(f"[red]  ✗ yt-dlp failed: {proc.stderr[:200]}[/]")
+            console.print(f"[red]  ✗ yt-dlp failed (exit {proc.returncode})[/]")
             return False
     except subprocess.TimeoutExpired:
         console.print("[red]  ✗ Download timed out[/]")
@@ -3238,18 +3250,16 @@ def _download_direct_url(result: SearchResult, dest_dir: str) -> bool:
             console.print(f"[red]  ✗ Download failed: HTTP {r.status_code}[/]")
             return False
 
-        total = int(r.headers.get("content-length", 0))
-        downloaded = 0
-        last_pct = -1
+        content_length = r.headers.get("content-length", "")
+        total = int(content_length) if content_length.isdigit() else result.size
         with open(out_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=65536):
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total:
-                    pct = int(downloaded / total * 100)
-                    if pct >= last_pct + 10 or pct == 100:
-                        console.print(f"[dim]    {pct}% ({_human_size(downloaded)} / {_human_size(total)})[/]")
-                        last_pct = pct
+            for chunk in sk.track_bytes(
+                r.iter_content(chunk_size=65536),
+                f"Downloading {output_name}",
+                total=total,
+            ):
+                if chunk:
+                    f.write(chunk)
 
         console.print(f"[green]  ✓ Downloaded to {escape(out_path)}[/]")
         return True
