@@ -75,6 +75,46 @@ def track(iterable, description: str = "Working", total: int | None = None):
         yield from iterable
 
 
+def track_bytes(chunks, description: str = "Downloading", total: int | None = None):
+    """Iterate byte chunks with download size, speed, and time remaining.
+
+    ``total`` may be omitted when the source does not expose a content length;
+    Rich then renders an indeterminate pulsing bar while still showing bytes and
+    transfer speed. Minimal or non-color environments simply yield the chunks.
+    """
+    if total is not None:
+        total = max(0, int(total)) or None
+
+    if HAS_RICH and console is not None and style.use_color():
+        from rich.progress import (
+            BarColumn,
+            DownloadColumn,
+            Progress,
+            SpinnerColumn,
+            TaskProgressColumn,
+            TextColumn,
+            TimeRemainingColumn,
+            TransferSpeedColumn,
+        )
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            DownloadColumn(binary_units=True),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task(description, total=total)
+            for chunk in chunks:
+                yield chunk
+                progress.update(task, advance=len(chunk))
+    else:
+        yield from chunks
+
+
 def parallel_map(fn, items, description: str = "Working", max_workers: int = 8):
     """Run ``fn`` over ``items`` concurrently, showing combined progress.
 

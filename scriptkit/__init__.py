@@ -58,7 +58,7 @@ from .console import (
 )
 from .console import console as rich_console
 from .proc import Result, require, run, which
-from .progress import bar, parallel_map, status, track
+from .progress import bar, parallel_map, status, track, track_bytes
 from .style import ICONS, icon, set_color, strip_ansi, styled, use_color
 from .tables import table
 from .text import (
@@ -69,7 +69,7 @@ from .text import (
     truncate,
 )
 
-__version__ = "1.2.1"
+__version__ = "1.3.0"
 
 __all__ = [
     # submodules
@@ -87,7 +87,7 @@ __all__ = [
     "success", "error", "warning", "info", "detail", "step", "header",
     "elapsed", "kv", "ask", "confirm", "rich_console", "err_console", "HAS_RICH",
     # progress
-    "bar", "track", "status", "parallel_map",
+    "bar", "track", "track_bytes", "status", "parallel_map",
     # tables
     "table",
     # config

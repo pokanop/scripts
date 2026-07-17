@@ -10,6 +10,10 @@ Newest entries on top, within each tool.
 
 ## scriptkit
 
+### 1.3.0 — 2026-07-16
+- Added reusable `sk.track_bytes(chunks, description, total=...)` download
+  progress with transferred size, speed, ETA, and indeterminate-length support.
+
 ### 1.2.1 — 2026-07-03
 - **Fix: `parallel_map` now honors Ctrl-C promptly instead of hanging** (POK-85).
   It ran on a `ThreadPoolExecutor` whose context-manager exit blocks until every
@@ -496,6 +500,11 @@ Newest entries on top, within each tool.
 ---
 
 ## medcat
+
+### 2.4.0 — 2026-07-16
+- `grab` now shows live download progress across its transfer paths. Direct HTTP
+  and Internet Archive streams use the shared `sk.track_bytes` UI, while native
+  `yt-dlp` and `ia` progress is no longer hidden by subprocess capture.
 
 ### 2.3.1 — 2026-06-28
 - **Fixed `search` download menu doing nothing on selection.** Internet Archive
