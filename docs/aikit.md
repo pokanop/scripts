@@ -1,6 +1,6 @@
 # 🤖 aikit — AI Coding Agent CLI Installer & Manager
 
-**Install, update, authenticate, and manage 31 AI coding agent CLIs from one tool.**
+**Install, update, authenticate, and manage 34 AI coding agent CLIs from one tool.**
 
 `aikit` · Python 3 · `rich` · `flask` · `requests`
 
@@ -25,7 +25,7 @@ aikit setup
 
 ---
 
-## Agents (31)
+## Agents (34)
 
 | # | Agent | Install | Auth |
 |---|-------|---------|------|
@@ -60,6 +60,13 @@ aikit setup
 | 29 | 🔋 **Auggie** | `npm` | `auggie login` (Augment account OAuth) |
 | 30 | 🏭 **Droid** | `curl` script | `droid` on first use (Factory AI OAuth), or `FACTORY_API_KEY` |
 | 31 | 🖥️ **Open Interpreter** | `pip` | Provider API keys (`OPENAI_API_KEY`, etc.) or first-run prompt; `--local` for Ollama |
+| 32 | 🧬 **MiMo Code** | `curl` script / `npm` | First-run wizard in `mimo` (MiMo Auto free, Xiaomi OAuth, Claude Code import, or any OpenAI-compatible API) |
+| 33 | 🥧 **Oh My Pi** | `curl` script / `npm` | `/login` in `omp` (subscription OAuth) or provider env vars (Anthropic/OpenAI/Gemini/Groq/xAI/OpenRouter) |
+| 34 | 🌊 **Mistral Vibe** | `curl` script / `pip` | `vibe` first-run wizard (browser OAuth to a Mistral account) or `MISTRAL_API_KEY` |
+
+### Not managed
+
+- **ZCode** (Z.ai / Zhipu) — no public CLI installer; distributed only as a signed desktop app, with no `curl|bash`, npm, or pip distribution channel. aikit's install/update/uninstall contract has no clean target for it. Filed as a known gap so searches land here; revisit if Z.ai ships a public CLI.
 
 ---
 
@@ -71,7 +78,7 @@ aikit setup
 | `aikit install [agents...]` | Install agents (multi-select picker if none) |
 | `aikit update [agents...]` | Update agents (all installed if none) |
 | `aikit uninstall [agent...]` | Remove agents |
-| `aikit list` | Status table of all 31 agents |
+| `aikit list` | Status table of all 34 agents |
 | `aikit auth [agent]` | Guided authentication setup |
 | `aikit doctor` | Diagnose environment and agent health |
 | `aikit serve` | Start web dashboard |
@@ -90,7 +97,7 @@ Select agents to install
    2. [ ] 🛸 Antigravity
    3. [X] 🖱️ Cursor CLI
   ...
-  Selected: 1/31  cursor
+  Selected: 1/34  cursor
 ```
 
 Press `Space` or enter numbers to toggle. Press `Enter` to confirm. Press `q` to cancel.
@@ -181,7 +188,7 @@ logged.
 
 ```
 aikit                          # Single-file Python script (~1,600 lines)
-├── Agent registry             # 31 agents, each with platform-aware install commands
+├── Agent registry             # 34 agents, each with platform-aware install commands
 ├── Subprocess runner          # Install/update/uninstall execution
 ├── Config system              # JSON-based, three-tier loading, env var overrides
 ├── Rich TUI                   # Tables, panels, interactive multi-select picker
