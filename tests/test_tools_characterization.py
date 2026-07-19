@@ -530,7 +530,7 @@ def test_aikit_validate_agent_keys_ok(tool_loader):
 
 def test_aikit_new_agent_registry_entries(tool_loader):
     m = tool_loader("aikit")
-    assert len(m.AGENTS) == 31
+    assert len(m.AGENTS) == 34
     goose = m.AGENTS["goose"]
     assert goose["bin"] == "goose"
     assert goose["update_cmd"] == "goose update"
@@ -799,6 +799,8 @@ def test_aikit_pip_agent_uninstall_cmds(tool_loader):
         ("llm", "llm", "llm"),
         ("sgpt", "shell-gpt", "sgpt"),
         ("openinterpreter", "open-interpreter", "interpreter"),
+        # POK-313: Mistral Vibe — pip-installed, explicit pip_agent_uninstall_cmd.
+        ("vibe", "mistral-vibe", "vibe"),
     ]
     for key, pip_pkg, bin_name in cases:
         cmd = m.resolve_uninstall_cmd(m.AGENTS[key])
@@ -847,6 +849,9 @@ def test_aikit_npm_agent_uninstall_derived_from_version_check(tool_loader):
         ("gemini", "@google/gemini-cli"),
         ("continue", "@continuedev/cli"),
         ("auggie", "@augmentcode/auggie"),
+        # POK-313: new AgentPeek-gap agents — npm-backed, derive uninstall.
+        ("mimo", "@mimo-ai/cli"),
+        ("omp", "@oh-my-pi/pi-coding-agent"),
     ]
     for key, package in npm_agents:
         agent = m.AGENTS[key]

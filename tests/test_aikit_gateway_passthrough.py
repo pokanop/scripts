@@ -170,7 +170,9 @@ def test_static_coverage_is_the_declared_baseline(aikit):
     counts: dict = {}
     for c in cov.values():
         counts[c["state"]] = counts.get(c["state"], 0) + 1
-    assert counts == {"renderer": 12, "env": 7, "pending": 4, "unsupported": 8}
+    # POK-313: +3 pending (mimo/omp/vibe — AgentPeek-gap agents without a verified
+    # env/renderer yet; classified, not silently defaulted to `unclassified`).
+    assert counts == {"renderer": 12, "env": 7, "pending": 7, "unsupported": 8}
     assert cov["cursor"]["state"] == "unsupported"
 
 

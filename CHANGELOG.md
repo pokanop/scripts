@@ -79,6 +79,41 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.16.0 — 2026-07-19
+- **Add three AI coding agents from the AgentPeek gap analysis (POK-313).**
+  AgentPeek tracks 22 coding agents; aikit now manages all but one of them
+  (ZCode — see below). Each new entry follows the existing registry pattern
+  and lights up install / update / version-check / uninstall / auth-discovery
+  end-to-end, no half-wired fields.
+  - **MiMo Code** (`mimo`) — Xiaomi's OpenCode fork. Curl installer at
+    `https://mimo.xiaomi.com/install` (Linux/macOS) and PowerShell
+    `install.ps1` (Windows), or `npm i -g @mimo-ai/cli`. Version-check + npm
+    uninstall derive from the `@mimo-ai/cli` package. `discover_auth` reads
+    `~/.local/share/mimocode/auth.json` (Linux) or
+    `~/Library/Application Support/mimocode/auth.json` (macOS).
+  - **Oh My Pi** (`omp`) — can1357's Pi fork with batteries-included coding
+    workflow. Curl installer at `https://omp.sh/install` (Linux/macOS) and
+    PowerShell `install.ps1` (Windows), or `npm i -g @oh-my-pi/pi-coding-agent`.
+    Version-check + npm uninstall derive from `@oh-my-pi/pi-coding-agent`.
+    `discover_auth` reads `~/.omp/agent/auth.json` (Pi-compatible layout).
+  - **Mistral Vibe** (`vibe`) — Mistral AI's terminal coding agent. Curl
+    installer at `https://mistral.ai/vibe/install.sh` (Linux/macOS) or
+    `pip install mistral-vibe` (any platform, Windows default). Version-check
+    via PyPI `mistral-vibe`. Explicit `pip_agent_uninstall_cmd` covers
+    pip/pipx/uv + binary cleanup. `discover_auth` reads `~/.vibe/` and the
+    generic `MISTRAL_API_KEY` env var.
+- **Gateway coverage: classify the 3 new agents as `pending`.** None has a
+  verified env-var base-URL override or native renderer yet, so they sit
+  visibly in `pending` (each with a `reason` naming the gap a future renderer
+  or env wire would close) instead of falling into the silent-default
+  `unclassified` bucket. Bucket counts: `renderer` 12, `env` 7, `pending` 4→7,
+  `unsupported` 8.
+- **ZCode intentionally not managed.** Z.ai ships ZCode only as a signed
+  desktop app — no `curl|bash`, npm, or pip distribution channel — so it does
+  not fit aikit's install/update/uninstall contract. Documented as a known gap
+  in `docs/aikit.md` so searches land somewhere instead of silence. Revisit if
+  Z.ai ships a public CLI.
+
 ### 1.15.5 — 2026-07-03
 - **Fix: Ctrl-C during `aikit update` (and `install`) now exits cleanly and kills
   the whole update tree** (POK-85). `run()` executed each update/install command

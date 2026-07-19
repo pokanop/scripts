@@ -149,7 +149,7 @@ Pluck values from config files by dot path — copy, merge, read, set, and diff 
 
 **AI coding agent CLI manager**
 
-Install, update, authenticate, and manage 31 AI coding agent CLIs from one tool — interactive picker, status dashboard, and web UI.
+Install, update, authenticate, and manage 34 AI coding agent CLIs from one tool — interactive picker, status dashboard, and web UI.
 
 **Gateway:** `aikit gateway on` routes every OpenAI-compatible tool/SDK through one LiteLLM-style gateway with a single virtual key — env block **plus** native per-tool config (opencode, codex, crush, goose, pi, hermes, aider, …), never clobbering an existing config — then `aikit gateway off` restores everything **pristine**. See **[gateway docs](docs/aikit-gateway.md)**.
 

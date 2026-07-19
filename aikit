@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.15.5
-Install, update, authenticate, and manage 31 AI coding agent CLIs from one tool.
+aikit — AI Coding Agent CLI Installer & Manager  v1.16.0
+Install, update, authenticate, and manage 34 AI coding agent CLIs from one tool.
 
 Architecture:
     Agent registry → platform-aware install → auth multiplexing → web dashboard
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.15.5"
+__version__ = "1.16.0"
 
 import scriptkit as sk
 
@@ -253,7 +253,7 @@ def uninstall_removes_vendor_data(uninstall_cmd):
 
 
 # =============================================================================
-# Agent Registry — 31 coding agents, platform-aware install commands
+# Agent Registry — 34 coding agents, platform-aware install commands
 # =============================================================================
 
 _CURRENT_PLATFORM = platform.system()  # "Linux", "Darwin", "Windows"
@@ -453,6 +453,28 @@ AGENTS = {
         "requires": ["node", "npm"],
         "tags": ["qwen", "alibaba", "open-source", "multi-protocol"],
     },
+    "mimo": {
+        "name": "MiMo Code",
+        "bin": "mimo",
+        "vendor": "Xiaomi MiMo",
+        "homepage": "https://mimo.xiaomi.com/coder",
+        "icon": "🧬",
+        "install": {
+            "Linux": "curl -fsSL https://mimo.xiaomi.com/install | bash",
+            "Darwin": "curl -fsSL https://mimo.xiaomi.com/install | bash",
+            "Windows": 'powershell -ep Bypass -c "irm https://mimo.xiaomi.com/install.ps1 | iex"',
+        },
+        "version_cmd": "mimo --version",
+        "update_cmd": None,
+        "update_via_install": True,
+        "path_markers": ["@mimo-ai/cli", "/.config/mimocode", "/.mimocode/"],
+        "version_check": {"type": "npm", "package": "@mimo-ai/cli"},
+        "auth_type": "account_or_byok",
+        "auth_env_vars": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"],
+        "auth_note": "Run 'mimo' for the first-run wizard: MiMo Auto (free), Xiaomi MiMo Platform OAuth, 'Import from Claude Code', or any OpenAI-compatible API. Config lives under ~/.config/mimocode/mimocode.json; auth under ~/.local/share/mimocode/auth.json.",
+        "requires": ["node", "npm"],
+        "tags": ["mimo", "xiaomi", "opencode-fork", "memory", "self-improving"],
+    },
     "qodo": {
         "name": "Qodo Gen CLI",
         "bin": "qodo",
@@ -525,6 +547,30 @@ AGENTS = {
         "auth_note": "Run 'grok login' for browser OAuth ('grok login --device-auth' on headless/SSH). Or set XAI_API_KEY for scripts/CI.",
         "requires": ["curl"],
         "tags": ["grok", "xai", "multi-agent", "agent"],
+    },
+    "vibe": {
+        "name": "Mistral Vibe",
+        "bin": "vibe",
+        "bin_aliases": ["vibe-acp"],
+        "vendor": "Mistral AI",
+        "homepage": "https://mistral.ai/products/vibe/code",
+        "icon": "🌊",
+        "install": {
+            "Linux": "curl -LsSf https://mistral.ai/vibe/install.sh | bash",
+            "Darwin": "curl -LsSf https://mistral.ai/vibe/install.sh | bash",
+            "Windows": "pip install mistral-vibe",
+        },
+        "version_cmd": "vibe --version",
+        "update_cmd": "pip install --upgrade mistral-vibe --break-system-packages 2>/dev/null || pip install --upgrade mistral-vibe",
+        "path_markers": ["/.vibe/", "mistral_vibe", "mistral-vibe"],
+        "version_check": {"type": "pip", "package": "mistral-vibe"},
+        "uninstall_cmd": pip_agent_uninstall_cmd("mistral-vibe", bin_name="vibe", uv_tool="mistral-vibe"),
+        "auth_type": "oauth_browser",
+        "auth_env_vars": ["MISTRAL_API_KEY"],
+        "auth_cmd": "vibe --setup",
+        "auth_note": "Run 'vibe' for first-run setup wizard (browser OAuth to a Mistral account), or set MISTRAL_API_KEY from https://console.mistral.ai. Sessions and config live under ~/.vibe/.",
+        "requires": ["python3", "pip"],
+        "tags": ["vibe", "mistral", "coding-agent", "tui", "devstral"],
     },
     "aider": {
         "name": "Aider",
@@ -623,6 +669,28 @@ AGENTS = {
         "auth_note": "Run 'pi' then '/login' for subscription OAuth (Claude, ChatGPT, Copilot) or API keys. Or set provider env vars.",
         "requires": ["node", "npm"],
         "tags": ["pi", "minimal", "customizable", "extensions", "self-modifying"],
+    },
+    "omp": {
+        "name": "Oh My Pi",
+        "bin": "omp",
+        "vendor": "can1357",
+        "homepage": "https://omp.sh",
+        "icon": "🥧",
+        "install": {
+            "Linux": "curl -fsSL https://omp.sh/install | sh",
+            "Darwin": "curl -fsSL https://omp.sh/install | sh",
+            "Windows": 'powershell -c "irm https://omp.sh/install.ps1 | iex"',
+        },
+        "version_cmd": "omp --version",
+        "update_cmd": None,
+        "update_via_install": True,
+        "path_markers": ["@oh-my-pi/pi-coding-agent", "/.omp/"],
+        "version_check": {"type": "npm", "package": "@oh-my-pi/pi-coding-agent"},
+        "auth_type": "account_or_byok",
+        "auth_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "XAI_API_KEY", "OPENROUTER_API_KEY"],
+        "auth_note": "Run 'omp' then '/login' for subscription OAuth (Anthropic, OpenAI Codex, GitHub Copilot, Cursor, Kimi, etc.), or set provider env vars. Config lives under ~/.omp/agent/.",
+        "requires": ["node", "npm"],
+        "tags": ["omp", "oh-my-pi", "pi-fork", "lsp", "dap", "subagents", "byok"],
     },
     "plandex": {
         "name": "Plandex",
@@ -2675,7 +2743,55 @@ def discover_auth(agent_key):
                         return {"auth_configured": True, "method": "config_dir", "source": str(pi_path)}
                 except OSError:
                     pass
-    
+
+    # Oh My Pi: ~/.omp/agent/auth.json (Pi-compatible fork) or ~/.omp profile dir.
+    # Distinct from upstream Pi — omp has its own runtime and session store.
+    if agent_key == "omp":
+        auth_file = home / ".omp" / "agent" / "auth.json"
+        if auth_file.exists() and auth_file.stat().st_size > 0:
+            try:
+                data = json.loads(auth_file.read_text())
+                if data:
+                    return {"auth_configured": True, "method": "cred_file", "source": str(auth_file)}
+            except (json.JSONDecodeError, OSError):
+                pass
+        omp_agent = home / ".omp" / "agent"
+        if omp_agent.is_dir():
+            try:
+                if any(omp_agent.iterdir()):
+                    return {"auth_configured": True, "method": "config_dir", "source": str(omp_agent)}
+            except OSError:
+                pass
+
+    # MiMo Code: ~/.local/share/mimocode/auth.json (XDG data) on Linux, or
+    # ~/Library/Application Support/mimocode/auth.json on macOS; MIMOCODE_HOME
+    # relocates both. Config lives separately under ~/.config/mimocode.
+    if agent_key == "mimo":
+        for auth_path in (
+            home / ".local" / "share" / "mimocode" / "auth.json",
+            home / "Library" / "Application Support" / "mimocode" / "auth.json",
+        ):
+            if auth_path.exists() and auth_path.stat().st_size > 0:
+                try:
+                    data = json.loads(auth_path.read_text())
+                    if data:
+                        return {"auth_configured": True, "method": "cred_file", "source": str(auth_path)}
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+    # Mistral Vibe: ~/.vibe/ holds session logs and the persisted auth/profile
+    # state from `vibe --setup` (browser OAuth or API key). $MISTRAL_API_KEY
+    # covers headless/BYOK and is checked generically above.
+    if agent_key == "vibe":
+        vibe_dir = home / ".vibe"
+        if vibe_dir.is_dir():
+            try:
+                if any(vibe_dir.iterdir()):
+                    return {"auth_configured": True, "method": "config_dir", "source": str(vibe_dir)}
+            except OSError:
+                pass
+
+
     # Aider: Python tool with API keys via env vars already covered above
     
     # Blackbox: npm tool — ~/.blackboxai or npm config
@@ -4035,6 +4151,16 @@ GATEWAY_COVERAGE = {
                   "reason": "auth is proprietary BLACKBOX_API_KEY via 'blackbox configure' (not a provider var the env layer sets); no verified OPENAI_BASE_URL support — Stage-7: probe live install for a settable base_url (likely renderer)"},
     "qodo":      {"state": COVERAGE_PENDING,
                   "reason": "Qodo-cloud auth (QODO_API_KEY / ~/.qodo/auth.key); no verified OPENAI_BASE_URL or ANTHROPIC_BASE_URL for LLM routing — needs a renderer if BYOK endpoint override is confirmed"},
+    # POK-313: new AgentPeek-gap agents. None have a verified env-var base-URL
+    # override or a native renderer yet, so they stay `pending` (visibly tracked)
+    # rather than `unclassified` (silent default). Each `reason` records the path
+    # a future renderer or env wire would touch, so the gap stays actionable.
+    "mimo":      {"state": COVERAGE_PENDING,
+                  "reason": "OpenCode fork with provider-agnostic BYOK; config under ~/.config/mimocode/mimocode.json — needs a renderer if OPENAI_BASE_URL / ANTHROPIC_BASE_URL override is confirmed"},
+    "omp":       {"state": COVERAGE_PENDING,
+                  "reason": "Pi fork with provider-agnostic BYOK; config under ~/.omp/agent/models.yml — needs a renderer if OPENAI_BASE_URL / ANTHROPIC_BASE_URL override is confirmed"},
+    "vibe":      {"state": COVERAGE_PENDING,
+                  "reason": "Mistral Vibe stores creds locally under ~/.vibe/; no verified OPENAI_BASE_URL / MISTRAL_BASE_URL override for gateway routing — needs a renderer or env wire"},
     # -- unsupported / passthrough-candidate: first-party CLIs. Each declares its
     #    native protocol + the LiteLLM passthrough route that wraps it (verified against
     #    llm_passthrough_endpoints.py), the auth var the tool reads, and whether the
