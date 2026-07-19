@@ -102,6 +102,27 @@ Newest entries on top, within each tool.
     via PyPI `mistral-vibe`. Explicit `pip_agent_uninstall_cmd` covers
     pip/pipx/uv + binary cleanup. `discover_auth` reads `~/.vibe/` and the
     generic `MISTRAL_API_KEY` env var.
+- **Review follow-up: explicit `uninstall_cmd` for `mimo` + `omp.** The curl
+  installers don't use npm under the hood — MiMo Code's ships a self-contained
+  binary at `~/.mimocode/bin/mimo`, and Oh My Pi's runs `bun install -g` (or
+  drops a prebuilt binary). The npm-derived `npm uninstall -g …` would have
+  been a no-op against aikit's own install, leaving the vendor dirs in place.
+  Added `mimo_uninstall_cmd()` (Kimi-style: removes the binary at its real
+  install path + the XDG config/data/cache dirs) and `omp_uninstall_cmd()`
+  (Grok-style: removes `~/.local/bin/omp` + `~/.omp/`). Both entries moved
+  out of `test_aikit_npm_agent_uninstall_derived_from_version_check` into a
+  new `test_aikit_curl_installed_npm_version_check_agents_have_explicit_uninstall`
+  that pins the contract (explicit `uninstall_cmd`, npm version_check retained
+  for update checks, derived `npm uninstall -g …` NOT present).
+- **Review follow-up: `mimo` entry polish.** Dropped `-ep Bypass` from the
+  Windows install (no local `.ps1` to bypass ExecutionPolicy for — `irm | iex`
+  streams it). Aligned `path_markers` with what `discover_auth` and the curl
+  installer actually touch, added `install_paths: ["~/.mimocode/bin/mimo"]`
+  so `aikit` resolves the curl-installed binary even when not on PATH
+  (matches `kimi`), and switched `requires` to `curl` (the curl installer
+  doesn't need node/npm). Dropped the inaccurate `MIMOCODE_HOME relocates
+  both` claim in `discover_auth` (the branch checks default XDG paths; it
+  doesn't honor `MIMOCODE_HOME`, and the comment now says so).
 - **Gateway coverage: classify the 3 new agents as `pending`.** None has a
   verified env-var base-URL override or native renderer yet, so they sit
   visibly in `pending` (each with a `reason` naming the gap a future renderer

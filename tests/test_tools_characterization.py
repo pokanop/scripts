@@ -849,15 +849,40 @@ def test_aikit_npm_agent_uninstall_derived_from_version_check(tool_loader):
         ("gemini", "@google/gemini-cli"),
         ("continue", "@continuedev/cli"),
         ("auggie", "@augmentcode/auggie"),
-        # POK-313: new AgentPeek-gap agents — npm-backed, derive uninstall.
-        ("mimo", "@mimo-ai/cli"),
-        ("omp", "@oh-my-pi/pi-coding-agent"),
     ]
     for key, package in npm_agents:
         agent = m.AGENTS[key]
         assert "uninstall_cmd" not in agent, key
         cmd = m.resolve_uninstall_cmd(agent)
         assert cmd and f"npm uninstall -g {package}" in cmd, key
+
+
+def test_aikit_curl_installed_npm_version_check_agents_have_explicit_uninstall(tool_loader):
+    # POK-313 review: curl-installed agents that ALSO publish to npm (and so use
+    # the npm version_check) must NOT rely on the derived `npm uninstall -g` —
+    # the curl installer didn't install via npm, so the derived uninstall would
+    # be a no-op against aikit's own install. Each such agent sets an explicit
+    # `uninstall_cmd` that removes the real install footprint (vendor dir + binary).
+    m = tool_loader("aikit")
+    cases = [
+        # (key,        expected_in_cmd,                       vendor_dir_in_cmd)
+        ("mimo", ".mimocode/bin/mimo", ".mimocode"),
+        ("omp",  ".local/bin/omp",      ".omp"),
+    ]
+    for key, expected_path_bit, vendor_dir in cases:
+        agent = m.AGENTS[key]
+        # 1. Explicit uninstall_cmd is set (not derived from the npm version_check).
+        assert "uninstall_cmd" in agent, f"{key} must set explicit uninstall_cmd"
+        # 2. version_check is still npm (we want the npm registry for update checks).
+        assert agent["version_check"]["type"] == "npm", key
+        # 3. resolve_uninstall_cmd runs the callable and returns the real cmd.
+        cmd = m.resolve_uninstall_cmd(agent)
+        assert cmd and expected_path_bit in cmd, f"{key}: {cmd!r} missing {expected_path_bit}"
+        assert vendor_dir in cmd, f"{key}: {cmd!r} missing vendor dir {vendor_dir}"
+        # 4. Critically: the derived `npm uninstall -g …` is NOT what we run.
+        npm_pkg = agent["version_check"]["package"]
+        assert f"npm uninstall -g {npm_pkg}" not in cmd, (
+            f"{key}: curl install wasn't npm-based; derived npm uninstall would no-op")
 
 
 def test_aikit_explicit_uninstall_cmd_none_blocks_npm_derivation(tool_loader):

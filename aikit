@@ -214,6 +214,37 @@ def kimi_uninstall_cmd():
     ])
 
 
+def mimo_uninstall_cmd():
+    """MiMo Code: curl installer drops a self-contained binary at ~/.mimocode/bin/
+    (not an npm install despite the npm version_check), so derive nothing — remove
+    that binary plus the XDG config/data dirs the agent and aikit's discover_auth
+    reference (~/.config/mimocode, ~/.local/share/mimocode, ~/Library/.../mimocode)."""
+    return " ; ".join([
+        "rm -f $HOME/.mimocode/bin/mimo $HOME/.mimocode/bin/mimo.bak",
+        binary_uninstall_cmd(
+            "mimo",
+            vendor_dirs=[
+                "$HOME/.mimocode",
+                "$HOME/.config/mimocode",
+                "$HOME/.local/share/mimocode",
+                "$HOME/Library/Application Support/mimocode",
+                "$HOME/.cache/mimocode",
+            ],
+        ),
+    ])
+
+
+def omp_uninstall_cmd():
+    """Oh My Pi: curl installer runs `bun install -g @oh-my-pi/pi-coding-agent`
+    (or drops a prebuilt binary) — not an npm install despite the npm version_check,
+    so derive nothing. Remove the ~/.local/bin/omp binary and the ~/.omp profile
+    tree the agent and aikit's discover_auth reference."""
+    return binary_uninstall_cmd(
+        "omp",
+        vendor_dirs=["$HOME/.omp"],
+    )
+
+
 def grok_uninstall_cmd():
     """Grok Build: remove ~/.grok data dir and PATH shims (incl. shared 'agent' alias)."""
     return binary_uninstall_cmd(
@@ -462,17 +493,23 @@ AGENTS = {
         "install": {
             "Linux": "curl -fsSL https://mimo.xiaomi.com/install | bash",
             "Darwin": "curl -fsSL https://mimo.xiaomi.com/install | bash",
-            "Windows": 'powershell -ep Bypass -c "irm https://mimo.xiaomi.com/install.ps1 | iex"',
+            "Windows": 'powershell -c "irm https://mimo.xiaomi.com/install.ps1 | iex"',
         },
         "version_cmd": "mimo --version",
         "update_cmd": None,
         "update_via_install": True,
-        "path_markers": ["@mimo-ai/cli", "/.config/mimocode", "/.mimocode/"],
+        # Curl installer ships a self-contained binary at ~/.mimocode/bin/mimo;
+        # npm i -g @mimo-ai/cli is an alternate path, hence the npm version_check.
+        "install_paths": ["~/.mimocode/bin/mimo"],
+        "path_markers": ["/.mimocode/", "/.config/mimocode", "@mimo-ai/cli"],
         "version_check": {"type": "npm", "package": "@mimo-ai/cli"},
+        # Explicit uninstall: the curl install is NOT an npm install, so the
+        # npm-derived uninstall would be a no-op against aikit's own install.
+        "uninstall_cmd": mimo_uninstall_cmd,
         "auth_type": "account_or_byok",
         "auth_env_vars": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"],
         "auth_note": "Run 'mimo' for the first-run wizard: MiMo Auto (free), Xiaomi MiMo Platform OAuth, 'Import from Claude Code', or any OpenAI-compatible API. Config lives under ~/.config/mimocode/mimocode.json; auth under ~/.local/share/mimocode/auth.json.",
-        "requires": ["node", "npm"],
+        "requires": ["curl"],
         "tags": ["mimo", "xiaomi", "opencode-fork", "memory", "self-improving"],
     },
     "qodo": {
@@ -684,12 +721,18 @@ AGENTS = {
         "version_cmd": "omp --version",
         "update_cmd": None,
         "update_via_install": True,
+        # Curl installer runs `bun install -g @oh-my-pi/pi-coding-agent` (or drops
+        # a prebuilt binary); npm i -g is an alternate path, hence the npm
+        # version_check.
         "path_markers": ["@oh-my-pi/pi-coding-agent", "/.omp/"],
         "version_check": {"type": "npm", "package": "@oh-my-pi/pi-coding-agent"},
+        # Explicit uninstall: the curl install is bun-based, NOT npm-based, so
+        # the npm-derived uninstall would be a no-op against aikit's own install.
+        "uninstall_cmd": omp_uninstall_cmd,
         "auth_type": "account_or_byok",
         "auth_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "XAI_API_KEY", "OPENROUTER_API_KEY"],
         "auth_note": "Run 'omp' then '/login' for subscription OAuth (Anthropic, OpenAI Codex, GitHub Copilot, Cursor, Kimi, etc.), or set provider env vars. Config lives under ~/.omp/agent/.",
-        "requires": ["node", "npm"],
+        "requires": ["curl"],
         "tags": ["omp", "oh-my-pi", "pi-fork", "lsp", "dap", "subagents", "byok"],
     },
     "plandex": {
@@ -2764,8 +2807,9 @@ def discover_auth(agent_key):
                 pass
 
     # MiMo Code: ~/.local/share/mimocode/auth.json (XDG data) on Linux, or
-    # ~/Library/Application Support/mimocode/auth.json on macOS; MIMOCODE_HOME
-    # relocates both. Config lives separately under ~/.config/mimocode.
+    # ~/Library/Application Support/mimocode/auth.json on macOS. Config lives
+    # separately under ~/.config/mimocode. (MIMOCODE_HOME can relocate both if
+    # set, but we don't honor it here — keep these checks on the default XDG paths.)
     if agent_key == "mimo":
         for auth_path in (
             home / ".local" / "share" / "mimocode" / "auth.json",
