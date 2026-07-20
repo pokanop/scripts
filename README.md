@@ -211,9 +211,11 @@ sys.exit(sk.run_cli(main))                      # CliError → 1, Ctrl-C → 130
 
 MIT — see [LICENSE](LICENSE).# self-hosted runner
 
+---
 
+## ☕ Support This Project
 
+If this project helped you, consider supporting its development:
 
-
-
-
+<a href="https://github.com/sponsors/pokanop" target="_blank"><img src="https://img.shields.io/badge/GitHub%20Sponsors-ea4aaa?style=for-the-badge&logo=github" alt="GitHub Sponsors" height="28"></a>
+<a href="https://ko-fi.com/pokanop" target="_blank"><img src="https://img.shields.io/badge/Ko--fi-Support%20Me-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Ko-fi" height="28"></a>
