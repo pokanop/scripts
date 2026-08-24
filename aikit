@@ -1006,9 +1006,14 @@ AGENTS = {
         "homepage": "https://devin.ai/cli",
         "icon": "🧩",
         "install": {
-            "Linux": "curl -fsSL https://cli.devin.ai/install.sh | bash",
-            "Darwin": "curl -fsSL https://cli.devin.ai/install.sh | bash",
-            "Windows": 'powershell -c "irm https://static.devin.ai/cli/setup.ps1 | iex"',
+            # The official installer runs `devin setup` at the end, which
+            # launches an interactive login prompt. Under aikit stdin is
+            # /dev/null, so that prompt fails ("Error: Login canceled") and the
+            # script exits non-zero even though the binary installed fine.
+            # Swallow the exit code; success is verified via detect_agent_bin().
+            "Linux": "(curl -fsSL https://cli.devin.ai/install.sh | bash) || true",
+            "Darwin": "(curl -fsSL https://cli.devin.ai/install.sh | bash) || true",
+            "Windows": 'powershell -c "irm https://static.devin.ai/cli/setup.ps1 | iex; exit 0"',
         },
         "version_cmd": "devin --version",
         "update_cmd": None,
