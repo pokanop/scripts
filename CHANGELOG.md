@@ -84,7 +84,7 @@ Newest entries on top, within each tool.
   the agent (POK-361).** `resolve_update_cmd` detects the owning package manager
   from the binary's resolved PATH entry — mise shim/install paths, Homebrew
   Cellar, pipx/uv venvs — and prefers its idiomatic upgrade command
-  (`mise upgrade claude`, `brew upgrade goose`, `pipx upgrade aider-chat`,
+  (`mise upgrade claude`, `brew upgrade block-goose-cli`, `pipx upgrade aider-chat`,
   `uv tool upgrade ...`) over the registry's self-update command. On a fresh
   Omarchy install where claude comes from mise, aikit no longer runs
   `claude update` against a mise-managed binary. npm installs are excluded:
