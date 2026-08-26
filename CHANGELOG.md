@@ -79,6 +79,17 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.17.0 — 2026-08-26
+- **Fix: `aikit update` now upgrades via the manager that originally installed
+  the agent (POK-361).** `resolve_update_cmd` detects the owning package manager
+  from the binary's resolved PATH entry — mise shim/install paths, Homebrew
+  Cellar, pipx/uv venvs — and prefers its idiomatic upgrade command
+  (`mise upgrade claude`, `brew upgrade goose`, `pipx upgrade aider-chat`,
+  `uv tool upgrade ...`) over the registry's self-update command. On a fresh
+  Omarchy install where claude comes from mise, aikit no longer runs
+  `claude update` against a mise-managed binary. npm installs are excluded:
+  their registry update commands already target npm.
+
 ### 1.16.0 — 2026-07-19
 - **Add three AI coding agents from the AgentPeek gap analysis (POK-313).**
   AgentPeek tracks 22 coding agents; aikit now manages all but one of them

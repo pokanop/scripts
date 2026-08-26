@@ -620,6 +620,69 @@ def test_aikit_resolve_update_cmd_amp(tool_loader, monkeypatch):
     assert m.resolve_update_cmd("amp") == "amp update"
 
 
+def test_aikit_detect_install_manager_mise(tool_loader, monkeypatch, tmp_path):
+    """A mise-installed binary upgrades via mise, not the registry's self-update."""
+    m = tool_loader("aikit")
+    shim = tmp_path / ".local/share/mise/shims/claude"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("#!/bin/sh\n")
+    shim.chmod(0o755)
+    monkeypatch.setattr(m.shutil, "which", lambda name: str(shim) if name == "claude" else None)
+    manager, cmd = m.detect_install_manager("claude")
+    assert manager == "mise"
+    assert cmd == "mise upgrade claude"
+    assert m.resolve_update_cmd("claude") == "mise upgrade claude"
+
+
+def test_aikit_detect_install_manager_brew(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    bin_path = tmp_path / "homebrew/bin/goose"
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_text("binary")
+    monkeypatch.setattr(m.shutil, "which", lambda name: str(bin_path) if name == "goose" else None)
+    manager, cmd = m.detect_install_manager("goose")
+    assert manager == "brew"
+    assert cmd == f"brew upgrade goose"
+
+
+def test_aikit_detect_install_manager_pipx(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    bin_path = tmp_path / ".local/pipx/venvs/aider-chat/bin/aider"
+    bin_path.parent.mkdir(parents=True)
+    bin_path.symlink_to("/usr/bin/python3")
+    monkeypatch.setattr(m.shutil, "which", lambda name: str(bin_path) if name == "aider" else None)
+    manager, cmd = m.detect_install_manager("aider")
+    assert manager == "pipx"
+    assert cmd == "pipx upgrade aider-chat"
+
+
+def test_aikit_detect_install_manager_uv(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    bin_path = tmp_path / ".local/share/uv/tools/open-interpreter/bin/open-interpreter"
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_text("binary")
+    monkeypatch.setattr(
+        m.shutil, "which",
+        lambda name: str(bin_path) if name == "open-interpreter" else None,
+    )
+    agent = {"bin": "open-interpreter", "bin_aliases": [], "version_check": {}}
+    monkeypatch.setitem(m.AGENTS, "uv-agent", agent)
+    manager, cmd = m.detect_install_manager("uv-agent")
+    assert manager == "uv"
+    assert cmd == "uv tool upgrade open-interpreter"
+
+
+def test_aikit_detect_install_manager_none_for_curl_install(tool_loader, monkeypatch, tmp_path):
+    """Registry update_cmd still applies when no manager fingerprint matches."""
+    m = tool_loader("aikit")
+    bin_path = tmp_path / ".claude/local/claude"
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_text("binary")
+    monkeypatch.setattr(m.shutil, "which", lambda name: str(bin_path) if name == "claude" else None)
+    assert m.detect_install_manager("claude") == (None, None)
+    assert m.resolve_update_cmd("claude") == "claude update"
+
+
 def test_aikit_gateway_cli_registry_entries(tool_loader):
     m = tool_loader("aikit")
     gemini = m.AGENTS["gemini"]
