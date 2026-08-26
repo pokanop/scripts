@@ -673,6 +673,21 @@ def test_aikit_detect_install_manager_uv(tool_loader, monkeypatch, tmp_path):
     assert cmd == "uv tool upgrade open-interpreter"
 
 
+def test_aikit_detect_install_manager_mise_npm_backend(tool_loader, monkeypatch, tmp_path):
+    """mise npm-backend tool resolving into a mise-managed lib/node_modules is mise-owned."""
+    m = tool_loader("aikit")
+    data = tmp_path / "mise-data"
+    real = data / "installs/claude/1.0.30/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+    real.parent.mkdir(parents=True)
+    real.write_text("module")
+    shim = data / "shims/claude"
+    shim.parent.mkdir(parents=True)
+    shim.symlink_to(real)
+    monkeypatch.setenv("MISE_DATA_DIR", str(data))
+    monkeypatch.setattr(m.shutil, "which", lambda name: str(shim) if name == "claude" else None)
+    assert m.detect_install_manager("claude") == ("mise", "mise upgrade claude")
+
+
 def test_aikit_detect_install_manager_brew_cellar_formula(tool_loader, monkeypatch, tmp_path):
     """brew upgrade uses the formula name from the Cellar path, not the bin name."""
     m = tool_loader("aikit")
