@@ -620,6 +620,127 @@ def test_aikit_resolve_update_cmd_amp(tool_loader, monkeypatch):
     assert m.resolve_update_cmd("amp") == "amp update"
 
 
+def test_aikit_detect_install_manager_mise(tool_loader, monkeypatch, tmp_path):
+    """A mise-installed binary upgrades via mise, not the registry's self-update."""
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m.Path, "home", lambda: tmp_path)
+    shim = tmp_path / ".local/share/mise/shims/claude"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("#!/bin/sh\n")
+    shim.chmod(0o755)
+    monkeypatch.setattr(m.shutil, "which", lambda name: str(shim) if name == "claude" else None)
+    manager, cmd = m.detect_install_manager("claude")
+    assert manager == "mise"
+    assert cmd == "mise upgrade claude"
+    assert m.resolve_update_cmd("claude") == "mise upgrade claude"
+
+
+def test_aikit_detect_install_manager_brew(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    bin_path = tmp_path / "homebrew/bin/goose"
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_text("binary")
+    monkeypatch.setattr(m.shutil, "which", lambda name: str(bin_path) if name == "goose" else None)
+    manager, cmd = m.detect_install_manager("goose")
+    assert manager == "brew"
+    assert cmd == "brew upgrade goose"
+
+
+def test_aikit_detect_install_manager_pipx(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    bin_path = tmp_path / ".local/pipx/venvs/aider-chat/bin/aider"
+    bin_path.parent.mkdir(parents=True)
+    bin_path.symlink_to("/usr/bin/python3")
+    monkeypatch.setattr(m.shutil, "which", lambda name: str(bin_path) if name == "aider" else None)
+    manager, cmd = m.detect_install_manager("aider")
+    assert manager == "pipx"
+    assert cmd == "pipx upgrade aider-chat"
+
+
+def test_aikit_detect_install_manager_uv(tool_loader, monkeypatch, tmp_path):
+    m = tool_loader("aikit")
+    bin_path = tmp_path / ".local/share/uv/tools/open-interpreter/bin/open-interpreter"
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_text("binary")
+    monkeypatch.setattr(
+        m.shutil, "which",
+        lambda name: str(bin_path) if name == "open-interpreter" else None,
+    )
+    agent = {"bin": "open-interpreter", "bin_aliases": [], "version_check": {}}
+    monkeypatch.setitem(m.AGENTS, "uv-agent", agent)
+    manager, cmd = m.detect_install_manager("uv-agent")
+    assert manager == "uv"
+    assert cmd == "uv tool upgrade open-interpreter"
+
+
+def test_aikit_detect_install_manager_mise_npm_backend(tool_loader, monkeypatch, tmp_path):
+    """mise npm-backend tool resolving into a mise-managed lib/node_modules is mise-owned."""
+    m = tool_loader("aikit")
+    data = tmp_path / "mise-data"
+    real = data / "installs/claude/1.0.30/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+    real.parent.mkdir(parents=True)
+    real.write_text("module")
+    shim = data / "shims/claude"
+    shim.parent.mkdir(parents=True)
+    shim.symlink_to(real)
+    monkeypatch.setenv("MISE_DATA_DIR", str(data))
+    monkeypatch.setattr(m.shutil, "which", lambda name: str(shim) if name == "claude" else None)
+    assert m.detect_install_manager("claude") == ("mise", "mise upgrade claude")
+
+
+def test_aikit_detect_install_manager_brew_cellar_formula(tool_loader, monkeypatch, tmp_path):
+    """brew upgrade uses the formula name from the Cellar path, not the bin name."""
+    m = tool_loader("aikit")
+    real = tmp_path / "Cellar/block-goose-cli/1.2.3/bin/goose"
+    real.parent.mkdir(parents=True)
+    real.write_text("binary")
+    link = tmp_path / "homebrew/bin/goose"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(real)
+    monkeypatch.setattr(m.shutil, "which", lambda name: str(link) if name == "goose" else None)
+    manager, cmd = m.detect_install_manager("goose")
+    assert manager == "brew"
+    assert cmd == "brew upgrade block-goose-cli"
+
+
+def test_aikit_detect_install_manager_npm_under_homebrew(tool_loader, monkeypatch, tmp_path):
+    """npm-global binary under a Homebrew node prefix is NOT claimed by brew."""
+    m = tool_loader("aikit")
+    real = tmp_path / "lib/node_modules/@anthropic-ai/claude-code/cli.js"
+    real.parent.mkdir(parents=True)
+    real.write_text("module")
+    shim = tmp_path / "homebrew/bin/claude"
+    shim.parent.mkdir(parents=True)
+    shim.symlink_to(real)
+    monkeypatch.setattr(m.shutil, "which", lambda name: str(shim) if name == "claude" else None)
+    assert m.detect_install_manager("claude") == (None, None)
+    assert m.resolve_update_cmd("claude") == "claude update"
+
+
+def test_aikit_detect_install_manager_mise_xdg_relocation(tool_loader, monkeypatch, tmp_path):
+    """MISE_DATA_DIR / XDG_DATA_HOME relocations are still detected."""
+    m = tool_loader("aikit")
+    data = tmp_path / "mise-data"
+    shim = data / "shims/claude"
+    shim.parent.mkdir(parents=True)
+    shim.write_text("#!/bin/sh\n")
+    shim.chmod(0o755)
+    monkeypatch.setenv("MISE_DATA_DIR", str(data))
+    monkeypatch.setattr(m.shutil, "which", lambda name: str(shim) if name == "claude" else None)
+    assert m.detect_install_manager("claude") == ("mise", "mise upgrade claude")
+
+
+def test_aikit_detect_install_manager_none_for_curl_install(tool_loader, monkeypatch, tmp_path):
+    """Registry update_cmd still applies when no manager fingerprint matches."""
+    m = tool_loader("aikit")
+    bin_path = tmp_path / ".claude/local/claude"
+    bin_path.parent.mkdir(parents=True)
+    bin_path.write_text("binary")
+    monkeypatch.setattr(m.shutil, "which", lambda name: str(bin_path) if name == "claude" else None)
+    assert m.detect_install_manager("claude") == (None, None)
+    assert m.resolve_update_cmd("claude") == "claude update"
+
+
 def test_aikit_gateway_cli_registry_entries(tool_loader):
     m = tool_loader("aikit")
     gemini = m.AGENTS["gemini"]

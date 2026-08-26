@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.16.0
+aikit — AI Coding Agent CLI Installer & Manager  v1.17.0
 Install, update, authenticate, and manage 34 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.16.0"
+__version__ = "1.17.0"
 
 import scriptkit as sk
 
@@ -1490,11 +1490,117 @@ def agent_bin_collision_warnings():
     ]
 
 
-def resolve_update_cmd(agent_key):
-    """Return the shell command to update an agent, or None."""
+def _installed_bin_path(agent_key):
+    """Absolute path of the installed agent binary on PATH, or None."""
     agent = AGENTS.get(agent_key)
     if not agent:
         return None
+    for name in _agent_bin_candidates(agent_key):
+        path = shutil.which(name)
+        if path and bin_path_belongs_to_agent(agent_key, path):
+            return Path(path)
+    return None
+
+
+def _mise_data_markers():
+    """Path markers under every mise data dir aikit may encounter."""
+    bases = [
+        os.environ.get("MISE_DATA_DIR"),
+        os.environ.get("XDG_DATA_HOME") and os.path.join(os.environ["XDG_DATA_HOME"], "mise"),
+        str(Path.home() / ".local/share/mise"),
+    ]
+    markers = []
+    for base in bases:
+        if not base:
+            continue
+        root = str(Path(base))
+        markers.append(root + "/installs/")
+        markers.append(root + "/shims/")
+    return tuple(markers)
+
+
+def detect_install_manager(agent_key):
+    """Detect the package manager that owns the installed agent binary.
+
+    Inspects the resolved PATH entry for manager fingerprints (mise shims,
+    Homebrew Cellar paths, pipx/uv venv locations).
+
+    Returns (manager, upgrade_cmd) when the binary was installed by an
+    external package manager with an idiomatic upgrade command, else
+    (None, None). The detected command takes precedence over the registry's
+    update_cmd so agents installed via mise/brew/pipx/uv are upgraded by
+    that manager instead of self-updating out from under it. npm installs
+    are deliberately excluded — every npm-installed agent's registry
+    update_cmd already targets npm.
+    """
+    bin_path = _installed_bin_path(agent_key)
+    if not bin_path:
+        return None, None
+    raw = str(bin_path)
+    try:
+        resolved = str(bin_path.resolve())
+    except OSError:
+        resolved = raw
+    name = bin_path.name
+
+    # mise shims are symlinks into <data>/mise/installs/<tool>/<ver>/
+    # (checked before the npm exclusion: mise npm-backend tools resolve into a
+    # mise-managed lib/node_modules but are mise-owned, not npm-owned)
+    mise_markers = _mise_data_markers()
+    for check in (raw, resolved):
+        if any(marker in check for marker in mise_markers):
+            tool = name
+            if "/installs/" in check:
+                after = check.split("/installs/", 1)[1].split("/")
+                if len(after) >= 2:
+                    tool = after[0]
+            return "mise", f"mise upgrade {tool}"
+
+    # npm global trees live under <prefix>/lib/node_modules/ — even when the
+    # prefix is Homebrew-managed (/opt/homebrew), the binary is npm-owned,
+    # so let the registry's npm update command handle it.
+    for check in (raw, resolved):
+        if "/lib/node_modules/" in check:
+            return None, None
+
+    for check in (raw, resolved):
+        if "/pipx/venvs/" in check:
+            pkg = check.split("/pipx/venvs/", 1)[1].split("/")[0]
+            return "pipx", f"pipx upgrade {pkg}"
+        if "/uv/tools/" in check:
+            pkg = check.split("/uv/tools/", 1)[1].split("/")[0]
+            return "uv", f"uv tool upgrade {pkg}"
+
+    # Homebrew: derive the formula name from the Cellar path segment when the
+    # resolved binary lives there (e.g. block-goose-cli, not the bin name goose).
+    formula = None
+    is_brew = False
+    for check in (raw, resolved):
+        if "/Cellar/" in check:
+            after = check.split("/Cellar/", 1)[1].split("/")
+            if after:
+                formula = formula or after[0]
+        if "/Cellar/" in check or "/homebrew/" in check:
+            is_brew = True
+    if is_brew:
+        return "brew", f"brew upgrade {shlex.quote(formula or name)}"
+
+    return None, None
+
+
+def resolve_update_cmd(agent_key):
+    """Return the shell command to update an agent, or None.
+
+    Prefers the idiomatic upgrade command of the manager that originally
+    installed the binary (mise, brew, pipx, uv, npm), falling back to the
+    registry's update_cmd / reinstall command.
+    """
+    agent = AGENTS.get(agent_key)
+    if not agent:
+        return None
+    manager, managed_cmd = detect_install_manager(agent_key)
+    if managed_cmd:
+        return managed_cmd
     update_cmd = agent.get("update_cmd")
     if update_cmd:
         bin_name = resolve_agent_bin(agent_key) or agent["bin"]
