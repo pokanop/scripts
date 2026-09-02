@@ -58,11 +58,18 @@ if [[ -n "$CUSTOM_DIR" ]]; then
     INSTALL_DIR="$CUSTOM_DIR"
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR=""
+if [[ -n "${BASH_SOURCE[0]-}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 
 if [[ "$IN_PLACE" -eq 1 ]]; then
+    if [[ -z "$SCRIPT_DIR" ]]; then
+        echo "error: --in-place requires running install.sh from a local checkout" >&2
+        exit 1
+    fi
     INSTALL_DIR="$SCRIPT_DIR"
-elif [[ -f "$SCRIPT_DIR/scripts" && -d "$SCRIPT_DIR/requirements" && -d "$SCRIPT_DIR/.git" ]]; then
+elif [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/scripts" && -d "$SCRIPT_DIR/requirements" && -d "$SCRIPT_DIR/.git" ]]; then
     # Running from a git clone: install in-place by default.
     INSTALL_DIR="$SCRIPT_DIR"
     IN_PLACE=1
