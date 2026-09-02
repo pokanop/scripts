@@ -79,7 +79,7 @@ aikit setup
 | `aikit update [agents...]` | Update agents (all installed if none) |
 | `aikit uninstall [agent...]` | Remove agents |
 | `aikit list` | Status table of all 34 agents |
-| `aikit auth [agent]` | Guided authentication setup |
+| `aikit auth [agent] [--force]` | Guided authentication setup; `--force` replaces cached auth status and signs in again |
 | `aikit doctor` | Diagnose environment and agent health |
 | `aikit serve` | Start web dashboard |
 | `aikit config get/set/list` | Manage `~/.aikit/config.json` |
