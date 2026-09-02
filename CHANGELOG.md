@@ -79,6 +79,15 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.17.1 — 2026-09-02
+- **Fix OAuth status detection after successful login commands (POK-363).**
+  `aikit auth` now records a successful dedicated login command across all ten
+  applicable agents instead of discarding its exit status, while failed login
+  commands and normal exits from general-purpose agent binaries remain unauthenticated.
+  Copilot discovery now recognizes its plaintext token map and OS credential-store
+  service, and Grok discovery reads `~/.grok/auth.json` rather than treating any
+  non-empty `config.toml` as authenticated.
+
 ### 1.17.0 — 2026-08-26
 - **Fix: `aikit update` now upgrades via the manager that originally installed
   the agent (POK-361).** `resolve_update_cmd` detects the owning package manager
