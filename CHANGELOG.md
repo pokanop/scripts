@@ -79,6 +79,15 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.18.1 — 2026-09-04
+- **Fix: `aikit config set` validates keys like `POST /api/config` does (POK-316).**
+  The CLI previously wrote unknown top-level keys (e.g. `aikit config set bogus.key val`)
+  into `~/.aikit/config.json` with exit 0, while the REST endpoint rejected the same
+  patch with HTTP 400. `do_config_set` now checks the top-level segment of the key
+  path against the known sections (`agents`, `settings`, `version`) — mirroring
+  `_validate_config_patch` — and raises `AikitError` (exit 1) on unknown keys, so
+  typos like `setting.web_port` no longer persist a silent no-op section.
+
 ### 1.18.0 — 2026-09-02
 - **Fix OAuth status detection after successful login commands (POK-363).**
   `aikit auth` now records a successful dedicated login command across nine
