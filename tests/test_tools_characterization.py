@@ -1156,6 +1156,258 @@ def test_aikit_auth_registry_login_commands(tool_loader):
     assert "MOONSHOT_API_KEY" not in m.AGENTS["kimi"]["auth_env_vars"]
     assert m.AGENTS["kiro"]["auth_cmd"] == "kiro-cli login"
     assert m.AGENTS["devin"]["auth_cmd"] == "devin auth login"
+    assert {
+        key for key, agent in m.AGENTS.items() if agent.get("auth_cmd_confirms")
+    } == {
+        "cursor", "codex", "copilot", "grok", "kiro", "amp", "continue",
+        "devin", "auggie",
+    }
+    assert m.AGENTS["vibe"].get("auth_cmd_confirms") is None
+
+
+@pytest.mark.parametrize(
+    ("agent_key", "auth_cmd"),
+    [
+        ("cursor", "agent login"),
+        ("codex", "codex login"),
+        ("copilot", "copilot login"),
+        ("grok", "grok login"),
+        ("kiro", "kiro-cli login"),
+        ("amp", "amp login"),
+        ("continue", "cn login"),
+        ("devin", "devin auth login"),
+        ("auggie", "auggie login"),
+    ],
+)
+def test_aikit_auth_trusts_successful_confirming_login_command(
+    tool_loader, monkeypatch, agent_key, auth_cmd
+):
+    """A successful dedicated login command is direct evidence of auth.
+
+    Several CLIs keep OAuth tokens in an OS credential store, so filesystem
+    discovery cannot independently see the credential after the command exits.
+    """
+    m = tool_loader("aikit")
+    config = {"agents": {agent_key: {"installed": True}}, "settings": {}}
+
+    monkeypatch.setattr(m, "validate_agent_keys", lambda _keys: None)
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: True)
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: m.AGENTS[agent_key]["bin"])
+    monkeypatch.setattr(m, "discover_auth", lambda _key: {
+        "auth_configured": False,
+        "method": "",
+        "source": "",
+    })
+    monkeypatch.setattr(m, "discover_and_persist", lambda: None)
+    monkeypatch.setattr(m, "load_config", lambda: config)
+    monkeypatch.setattr(m, "save_config", lambda _cfg: None)
+    monkeypatch.setattr(m, "_use_color", lambda: True)
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(m, "_prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(m.os, "system", lambda command: 0 if command == auth_cmd else 1)
+
+    m._do_auth_impl(agent_key)
+
+    saved = config["agents"][agent_key]
+    assert saved["auth_configured"] is True
+    assert saved["auth_method"] == "auth_command"
+    assert saved["auth_source"] == auth_cmd
+
+
+def test_aikit_auth_does_not_trust_successful_setup_wizard(tool_loader, monkeypatch):
+    """A setup wizard can exit successfully without establishing authentication."""
+    m = tool_loader("aikit")
+    config = {"agents": {"vibe": {"installed": True}}, "settings": {}}
+
+    monkeypatch.setattr(m, "validate_agent_keys", lambda _keys: None)
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: True)
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "vibe")
+    monkeypatch.setattr(m, "discover_auth", lambda _key: {
+        "auth_configured": False,
+        "method": "",
+        "source": "",
+    })
+    monkeypatch.setattr(m, "discover_and_persist", lambda: None)
+    monkeypatch.setattr(m, "load_config", lambda: config)
+    monkeypatch.setattr(m, "save_config", lambda _cfg: None)
+    monkeypatch.setattr(m, "_use_color", lambda: True)
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(m, "_prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(m.os, "system", lambda command: 0 if command == "vibe --setup" else 1)
+
+    m._do_auth_impl("vibe")
+
+    assert config["agents"]["vibe"]["auth_configured"] is False
+
+
+def test_aikit_auth_force_clears_cached_confirmation_and_retries(
+    tool_loader, monkeypatch
+):
+    m = tool_loader("aikit")
+    config = {
+        "agents": {
+            "copilot": {
+                "installed": True,
+                "auth_configured": True,
+                "auth_method": "auth_command",
+                "auth_source": "copilot login",
+                "auth_date": "2026-09-01",
+            }
+        },
+        "settings": {},
+    }
+    launched = []
+
+    def discover_from_config(_key):
+        entry = config["agents"]["copilot"]
+        if entry.get("auth_configured"):
+            return {
+                "auth_configured": True,
+                "method": "previously_confirmed",
+                "source": "~/.aikit/config.json",
+            }
+        return {"auth_configured": False, "method": "", "source": ""}
+
+    monkeypatch.setattr(m, "validate_agent_keys", lambda _keys: None)
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: True)
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "copilot")
+    monkeypatch.setattr(m, "discover_auth", discover_from_config)
+    monkeypatch.setattr(m, "discover_and_persist", lambda: None)
+    monkeypatch.setattr(m, "load_config", lambda: config)
+    monkeypatch.setattr(m, "save_config", lambda _cfg: None)
+    monkeypatch.setattr(m, "_use_color", lambda: True)
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(m, "_prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        m.os,
+        "system",
+        lambda command: launched.append(command) or 256,
+    )
+
+    m._do_auth_impl("copilot", force=True)
+
+    assert launched == ["copilot login"]
+    assert config["agents"]["copilot"]["auth_configured"] is False
+    assert config["agents"]["copilot"]["auth_method"] == ""
+    assert config["agents"]["copilot"]["auth_source"] == ""
+    assert config["agents"]["copilot"]["auth_date"] == ""
+
+
+def test_aikit_auth_parser_and_handler_accept_force(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    calls = []
+    monkeypatch.setattr(
+        m,
+        "do_auth",
+        lambda agent_key, force=False: calls.append((agent_key, force)),
+    )
+
+    args = m.build_parser().parse_args(["auth", "copilot", "--force"])
+    m.cmd_auth(args)
+
+    assert args.agent == "copilot"
+    assert args.force is True
+    assert calls == [("copilot", True)]
+
+
+def test_aikit_auth_cached_confirmation_surfaces_force_hint(
+    tool_loader, monkeypatch, capsys
+):
+    m = tool_loader("aikit")
+    config = {"agents": {"copilot": {"installed": True}}, "settings": {}}
+
+    monkeypatch.setattr(m, "validate_agent_keys", lambda _keys: None)
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: True)
+    monkeypatch.setattr(m, "discover_auth", lambda _key: {
+        "auth_configured": True,
+        "method": "previously_confirmed",
+        "source": "~/.aikit/config.json",
+    })
+    monkeypatch.setattr(m, "load_config", lambda: config)
+    monkeypatch.setattr(m, "save_config", lambda _cfg: None)
+
+    m._do_auth_impl("copilot")
+
+    assert "aikit auth copilot --force" in capsys.readouterr().out
+
+
+def test_aikit_auth_does_not_trust_failed_login_command(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    config = {"agents": {"copilot": {"installed": True}}, "settings": {}}
+
+    monkeypatch.setattr(m, "validate_agent_keys", lambda _keys: None)
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: True)
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "copilot")
+    monkeypatch.setattr(m, "discover_auth", lambda _key: {
+        "auth_configured": False,
+        "method": "",
+        "source": "",
+    })
+    monkeypatch.setattr(m, "discover_and_persist", lambda: None)
+    monkeypatch.setattr(m, "load_config", lambda: config)
+    monkeypatch.setattr(m, "save_config", lambda _cfg: None)
+    monkeypatch.setattr(m, "_use_color", lambda: True)
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(m, "_prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(m.os, "system", lambda _command: 1)
+
+    m._do_auth_impl("copilot")
+
+    assert config["agents"]["copilot"]["auth_configured"] is False
+
+
+def test_aikit_auth_does_not_trust_bare_interactive_exit(tool_loader, monkeypatch):
+    """A normal exit from a general-purpose agent binary is not a login result."""
+    m = tool_loader("aikit")
+    config = {"agents": {"claude": {"installed": True}}, "settings": {}}
+
+    monkeypatch.setattr(m, "validate_agent_keys", lambda _keys: None)
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: True)
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "claude")
+    monkeypatch.setattr(m, "discover_auth", lambda _key: {
+        "auth_configured": False,
+        "method": "",
+        "source": "",
+    })
+    monkeypatch.setattr(m, "discover_and_persist", lambda: None)
+    monkeypatch.setattr(m, "load_config", lambda: config)
+    monkeypatch.setattr(m, "save_config", lambda _cfg: None)
+    monkeypatch.setattr(m, "_use_color", lambda: True)
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(m, "_prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(m.os, "system", lambda _command: 0)
+
+    m._do_auth_impl("claude")
+
+    assert config["agents"]["claude"]["auth_configured"] is False
+
+
+def test_aikit_auth_success_is_visible_to_later_status_discovery(
+    tool_loader, monkeypatch, tmp_path
+):
+    m = tool_loader("aikit")
+    config = {"agents": {"copilot": {"installed": True}}, "settings": {}}
+
+    monkeypatch.setattr(m, "_REAL_HOME", tmp_path / "home")
+    monkeypatch.setattr(m, "_system_credential_store_has_entry", lambda _service: False)
+    monkeypatch.setattr(m, "validate_agent_keys", lambda _keys: None)
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: True)
+    monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "copilot")
+    monkeypatch.setattr(m, "discover_and_persist", lambda: None)
+    monkeypatch.setattr(m, "load_config", lambda: config)
+    monkeypatch.setattr(m, "save_config", lambda _cfg: None)
+    monkeypatch.setattr(m, "_use_color", lambda: True)
+    monkeypatch.setattr(m.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(m, "_prompt_yes_no", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(m.os, "system", lambda _command: 0)
+    for var in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+
+    m._do_auth_impl("copilot")
+    result = m.discover_auth("copilot")
+
+    assert result["auth_configured"] is True
+    assert result["method"] == "previously_confirmed"
 
 
 def test_aikit_discover_auth_env_var(tool_loader, monkeypatch):
@@ -1166,6 +1418,173 @@ def test_aikit_discover_auth_env_var(tool_loader, monkeypatch):
     assert result["auth_configured"] is True
     assert result["method"] == "env_var"
     assert result["source"] == "$CURSOR_API_KEY"
+
+
+def test_aikit_discover_auth_grok_auth_file(tool_loader, monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    auth_file = home / ".grok" / "auth.json"
+    auth_file.parent.mkdir(parents=True)
+    auth_file.write_text('{"https://accounts.x.ai/sign-in":{"key":"oauth-test"}}')
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.setattr(m, "load_config", lambda: {"agents": {}})
+
+    result = m.discover_auth("grok")
+
+    assert result["auth_configured"] is True
+    assert result["method"] == "cred_file"
+    assert result["source"] == str(auth_file)
+
+
+def test_aikit_discover_auth_grok_ignores_noncredential_config(
+    tool_loader, monkeypatch, tmp_path
+):
+    home = tmp_path / "home"
+    config_file = home / ".grok" / "config.toml"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text('[ui]\nscreen_mode = "minimal"\n')
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.setattr(m, "load_config", lambda: {"agents": {}})
+
+    result = m.discover_auth("grok")
+
+    assert result["auth_configured"] is False
+
+
+def test_aikit_discover_auth_copilot_plaintext_token(tool_loader, monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    config_file = home / ".copilot" / "config.json"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text(
+        '{"copilot_tokens":{"https://github.com:user":"oauth-test"}}'
+    )
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "_REAL_HOME", home)
+    for var in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+
+    result = m.discover_auth("copilot")
+
+    assert result["auth_configured"] is True
+    assert result["method"] == "config_file"
+    assert result["source"] == str(config_file)
+
+
+def test_aikit_discover_auth_copilot_system_credential(
+    tool_loader, monkeypatch, tmp_path
+):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "_REAL_HOME", tmp_path / "home")
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: True)
+    monkeypatch.setattr(m, "_system_credential_store_has_entry", lambda service: service == "copilot-cli")
+    for var in ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+
+    result = m.discover_auth("copilot")
+
+    assert result["auth_configured"] is True
+    assert result["method"] == "credential_store"
+    assert result["source"] == "copilot-cli"
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "binary_name", "probe_stdout", "expected_command", "expected_kwargs"),
+    [
+        (
+            "Darwin",
+            "security",
+            "",
+            ["/usr/bin/security", "find-generic-password", "-s", "copilot-cli"],
+            {"timeout": 2, "shell": False},
+        ),
+        (
+            "Linux",
+            "secret-tool",
+            "",
+            "/usr/bin/secret-tool search --all service copilot-cli 2>&1 "
+            "| grep -q '^\\[/'",
+            {"timeout": 2},
+        ),
+        (
+            "Windows",
+            "cmdkey",
+            "Target: LegacyGeneric:target=copilot-cli:user",
+            ["/usr/bin/cmdkey", "/list"],
+            {"timeout": 2, "shell": False},
+        ),
+    ],
+)
+def test_aikit_system_credential_store_probe(
+    tool_loader, monkeypatch, platform_name, binary_name, probe_stdout,
+    expected_command, expected_kwargs
+):
+    m = tool_loader("aikit")
+    calls = []
+
+    monkeypatch.setattr(m, "_CURRENT_PLATFORM", platform_name)
+    monkeypatch.setattr(
+        m.shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}" if name == binary_name else None,
+    )
+    monkeypatch.setattr(
+        m,
+        "run",
+        lambda command, **kwargs: calls.append((command, kwargs))
+        or (0, probe_stdout, ""),
+    )
+
+    assert m._system_credential_store_has_entry("copilot-cli") is True
+    assert calls == [(expected_command, expected_kwargs)]
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "binary_name"),
+    [("Darwin", "security"), ("Linux", "secret-tool"), ("Windows", "cmdkey")],
+)
+def test_aikit_system_credential_store_probe_missing_binary(
+    tool_loader, monkeypatch, platform_name, binary_name
+):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "_CURRENT_PLATFORM", platform_name)
+    monkeypatch.setattr(m.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(
+        m,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("probe must not run without its binary"),
+    )
+
+    assert m._system_credential_store_has_entry("copilot-cli") is False
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "binary_name"),
+    [("Darwin", "security"), ("Linux", "secret-tool"), ("Windows", "cmdkey")],
+)
+def test_aikit_system_credential_store_probe_nonzero_result(
+    tool_loader, monkeypatch, platform_name, binary_name
+):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "_CURRENT_PLATFORM", platform_name)
+    monkeypatch.setattr(m.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(m, "run", lambda *_args, **_kwargs: (1, "", "unavailable"))
+
+    assert m._system_credential_store_has_entry("copilot-cli") is False
+
+
+def test_aikit_system_credential_store_probe_unknown_platform(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "_CURRENT_PLATFORM", "Haiku")
+    monkeypatch.setattr(
+        m,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("unknown platforms must not spawn a probe"),
+    )
+
+    assert m._system_credential_store_has_entry("copilot-cli") is False
 
 
 def test_aikit_discover_auth_opencode_cred_file(tool_loader, monkeypatch, tmp_path):

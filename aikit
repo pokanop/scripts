@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.17.0
+aikit — AI Coding Agent CLI Installer & Manager  v1.18.0
 Install, update, authenticate, and manage 34 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.17.0"
+__version__ = "1.18.0"
 
 import scriptkit as sk
 
@@ -370,6 +370,7 @@ AGENTS = {
         "auth_type": "oauth_browser",
         "auth_env_vars": ["CURSOR_API_KEY"],
         "auth_cmd": "agent login",
+        "auth_cmd_confirms": True,
         "auth_note": "Run 'agent login' (or 'cursor-agent login') for browser OAuth. Or set CURSOR_API_KEY for scripts/CI.",
         "requires": ["curl"],
         "tags": ["cursor", "agent", "composer"],
@@ -417,6 +418,7 @@ AGENTS = {
         "auth_type": "oauth_browser",
         "auth_env_vars": ["OPENAI_API_KEY"],
         "auth_cmd": "codex login",
+        "auth_cmd_confirms": True,
         "auth_note": "Run 'codex login' for ChatGPT OAuth or API key auth. Or: printenv OPENAI_API_KEY | codex login --with-api-key",
         "requires": ["curl"],
         "tags": ["openai", "codex", "gpt", "chatgpt"],
@@ -551,6 +553,7 @@ AGENTS = {
         "auth_type": "oauth_browser",
         "auth_env_vars": ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"],
         "auth_cmd": "copilot login",
+        "auth_cmd_confirms": True,
         "auth_note": "Run 'copilot login' for OAuth (recommended). For CI/headless, set COPILOT_GITHUB_TOKEN (fine-grained PAT with Copilot Requests — classic ghp_ PATs are not supported).",
         "requires": ["curl"],
         "tags": ["github", "copilot", "microsoft", "claude-sonnet"],
@@ -581,6 +584,7 @@ AGENTS = {
         "auth_type": "oauth_browser",
         "auth_env_vars": ["XAI_API_KEY"],
         "auth_cmd": "grok login",
+        "auth_cmd_confirms": True,
         "auth_note": "Run 'grok login' for browser OAuth ('grok login --device-auth' on headless/SSH). Or set XAI_API_KEY for scripts/CI.",
         "requires": ["curl"],
         "tags": ["grok", "xai", "multi-agent", "agent"],
@@ -682,6 +686,7 @@ AGENTS = {
         "auth_type": "oauth_browser",
         "auth_env_vars": ["KIRO_API_KEY"],
         "auth_cmd": "kiro-cli login",
+        "auth_cmd_confirms": True,
         "auth_note": "Run 'kiro-cli login' for browser or device-flow OAuth (included with Kiro tiers). Or set KIRO_API_KEY for headless/CI (Pro+ plans).",
         "requires": ["curl"],
         "tags": ["kiro", "claude", "context-management", "enterprise"],
@@ -910,6 +915,7 @@ AGENTS = {
         "auth_type": "oauth_browser",
         "auth_env_vars": ["AMP_API_KEY"],
         "auth_cmd": "amp login",
+        "auth_cmd_confirms": True,
         "auth_note": "Run 'amp login' for browser sign-in (free or pay-as-you-go credits). Or set AMP_API_KEY from ampcode.com/settings for scripts/CI.",
         "requires": ["curl"],
         "tags": ["amp", "sourcegraph", "agentic", "oracle", "mcp"],
@@ -974,6 +980,7 @@ AGENTS = {
         "auth_type": "oauth_browser",
         "auth_env_vars": ["ANTHROPIC_API_KEY"],
         "auth_cmd": "cn login",
+        "auth_cmd_confirms": True,
         "auth_note": "Run 'cn login' for Continue account OAuth, or set ANTHROPIC_API_KEY for BYOK.",
         "requires": ["curl"],
         "tags": ["continue", "cn", "agentic", "headless", "mcp"],
@@ -1036,6 +1043,7 @@ AGENTS = {
         "auth_type": "oauth_browser",
         "auth_env_vars": ["WINDSURF_API_KEY"],
         "auth_cmd": "devin auth login",
+        "auth_cmd_confirms": True,
         "auth_note": "Run 'devin auth login' for Cognition AI account OAuth. Requires a Devin subscription (free trial available). For ACP/headless, set WINDSURF_API_KEY.",
         "requires": ["curl"],
         "tags": ["devin", "cognition", "autonomous", "cloud-handoff", "multi-model"],
@@ -1058,6 +1066,7 @@ AGENTS = {
         "auth_type": "oauth_browser",
         "auth_env_vars": ["AUGMENT_SESSION_AUTH"],
         "auth_cmd": "auggie login",
+        "auth_cmd_confirms": True,
         "auth_note": "Run 'auggie login' for Augment account OAuth (browser). Free tier available; paid plans from $60/month. For CI/headless, set AUGMENT_SESSION_AUTH (session JSON from `auggie token print`).",
         "requires": ["node", "npm"],
         "tags": ["augment", "auggie", "codebase-understanding", "mcp", "free-tier"],
@@ -2679,12 +2688,54 @@ def _config_text_has_credentials(cfg_text):
         pat in cfg_text
         for pat in (
             '"apiKey"', "'apiKey'", "apiKey:",
-            '"api_key"', "api_key:",
+            '"api_key"', "api_key:", "api_key =",
             "accessToken", "refreshToken",
+            "access_token =", "refresh_token =",
             '"type": "oauth"', '"type":"oauth"',
             '"type": "api"', '"type":"api"',
         )
     )
+
+
+def _system_credential_store_has_entry(service):
+    """Best-effort check for a named OS credential-store service.
+
+    Only entry existence is observed; credential values are never returned to
+    aikit. Probes are short-lived so a locked or unavailable keyring cannot
+    stall status discovery.
+    """
+    if _CURRENT_PLATFORM == "Darwin":
+        security = shutil.which("security")
+        if not security:
+            return False
+        code, _stdout, _stderr = run(
+            [security, "find-generic-password", "-s", service],
+            timeout=2,
+            shell=False,
+        )
+        return code == 0
+
+    if _CURRENT_PLATFORM == "Linux":
+        secret_tool = shutil.which("secret-tool")
+        if not secret_tool:
+            return False
+        # Pipe the search result to grep so secret-tool's output (which may
+        # include a credential value) never reaches the aikit process.
+        cmd = (
+            f"{shlex.quote(secret_tool)} search --all service {shlex.quote(service)} "
+            "2>&1 | grep -q '^\\[/'"
+        )
+        code, _stdout, _stderr = run(cmd, timeout=2)
+        return code == 0
+
+    if _CURRENT_PLATFORM == "Windows":
+        cmdkey = shutil.which("cmdkey")
+        if not cmdkey:
+            return False
+        code, stdout, _stderr = run([cmdkey, "/list"], timeout=2, shell=False)
+        return code == 0 and service.lower() in stdout.lower()
+
+    return False
 
 
 def discover_auth(agent_key):
@@ -2837,23 +2888,48 @@ def discover_auth(agent_key):
         if copilot_cfg.exists() and copilot_cfg.stat().st_size > 0:
             try:
                 data = json.loads(copilot_cfg.read_text())
-                if data.get("githubToken") or data.get("token"):
+                plaintext_tokens = data.get("copilot_tokens", {})
+                if (
+                    data.get("githubToken")
+                    or data.get("token")
+                    or (
+                        isinstance(plaintext_tokens, dict)
+                        and any(
+                            isinstance(token, str) and token.strip()
+                            for token in plaintext_tokens.values()
+                        )
+                    )
+                ):
                     return {"auth_configured": True, "method": "config_file", "source": str(copilot_cfg)}
             except (json.JSONDecodeError, OSError):
                 pass
+        if detect_agent_bin(agent_key) and _system_credential_store_has_entry("copilot-cli"):
+            return {"auth_configured": True, "method": "credential_store", "source": "copilot-cli"}
         gh_hosts = home / ".config" / "gh" / "hosts.yml"
         if gh_hosts.exists():
-            content = gh_hosts.read_text()
-            if "token:" in content:
-                return {"auth_configured": True, "method": "gh_cli", "source": str(gh_hosts)}
+            try:
+                content = gh_hosts.read_text()
+                if "token:" in content:
+                    return {"auth_configured": True, "method": "gh_cli", "source": str(gh_hosts)}
+            except OSError:
+                pass
     
-    # Grok Build: ~/.grok/config.toml (xAI) + browser OAuth token
+    # Grok Build: browser OAuth is stored in ~/.grok/auth.json. config.toml is
+    # not itself an auth signal, but it may contain an explicit model API key.
     if agent_key == "grok":
+        auth_file = home / ".grok" / "auth.json"
+        if auth_file.exists() and auth_file.stat().st_size > 0:
+            try:
+                data = json.loads(auth_file.read_text())
+                if data:
+                    return {"auth_configured": True, "method": "cred_file", "source": str(auth_file)}
+            except (json.JSONDecodeError, OSError):
+                pass
         cfg_path = home / ".grok" / "config.toml"
         if cfg_path.exists():
             try:
                 content = cfg_path.read_text()
-                if content.strip():
+                if _config_text_has_credentials(content):
                     return {"auth_configured": True, "method": "config_file", "source": str(cfg_path)}
             except OSError:
                 pass
@@ -3235,16 +3311,16 @@ def discover_and_persist():
         save_config(config)
 
 
-def do_auth(agent_key):
+def do_auth(agent_key, force=False):
     """Guide user through auth for an agent."""
     try:
-        _do_auth_impl(agent_key)
+        _do_auth_impl(agent_key, force=force)
     except KeyboardInterrupt:
         console.print("\n[yellow]⏹ Auth setup cancelled.[/yellow]")
         sys.exit(130)
 
 
-def _do_auth_impl(agent_key):
+def _do_auth_impl(agent_key, force=False):
     validate_agent_keys([agent_key])
     agent = AGENTS[agent_key]
 
@@ -3258,12 +3334,26 @@ def _do_auth_impl(agent_key):
     auth_type = agent.get("auth_type", "unknown")
     auth_note = agent.get("auth_note", "")
     env_vars = agent.get("auth_env_vars", [])
+    confirmed_auth_cmd = None
+
+    if force:
+        config = load_config()
+        entry = config.setdefault("agents", {}).setdefault(agent_key, {})
+        entry.update({
+            "auth_configured": False,
+            "auth_date": "",
+            "auth_method": "",
+            "auth_source": "",
+        })
+        save_config(config)
     
     # Check if already authenticated
     existing = discover_auth(agent_key)
-    if existing["auth_configured"]:
+    if existing["auth_configured"] and not force:
         console.print(f"\n[bold cyan]🔑 {icon} {agent['name']}[/bold cyan]")
         print_success(f"Already authenticated! [dim](source: {existing['source']})[/dim]")
+        if existing["method"] in ("previously_confirmed", "auth_command"):
+            print_info(f"To sign in again, run 'aikit auth {agent_key} --force'.")
         # Ensure config is updated
         config = load_config()
         config["agents"][agent_key] = {
@@ -3285,7 +3375,8 @@ def _do_auth_impl(agent_key):
 
     if auth_type == "oauth_browser":
         bin_name = resolve_agent_bin(agent_key) or agent["bin"]
-        auth_cmd = agent.get("auth_cmd") or bin_name
+        explicit_auth_cmd = agent.get("auth_cmd")
+        auth_cmd = explicit_auth_cmd or bin_name
         if auth_cmd != bin_name:
             console.print(
                 f"\n  [dim]This agent uses OAuth. Run '{auth_cmd}' to sign in "
@@ -3296,7 +3387,9 @@ def _do_auth_impl(agent_key):
         if _use_color() and sys.stdin.isatty():
             try:
                 if _prompt_yes_no(f"Launch '{auth_cmd}' now to authenticate?", True):
-                    os.system(auth_cmd)
+                    wait_status = os.system(auth_cmd)
+                    if agent.get("auth_cmd_confirms") and wait_status == 0:
+                        confirmed_auth_cmd = auth_cmd
             except KeyboardInterrupt:
                 raise
 
@@ -3322,9 +3415,15 @@ def _do_auth_impl(agent_key):
     elif auth_type == "subscription":
         console.print(f"\n  [dim]This agent requires a paid subscription. Visit {agent['homepage']} to subscribe.[/dim]")
 
-    # Persist only when credentials are actually detected
+    # Prefer detected credentials; otherwise trust an opted-in login command.
     discover_and_persist()
     result = discover_auth(agent_key)
+    if not result["auth_configured"] and confirmed_auth_cmd:
+        result = {
+            "auth_configured": True,
+            "method": "auth_command",
+            "source": confirmed_auth_cmd,
+        }
     config = load_config()
     entry = {
         **config["agents"].get(agent_key, {}),
@@ -5711,6 +5810,11 @@ def build_parser():
     # auth
     auth_p = sub.add_parser("auth", help="Configure authentication for an agent")
     auth_p.add_argument("agent", nargs="?", help="Agent key to authenticate")
+    auth_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Run authentication again and replace aikit's cached auth status",
+    )
 
     # serve
     serve_p = sub.add_parser("serve", help="Start web dashboard")
@@ -5800,7 +5904,7 @@ def cmd_list(args):
 
 def cmd_auth(args):
     if args.agent:
-        do_auth(args.agent)
+        do_auth(args.agent, force=args.force)
         return
     if not any(detect_agent_bin(k) for k in AGENTS):
         print_warning("No agents installed. Run 'aikit install' first.")
@@ -5819,7 +5923,7 @@ def cmd_auth(args):
         print_warning("No agent selected.")
         return
     for key in agent_keys:
-        do_auth(key)
+        do_auth(key, force=args.force)
 
 
 def cmd_serve(args):
