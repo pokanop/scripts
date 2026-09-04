@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.18.0
+aikit — AI Coding Agent CLI Installer & Manager  v1.18.1
 Install, update, authenticate, and manage 34 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.18.0"
+__version__ = "1.18.1"
 
 import scriptkit as sk
 
@@ -674,6 +674,13 @@ AGENTS = {
         "version_cmd": "kiro-cli --version",
         "update_cmd": None,
         "update_via_install": True,
+        # The installer at cli.kiro.dev itself resolves versions from the stable
+        # channel manifest (MANIFEST_URL in the install script).
+        "version_check": {
+            "type": "json_url",
+            "url": "https://prod.download.cli.kiro.dev/stable/latest/manifest.json",
+            "key": "version",
+        },
         "uninstall_cmd": binary_uninstall_cmd(
             "kiro-cli",
             extra_paths=[
@@ -777,6 +784,9 @@ AGENTS = {
         },
         "version_cmd": "openclaw --version",
         "update_cmd": "openclaw update",
+        # install.sh wraps `npm install -g openclaw` (its --version flag takes an
+        # npm dist-tag/spec), so the npm registry is the canonical version source.
+        "version_check": {"type": "npm", "package": "openclaw"},
         "uninstall_cmd": binary_uninstall_cmd(
             "openclaw",
             vendor_dirs=["$HOME/.openclaw", "$HOME/.claw", "$HOME/.config/openclaw"],
