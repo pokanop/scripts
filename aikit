@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.18.0
+aikit — AI Coding Agent CLI Installer & Manager  v1.18.1
 Install, update, authenticate, and manage 34 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.18.0"
+__version__ = "1.18.1"
 
 import scriptkit as sk
 
@@ -4830,7 +4830,10 @@ def _resolve_gateway_credentials(url, key, *, prompt_missing=True):
     if prompt_missing and not key:
         import getpass
 
-        key = getpass.getpass("  Virtual key (input hidden): ").strip()
+        try:
+            key = getpass.getpass("  Virtual key (input hidden): ").strip()
+        except EOFError:  # non-TTY stdin (CI/piped) — empty key, guard below fires
+            key = ""
     if not url or not key:
         raise AikitError(
             "gateway URL and virtual key are required — pass --url/--key or run 'aikit gateway on'."
