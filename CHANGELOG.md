@@ -79,7 +79,7 @@ Newest entries on top, within each tool.
 
 ## aikit
 
-### 1.18.1 — 2026-09-04
+### 1.18.2 — 2026-09-07
 - **Fix missing update checks for kiro and openclaw (POK-317).** The registry
   entries for Kiro CLI and OpenClaw had no `version_check` block, so `aikit
   list`/`doctor` always showed "—" in the Update column for them, `aikit update`
@@ -87,6 +87,16 @@ Newest entries on top, within each tool.
   classified as `unchanged` instead of `up_to_date`. kiro now reads the stable
   channel manifest the cli.kiro.dev installer itself uses; openclaw checks the
   `openclaw` npm package (its install.sh wraps `npm install -g openclaw`).
+
+### 1.18.1 — 2026-09-04
+- **Fix EOFError crash on non-TTY stdin in gateway credential prompt (POK-315).**
+  `aikit gateway on/verify/models` (or `on --dry-run`) without `--key` and with
+  no saved credentials crashed with a raw `EOFError` traceback when stdin was
+  not a TTY (piped, redirected, or CI). The hidden virtual-key prompt now
+  catches `EOFError` and treats it as an empty key, so the existing clean
+  "gateway URL and virtual key are required — pass --url/--key or run
+  'aikit gateway on'." error fires (exit 1, no traceback). Interactive TTY use
+  is unchanged; `KeyboardInterrupt` still propagates.
 
 ### 1.18.0 — 2026-09-02
 - **Fix OAuth status detection after successful login commands (POK-363).**
