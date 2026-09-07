@@ -79,7 +79,7 @@ Newest entries on top, within each tool.
 
 ## aikit
 
-### 1.18.2 — 2026-09-07
+### 1.18.3 — 2026-09-07
 - **Fix missing update checks for kiro and openclaw (POK-317).** The registry
   entries for Kiro CLI and OpenClaw had no `version_check` block, so `aikit
   list`/`doctor` always showed "—" in the Update column for them, `aikit update`
@@ -87,6 +87,15 @@ Newest entries on top, within each tool.
   classified as `unchanged` instead of `up_to_date`. kiro now reads the stable
   channel manifest the cli.kiro.dev installer itself uses; openclaw checks the
   `openclaw` npm package (its install.sh wraps `npm install -g openclaw`).
+
+### 1.18.2 — 2026-09-07
+- **Fix: `aikit config set` validates keys like `POST /api/config` does (POK-316).**
+  The CLI previously wrote unknown top-level keys (e.g. `aikit config set bogus.key val`)
+  into `~/.aikit/config.json` with exit 0, while the REST endpoint rejected the same
+  patch with HTTP 400. `do_config_set` now checks the top-level segment of the key
+  path against the known sections (`agents`, `settings`, `version`) — mirroring
+  `_validate_config_patch` — and raises `AikitError` (exit 1) on unknown keys, so
+  typos like `setting.web_port` no longer persist a silent no-op section.
 
 ### 1.18.1 — 2026-09-04
 - **Fix EOFError crash on non-TTY stdin in gateway credential prompt (POK-315).**

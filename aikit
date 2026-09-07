@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.18.2
+aikit — AI Coding Agent CLI Installer & Manager  v1.18.3
 Install, update, authenticate, and manage 34 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -52,7 +52,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.18.2"
+__version__ = "1.18.3"
 
 import scriptkit as sk
 
@@ -5317,6 +5317,14 @@ def do_config_get(key_path):
 
 
 def do_config_set(key_path, value):
+    # Mirror POST /api/config validation (_validate_config_patch): reject
+    # unknown top-level keys instead of silently persisting them.
+    top = key_path.split(".", 1)[0]
+    if top not in DEFAULT_CONFIG:
+        raise AikitError(
+            f"Unknown config key: {top} (known top-level keys: "
+            f"{', '.join(sorted(DEFAULT_CONFIG))})"
+        )
     config = load_config()
     _config_set_nested(config, key_path, value)
     save_config(config)
