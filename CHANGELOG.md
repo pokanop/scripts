@@ -79,6 +79,16 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.18.1 — 2026-09-04
+- **Fix EOFError crash on non-TTY stdin in gateway credential prompt (POK-315).**
+  `aikit gateway on/verify/models` (or `on --dry-run`) without `--key` and with
+  no saved credentials crashed with a raw `EOFError` traceback when stdin was
+  not a TTY (piped, redirected, or CI). The hidden virtual-key prompt now
+  catches `EOFError` and treats it as an empty key, so the existing clean
+  "gateway URL and virtual key are required — pass --url/--key or run
+  'aikit gateway on'." error fires (exit 1, no traceback). Interactive TTY use
+  is unchanged; `KeyboardInterrupt` still propagates.
+
 ### 1.18.0 — 2026-09-02
 - **Fix OAuth status detection after successful login commands (POK-363).**
   `aikit auth` now records a successful dedicated login command across nine
