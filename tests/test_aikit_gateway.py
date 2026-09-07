@@ -444,3 +444,47 @@ def test_gateway_off_purge_flag_routes_to_purge(aikit, isolated_gateway, monkeyp
                                  purge=True, yes=True)
     aikit.cmd_gateway(args)
     assert calls == [("purge", {"shell": None, "yes": True, "dry_run": False})]
+
+
+# --- credential resolution on non-TTY stdin (POK-315) ------------------------
+def test_resolve_gateway_credentials_eof_on_stdin_raises_clean_error(aikit,
+                                                                    isolated_gateway,
+                                                                    monkeypatch):
+    """Non-TTY stdin (CI/piped) with nothing saved and no --key: the hidden key prompt's
+    EOFError must surface as the clean "gateway URL and virtual key are required"
+    AikitError — not an unhandled traceback."""
+    import getpass
+
+    def _eof(*args, **kwargs):
+        raise EOFError
+
+    monkeypatch.setattr(aikit, "_prompt", lambda *a, **k: "")  # URL prompt: EOF → default ""
+    monkeypatch.setattr(getpass, "getpass", _eof)        # key prompt: raw EOF
+
+    with pytest.raises(aikit.AikitError, match="gateway URL and virtual key are required"):
+        aikit._resolve_gateway_credentials(None, None)
+
+
+def test_resolve_gateway_credentials_eof_on_key_only_still_clean(aikit,
+                                                                 isolated_gateway,
+                                                                 monkeypatch):
+    """URL provided but key prompt hits EOF: same clean AikitError, empty key never
+    passed downstream."""
+    import getpass
+
+    def _eof(*args, **kwargs):
+        raise EOFError
+
+    monkeypatch.setattr(getpass, "getpass", _eof)
+    with pytest.raises(aikit.AikitError, match="gateway URL and virtual key are required"):
+        aikit._resolve_gateway_credentials("https://gw.example.com", None)
+
+
+def test_resolve_gateway_credentials_typed_key_still_works(aikit, isolated_gateway,
+                                                           monkeypatch):
+    """TTY-style input path is unchanged: a typed key resolves normally."""
+    import getpass
+    monkeypatch.setattr(getpass, "getpass", lambda *a, **k: "sk-typed-123")
+    url, key = aikit._resolve_gateway_credentials("https://gw.example.com", None)
+    assert url == "https://gw.example.com"
+    assert key == "sk-typed-123"
