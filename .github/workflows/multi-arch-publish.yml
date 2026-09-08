@@ -73,10 +73,6 @@ jobs:
     timeout-minutes: 30
     outputs:
       digest: ${{ steps.build.outputs.digest }}
-    env:
-      IMAGE_NAME: ${{ inputs.image-name }}
-      DOCKERFILE: ${{ inputs.dockerfile || 'Dockerfile.smoketest' }}
-      BUILD_CONTEXT: ${{ inputs.context || '.' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -93,11 +89,11 @@ jobs:
         uses: docker/build-push-action@v6
         id: build
         with:
-          context: ${BUILD_CONTEXT}
-          file: ${DOCKERFILE}
+          context: ${{ inputs.context || '.' }}
+          file: ${{ inputs.dockerfile || 'Dockerfile' }}
           platforms: linux/amd64
           build-args: ${{ inputs.build-args }}
-          outputs: type=image,name=ghcr.io/${IMAGE_NAME},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=ghcr.io/${{ inputs.image-name }},push-by-digest=true,name-canonical=true,push=true
 
   publish-arm64:
     name: Publish (arm64, macOS-ARM64)
@@ -105,10 +101,6 @@ jobs:
     timeout-minutes: 30
     outputs:
       digest: ${{ steps.build.outputs.digest }}
-    env:
-      IMAGE_NAME: ${{ inputs.image-name }}
-      DOCKERFILE: ${{ inputs.dockerfile || 'Dockerfile.smoketest' }}
-      BUILD_CONTEXT: ${{ inputs.context || '.' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -139,11 +131,11 @@ jobs:
         uses: docker/build-push-action@v6
         id: build
         with:
-          context: ${BUILD_CONTEXT}
-          file: ${DOCKERFILE}
+          context: ${{ inputs.context || '.' }}
+          file: ${{ inputs.dockerfile || 'Dockerfile' }}
           platforms: linux/arm64
           build-args: ${{ inputs.build-args }}
-          outputs: type=image,name=ghcr.io/${IMAGE_NAME},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=ghcr.io/${{ inputs.image-name }},push-by-digest=true,name-canonical=true,push=true
 
   publish-manifest:
     name: Merge multi-arch index
