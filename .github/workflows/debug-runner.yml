@@ -1,0 +1,8 @@
+name: Debug runner
+on: workflow_dispatch
+jobs:
+  ping:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 5
+    steps:
+      - run: echo "runner reachable $(uname -m)"
