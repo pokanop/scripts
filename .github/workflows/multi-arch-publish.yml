@@ -1,0 +1,201 @@
+# Reusable org-wide multi-arch image publisher for pokanop.
+#
+# Design contract (2026-09-08):
+#   - NO machine names anywhere: jobs target generic labels only
+#     ([self-hosted, linux, x64] / [self-hosted, macOS, ARM64]).
+#     Adding, renaming, or re-homing runners never requires touching consumers.
+#   - Per-arch native builds: amd64 on linux-x64 runners, arm64 on the macOS
+#     ARM64 runner. QEMU emulation is eliminated (it hung publishes and wedged
+#     runners; doctopus incident 2026-09-07).
+#   - Manifest merge on ubuntu-latest: free GitHub compute, keeps self-hosted
+#     slots free for CI.
+#   - macOS credential handling is keychain-free: GHCR auth is written directly
+#     into a job-local DOCKER_CONFIG (proven against a live authenticated
+#     registry; osxkeychain headless error -25308 eliminated).
+#   - macOS docker endpoint is captured from the active docker context BEFORE
+#     config isolation (the orbstack socket is not guaranteed at the default
+#     /var/run path across reboots).
+#   - :latest is only moved when the built commit is still the branch tip,
+#     so an older concurrent run can never regress the tag.
+#
+# Consumed via workflow_call. Deploy hooks stay in each consumer repo after
+# this workflow (LAN addresses remain repo-local).
+
+name: Multi-arch publish
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: 'GHCR image path without tag, e.g. pokanop/doctopus'
+        required: true
+        type: string
+      build-args:
+        description: 'Build args passed to docker build (optional)'
+        required: false
+        type: string
+        default: ''
+      dockerfile:
+        description: 'Path to Dockerfile (optional)'
+        required: false
+        type: string
+        default: 'Dockerfile'
+      context:
+        description: 'Build context (optional)'
+        required: false
+        type: string
+        default: '.'
+    outputs:
+      digest:
+        description: 'Digest of the merged multi-arch index'
+        value: ${{ jobs.publish-manifest.outputs.digest }}
+  workflow_dispatch:
+    inputs:
+      image-name:
+        description: 'Image name for smoke test'
+        required: false
+        type: string
+        default: 'pokanop/scripts-smoketest'
+      dockerfile:
+        description: 'Dockerfile path (smoke test uses Dockerfile.smoketest)'
+        required: false
+        type: string
+        default: 'Dockerfile.smoketest'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish-amd64:
+    name: Publish (amd64, linux-x64)
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    env:
+      IMAGE_NAME: ${{ inputs.image-name }}
+      DOCKERFILE: ${{ inputs.dockerfile || 'Dockerfile.smoketest' }}
+      BUILD_CONTEXT: ${{ inputs.context || '.' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push by digest (amd64)
+        uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: ${BUILD_CONTEXT}
+          file: ${DOCKERFILE}
+          platforms: linux/amd64
+          build-args: ${{ inputs.build-args }}
+          outputs: type=image,name=ghcr.io/${IMAGE_NAME},push-by-digest=true,name-canonical=true,push=true
+
+  publish-arm64:
+    name: Publish (arm64, macOS-ARM64)
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 30
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    env:
+      IMAGE_NAME: ${{ inputs.image-name }}
+      DOCKERFILE: ${{ inputs.dockerfile || 'Dockerfile.smoketest' }}
+      BUILD_CONTEXT: ${{ inputs.context || '.' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Isolate docker config and write GHCR auth directly (keychain-free)
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # DOCKER_HOST: capture the active context's endpoint (orbstack socket
+          # on macOS) BEFORE isolating config; /var/run/docker.sock is not
+          # guaranteed across reboots.
+          docker_host="$(docker context inspect --format '{{.Endpoints.docker.Host}}')"
+          printf 'DOCKER_HOST=%s\n' "${docker_host}" >> "${GITHUB_ENV}"
+
+          docker_config="$(mktemp -d "${RUNNER_TEMP}/docker.XXXXXXXX")"
+          chmod 700 "${docker_config}"
+
+          # GHCR auth written directly: no credsStore, no credential helper,
+          # no docker login — the macOS keychain is never consulted.
+          auth="$(printf '%s:%s' "${GITHUB_ACTOR}" "${GITHUB_TOKEN}" | base64 | tr -d '\n')"
+          umask 177
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "${auth}" > "${docker_config}/config.json"
+          printf 'DOCKER_CONFIG=%s\n' "${docker_config}" >> "${GITHUB_ENV}"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push by digest (arm64)
+        uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: ${BUILD_CONTEXT}
+          file: ${DOCKERFILE}
+          platforms: linux/arm64
+          build-args: ${{ inputs.build-args }}
+          outputs: type=image,name=ghcr.io/${IMAGE_NAME},push-by-digest=true,name-canonical=true,push=true
+
+  publish-manifest:
+    name: Merge multi-arch index
+    needs: [publish-amd64, publish-arm64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      digest: ${{ steps.merge.outputs.digest }}
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Check whether this commit is still the branch tip
+        id: tip
+        run: |
+          tip="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/heads/${GITHUB_REF_NAME}" | cut -f1)"
+          if [ "${tip}" = "${GITHUB_SHA}" ]; then
+            echo "is_tip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "is_tip=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::branch ${GITHUB_REF_NAME} has moved to ${tip}; publishing sha tag only for ${GITHUB_SHA}"
+          fi
+
+      - name: Merge per-arch images into multi-arch index
+        id: merge
+        env:
+          AMD64_DIGEST: ${{ needs.publish-amd64.outputs.digest }}
+          ARM64_DIGEST: ${{ needs.publish-arm64.outputs.digest }}
+          IS_TIP: ${{ steps.tip.outputs.is_tip }}
+          IMAGE_NAME: ${{ inputs.image-name }}
+        run: |
+          tags_args=(-t "ghcr.io/${IMAGE_NAME}:${GITHUB_SHA}")
+          if [ "${IS_TIP}" = "true" ]; then
+            tags_args+=(-t "ghcr.io/${IMAGE_NAME}:latest")
+          fi
+          docker buildx imagetools create \
+            "${tags_args[@]}" \
+            "ghcr.io/${IMAGE_NAME}@${AMD64_DIGEST}" \
+            "ghcr.io/${IMAGE_NAME}@${ARM64_DIGEST}"
+
+          index_digest="$(docker buildx imagetools inspect "ghcr.io/${IMAGE_NAME}:${GITHUB_SHA}" --raw 2>/dev/null | sha256sum | cut -d' ' -f1 || true)"
+          echo "digest=sha256:${index_digest}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify both architectures present
+        run: |
+          index="$(docker buildx imagetools inspect "ghcr.io/${IMAGE_NAME}:${GITHUB_SHA}" --raw)"
+          echo "${index}" | jq -e '
+            any(.manifests[]; .platform.os == "linux" and .platform.architecture == "amd64") and
+            any(.manifests[]; .platform.os == "linux" and .platform.architecture == "arm64")
+          ' >/dev/null || { echo "::error::merged index is missing an architecture"; exit 1; }
+          echo "${index}" | jq -r '.manifests[] | "\(.platform.os)/\(.platform.architecture) \(.digest)"'
