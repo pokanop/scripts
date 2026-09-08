@@ -184,6 +184,8 @@ jobs:
           echo "digest=sha256:${index_digest}" >> "${GITHUB_OUTPUT}"
 
       - name: Verify both architectures present
+        env:
+          IMAGE_NAME: ${{ inputs.image-name }}
         run: |
           index="$(docker buildx imagetools inspect "ghcr.io/${IMAGE_NAME}:${GITHUB_SHA}" --raw)"
           echo "${index}" | jq -e '
