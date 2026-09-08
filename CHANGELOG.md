@@ -79,6 +79,15 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.18.3 — 2026-09-07
+- **Fix missing update checks for kiro and openclaw (POK-317).** The registry
+  entries for Kiro CLI and OpenClaw had no `version_check` block, so `aikit
+  list`/`doctor` always showed "—" in the Update column for them, `aikit update`
+  re-ran their update/install command even when already current, and outcomes
+  classified as `unchanged` instead of `up_to_date`. kiro now reads the stable
+  channel manifest the cli.kiro.dev installer itself uses; openclaw checks the
+  `openclaw` npm package (its install.sh wraps `npm install -g openclaw`).
+
 ### 1.18.2 — 2026-09-07
 - **Fix: `aikit config set` validates keys like `POST /api/config` does (POK-316).**
   The CLI previously wrote unknown top-level keys (e.g. `aikit config set bogus.key val`)

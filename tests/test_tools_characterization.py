@@ -595,6 +595,41 @@ def test_aikit_auggie_registry_entry(tool_loader):
     assert auggie["version_check"]["package"] == "@augmentcode/auggie"
 
 
+def test_aikit_kiro_registry_entry(tool_loader):
+    m = tool_loader("aikit")
+    kiro = m.AGENTS["kiro"]
+    assert kiro["bin"] == "kiro-cli"
+    assert kiro.get("update_via_install") is True
+    # POK-317: kiro must have a version_check — the stable-channel manifest the
+    # cli.kiro.dev installer itself resolves versions from.
+    spec = kiro["version_check"]
+    assert spec["type"] == "json_url"
+    assert spec["url"] == "https://prod.download.cli.kiro.dev/stable/latest/manifest.json"
+    assert spec["key"] == "version"
+
+
+def test_aikit_openclaw_registry_entry(tool_loader):
+    m = tool_loader("aikit")
+    openclaw = m.AGENTS["openclaw"]
+    assert openclaw["bin"] == "openclaw"
+    assert openclaw["update_cmd"] == "openclaw update"
+    # POK-317: openclaw must have a version_check — install.sh wraps
+    # `npm install -g openclaw`, so the npm registry is the version source.
+    assert openclaw["version_check"] == {"type": "npm", "package": "openclaw"}
+    # Curl-installed npm-published agent: explicit uninstall stays non-npm-derived.
+    cmd = m.resolve_uninstall_cmd(openclaw)
+    assert cmd and "npm uninstall -g openclaw" not in cmd
+    assert ".openclaw" in cmd
+
+
+def test_aikit_every_agent_has_version_check(tool_loader):
+    # POK-317 registry audit: a missing version_check silently disables the
+    # update column, the up-to-date short-circuit, and outcome classification.
+    m = tool_loader("aikit")
+    missing = [key for key, agent in m.AGENTS.items() if not agent.get("version_check")]
+    assert missing == []
+
+
 def test_aikit_droid_registry_entry(tool_loader):
     m = tool_loader("aikit")
     droid = m.AGENTS["droid"]
