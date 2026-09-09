@@ -1,6 +1,6 @@
 # 🤖 aikit — AI Coding Agent CLI Installer & Manager
 
-**Install, update, authenticate, and manage 34 AI coding agent CLIs from one tool.**
+**Install, update, authenticate, and manage 38 AI coding agent CLIs from one tool.**
 
 `aikit` · Python 3 · `rich` · `flask` · `requests`
 
@@ -25,7 +25,7 @@ aikit setup
 
 ---
 
-## Agents (34)
+## Agents (38)
 
 | # | Agent | Install | Auth |
 |---|-------|---------|------|
@@ -63,6 +63,10 @@ aikit setup
 | 32 | 🧬 **MiMo Code** | `curl` script / `npm` | First-run wizard in `mimo` (MiMo Auto free, Xiaomi OAuth, Claude Code import, or any OpenAI-compatible API) |
 | 33 | 🥧 **Oh My Pi** | `curl` script / `npm` | `/login` in `omp` (subscription OAuth) or provider env vars (Anthropic/OpenAI/Gemini/Groq/xAI/OpenRouter) |
 | 34 | 🌊 **Mistral Vibe** | `curl` script / `pip` | `vibe` first-run wizard (browser OAuth to a Mistral account) or `MISTRAL_API_KEY` |
+| 35 | 🪐 **Jules** | `npm` | `jules login` (Google account OAuth; async cloud-VM agent) |
+| 36 | 🦘 **Roo Code CLI** | `curl` script (Linux x64 / macOS arm64) | BYOK — `OPENROUTER_API_KEY` (default) or another provider key / `--provider --api-key` |
+| 37 | 🐃 **Codebuff** | `npm` | First launch of `codebuff` opens a browser sign-in; `CODEBUFF_API_KEY` for CI |
+| 38 | 🧿 **Qoder CLI** | `curl` script / PowerShell | `/login` inside `qoder` (browser OAuth) or `QODER_PERSONAL_ACCESS_TOKEN` for CI |
 
 ### Not managed
 
@@ -78,12 +82,72 @@ aikit setup
 | `aikit install [agents...]` | Install agents (multi-select picker if none) |
 | `aikit update [agents...]` | Update agents (all installed if none) |
 | `aikit uninstall [agent...]` | Remove agents |
-| `aikit list` | Status table of all 34 agents |
+| `aikit list` | Status table of all 38 agents |
 | `aikit auth [agent] [--force]` | Guided authentication setup; `--force` replaces cached auth status and signs in again |
 | `aikit doctor` | Diagnose environment and agent health |
 | `aikit serve` | Start web dashboard |
 | `aikit config get/set/list` | Manage `~/.aikit/config.json` |
 | `aikit gateway on/off/status/coverage/models` | Route AI tools through a LiteLLM gateway — see **[gateway docs](aikit-gateway.md)** |
+| `aikit usage [providers...] [--json] [--all]` | Unified plan / credits / spend / rate-limit snapshot across providers — see below |
+
+### Usage snapshot (`aikit usage`)
+
+`aikit usage` reads the credentials the CLIs already store on disk (OAuth tokens,
+session cookies, API keys — nothing is ever written back) and queries each
+provider's own usage endpoint — the same endpoints the open-source trackers
+[CodexBar](https://github.com/steipete/CodexBar),
+[ai-usagebar](https://github.com/akitaonrails/ai-usagebar), MeterBar, UsageOwl
+and OpenUsage use, cross-checked against each other so parsers key on semantic
+fields (window durations, quota types) rather than array positions. Every
+provider is normalised into one record — `account`, `plan`, rate-limit
+`windows` (label / used % / used / limit / resets_at), `credits`
+(remaining / total / used), `spend` (amount / currency / period / limit) and a
+`status` of `ok`, `unauthenticated`, `error` or `unsupported` — and rendered as
+one table. Probes run in parallel and never raise: a provider that is not
+signed in shows the exact command or env var to fix it, an API failure shows the
+HTTP status, and secrets never appear in any output (including `--json`).
+
+```bash
+aikit usage                      # every provider with a usage API that is signed in
+aikit usage claude codex --json  # machine-readable snapshot for scripting
+aikit usage --all                # also list not-signed-in / unsupported providers
+```
+
+| Provider | Credential source (read-only) | What is reported |
+|----------|-------------------------------|------------------|
+| Codex | `~/.codex/auth.json` (`$CODEX_HOME`) | plan, email, windows labelled by duration (5h/weekly/daily), code-review + per-model extra limits, credit balance, banked reset credits |
+| Claude Code | `~/.claude/.credentials.json` (`$CLAUDE_CONFIG_DIR`), macOS Keychain | plan, 5h / weekly / per-model windows, extra-usage spend |
+| GitHub Copilot | `$GITHUB_COPILOT_TOKEN` / `$COPILOT_GITHUB_TOKEN` / `$GH_TOKEN` / `$GITHUB_TOKEN`, `~/.config/github-copilot/{apps,hosts}.json`, `~/.config/gh/hosts.yml`, `gh auth token` (keyring) | plan, premium-request quota, entitlements, reset date, login |
+| Gemini CLI | `~/.gemini/oauth_creds.json` | tier, per-model remaining quota + reset, project |
+| Grok CLI | `~/.grok/auth.json` | tier, credit usage %, on-demand spend/cap, period end |
+| Kiro CLI | `kiro-cli/data.sqlite3` (Linux/macOS) | plan, credit usage vs limit, overage, reset |
+| Cursor | `$CURSOR_SESSION_TOKEN`, Cursor desktop `state.vscdb`, headless `cursor-agent` `~/.config/cursor/auth.json` | membership, included-usage % (total / Cursor models / other models), included $ used, on-demand enabled, billing cycle end |
+| Amp | `$AMP_API_KEY`, `~/.config/amp/secrets.json` | plan, free quota, credit balance, email |
+| Droid (Factory) | `$FACTORY_API_KEY`, `~/.factory/.env` | plan, standard/premium token allowance, overage, period end |
+| Kilo Code | `$KILO_API_KEY`, `~/.local/share/kilo/auth.json` (+ `$KILO_ORGANIZATION_ID`) | credit balance (USD) via `/api/profile/balance` |
+| OpenCode Go | `~/.local/share/opencode/auth.json` | rolling / weekly / monthly windows |
+| OpenRouter | `$OPENROUTER_API_KEY` (+ `$OPENROUTER_MANAGEMENT_API_KEY`) | key label, key spend vs limit, credits purchased / used / remaining |
+| Synthetic | `$SYNTHETIC_API_KEY` | per-quota usage with resets |
+| z.ai | `$Z_AI_API_KEY` | GLM Coding plan level, 5h session + weekly token quota, monthly MCP-tool calls |
+| Kimi Code | `$KIMI_API_KEY`, `~/.kimi-code/credentials/kimi-code.json` (+ `region` → `.ai`/`.com`) | membership level, weekly + 5h windows, token expiry |
+| Codebuff | `$CODEBUFF_API_KEY` (balance only), `~/.config/manicode/credentials.json` (+ plan, weekly limit) | credits used / quota, remaining balance, plan, weekly limit |
+| Devin | `$DEVIN_BEARER_TOKEN` + `$DEVIN_ORG_ID` | ACU usage vs plan limit |
+
+API-key billing sources that are not installable agents (probed automatically
+when the env var is set; e.g. `aikit usage deepseek openai-api`):
+
+| Provider | Credential | What is reported |
+|----------|------------|------------------|
+| DeepSeek API (`deepseek`) | `$DEEPSEEK_API_KEY` | balance (USD preferred), granted / topped-up split |
+| Moonshot API (`moonshot`) | `$MOONSHOT_API_KEY` (+ `$MOONSHOT_BASE_URL` for `.cn`) | available / voucher / cash balance |
+| MiniMax Coding Plan (`minimax`) | `$MINIMAX_API_KEY` (+ `$MINIMAX_BASE_URL`) | per-model rolling + weekly request windows |
+| Novita AI (`novita`) | `$NOVITA_API_KEY` | available / cash balance, credit limit, pending charges |
+| Anthropic API (`anthropic-api`) | `$ANTHROPIC_ADMIN_KEY` (org admin key) | month-to-date org spend (paginated `cost_report`; refuses partial totals) |
+| OpenAI API (`openai-api`) | `$OPENAI_ADMIN_KEY` (org admin key) | month-to-date org spend (`/v1/organization/costs`) |
+
+All other agents report `unsupported` (their vendors expose no usage API).
+Trackers that rely on browser-only HttpOnly cookies (Windsurf, Warp, Zed) or
+local-transcript cost estimates were reviewed and deliberately not replicated.
 
 ### Multi-Select Picker
 
@@ -97,7 +161,7 @@ Select agents to install
    2. [ ] 🛸 Antigravity
    3. [X] 🖱️ Cursor CLI
   ...
-  Selected: 1/34  cursor
+  Selected: 1/38  cursor
 ```
 
 Press `Space` or enter numbers to toggle. Press `Enter` to confirm. Press `q` to cancel.
@@ -188,7 +252,7 @@ logged.
 
 ```
 aikit                          # Single-file Python script (~1,600 lines)
-├── Agent registry             # 34 agents, each with platform-aware install commands
+├── Agent registry             # 38 agents, each with platform-aware install commands
 ├── Subprocess runner          # Install/update/uninstall execution
 ├── Config system              # JSON-based, three-tier loading, env var overrides
 ├── Rich TUI                   # Tables, panels, interactive multi-select picker

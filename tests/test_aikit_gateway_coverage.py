@@ -48,7 +48,7 @@ def test_coverage_classifies_every_agent(aikit):
     cov = aikit.gateway_coverage()
     # Every agent in the registry is classified — the anti-silent-omission guarantee.
     assert set(cov) == set(aikit.AGENTS)
-    assert len(cov) == 34
+    assert len(cov) == 38
 
 
 def test_coverage_bucket_counts_match_audit(aikit):
@@ -58,7 +58,7 @@ def test_coverage_bucket_counts_match_audit(aikit):
         counts[c["state"]] = counts.get(c["state"], 0) + 1
     # POK-313: +3 pending (mimo, omp, vibe) — AgentPeek-gap agents without a
     # verified env/renderer yet; tracked loudly, not silently defaulted.
-    assert counts == {"renderer": 12, "env": 7, "pending": 7, "unsupported": 8}
+    assert counts == {"renderer": 12, "env": 7, "pending": 9, "unsupported": 10}
     assert "unclassified" not in counts   # nothing left uncategorised
 
 
@@ -104,7 +104,7 @@ def test_unclassified_agent_is_surfaced_not_dropped(aikit, monkeypatch):
 # --- rows builder -----------------------------------------------------------
 def test_coverage_rows_span_all_agents_in_state_order(aikit):
     rows = aikit.gateway_coverage_rows(detector=lambda k: False)
-    assert len(rows) == 34
+    assert len(rows) == 38
     assert {r["id"] for r in rows} == set(aikit.AGENTS)
     # Grouped: the first 12 rows are the renderer set (sorted within the group).
     assert all(r["state"] == "renderer" for r in rows[:12])
