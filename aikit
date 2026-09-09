@@ -27,6 +27,7 @@ Dependencies:
 import base64
 import difflib
 import json
+import math
 import os
 import platform
 import re
@@ -6047,7 +6048,7 @@ def usage_result(provider, status, *, account=None, plan=None, source=None, wind
     credits: {"remaining": float|None, "total": float|None, "used": float|None, "unit": str}
     spend:   {"amount": float, "currency": str, "period": str, "limit": float|None}
     """
-    agent = AGENTS.get(provider, {})
+    agent = AGENTS.get(provider) or USAGE_ONLY_PROVIDERS.get(provider, {})
     return {
         "provider": provider,
         "name": agent.get("name", provider),
@@ -6110,7 +6111,7 @@ def _claude_credentials():
 
 
 def _copilot_credentials():
-    token, src = _usage_env("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
+    token, src = _usage_env("GITHUB_COPILOT_TOKEN", "COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
     if token:
         return {"token": token, "source": src}
     home = _usage_home()
@@ -6129,6 +6130,13 @@ def _copilot_credentials():
     m = re.search(r"oauth_token:\s*(\S+)", text)
     if m:
         return {"token": m.group(1), "source": str(hosts)}
+    if text and which("gh"):
+        env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN")}
+        env["HOME"] = str(home)
+        env.setdefault("GH_CONFIG_DIR", str(xdg / "gh"))
+        code, out, _ = run(["gh", "auth", "token"], timeout=10, shell=False, env=env)
+        if code == 0 and out.strip():
+            return {"token": out.strip(), "source": "gh auth token"}
     return None
 
 
@@ -6229,13 +6237,35 @@ def _cursor_credentials():
         return {"cookie": token, "source": src}
     db = _cursor_db_path()
     access = _sqlite_value(db, "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'")
+    source = str(db)
+    if not access:
+        xdg = Path(os.environ.get("XDG_CONFIG_HOME") or _usage_home() / ".config")
+        agent_auth = xdg / "cursor" / "auth.json"
+        data = _usage_read_json(agent_auth)
+        access = data.get("accessToken") if isinstance(data, dict) else None
+        source = str(agent_auth)
     if not access:
         return None
     sub = _jwt_subject(access) or ""
     user_id = sub.split("|", 1)[1] if "|" in sub else sub
     if not user_id:
         return None
-    return {"cookie": f"{user_id}%3A%3A{access}", "source": str(db)}
+    return {"cookie": f"{user_id}%3A%3A{access}", "source": source}
+
+
+def _codebuff_credentials():
+    token, src = _usage_env("CODEBUFF_API_KEY")
+    if token:
+        return {"token": token, "source": src}
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or _usage_home() / ".config")
+    path = xdg / "manicode" / "credentials.json"
+    data = _usage_read_json(path)
+    if isinstance(data, dict):
+        default = data.get("default") if isinstance(data.get("default"), dict) else {}
+        token = default.get("authToken") or data.get("authToken")
+        if isinstance(token, str) and token.strip():
+            return {"token": token.strip(), "source": str(path)}
+    return None
 
 
 def _amp_credentials():
@@ -6295,12 +6325,19 @@ def _kimi_credentials():
     token, src = _usage_env("KIMI_API_KEY")
     if token:
         return {"token": token, "source": src}
-    path = _usage_home() / ".kimi-code" / "credentials" / "kimi-code.json"
+    kimi_home = _usage_home() / ".kimi-code"
+    path = kimi_home / "credentials" / "kimi-code.json"
     data = _usage_read_json(path)
     if isinstance(data, dict):
         token = data.get("access_token") or data.get("api_key") or data.get("token")
         if token:
-            return {"token": token, "source": str(path)}
+            try:
+                region = (kimi_home / "region").read_text().strip()
+            except OSError:
+                region = ""
+            expires = _usage_number(data.get("expires_at"))
+            return {"token": token, "source": str(path), "region": region,
+                    "expired": bool(expires and expires < time.time())}
     return None
 
 
@@ -6314,27 +6351,69 @@ def _probe_codex(provider="codex"):
     if creds.get("account_id"):
         headers["ChatGPT-Account-Id"] = creds["account_id"]
     data = _usage_get_json("https://chatgpt.com/backend-api/wham/usage", headers)
-    windows = []
-    rl = data.get("rate_limit") or {}
-    for key, label in (("primary_window", "5h session"), ("secondary_window", "weekly")):
-        w = rl.get(key) or {}
-        if w:
-            windows.append(usage_window(
-                label, used_pct=w.get("used_percent"), resets_at=w.get("reset_at")))
+    windows = _codex_rate_limit_windows(data.get("rate_limit"), "")
+    windows += _codex_rate_limit_windows(data.get("code_review_rate_limit"), "code review ")
     for extra in data.get("additional_rate_limits") or []:
-        w = (extra.get("rate_limit") or {}).get("primary_window") or {}
-        if w:
-            windows.append(usage_window(
-                extra.get("limit_name") or extra.get("metered_feature") or "additional",
-                used_pct=w.get("used_percent"), resets_at=w.get("reset_at")))
+        if not isinstance(extra, dict):
+            continue
+        name = extra.get("limit_name") or extra.get("metered_feature") or "additional"
+        windows += _codex_rate_limit_windows(extra.get("rate_limit"), f"{name} ")
     credits = None
     c = data.get("credits") or {}
-    if c.get("has_credits") is not None or c.get("balance") is not None:
-        credits = {"remaining": c.get("balance"), "total": None, "used": None, "unit": "credits",
-                   "unlimited": bool(c.get("unlimited"))}
+    if isinstance(c, dict) and (c.get("has_credits") is not None or c.get("balance") is not None):
+        credits = {"remaining": _usage_number(c.get("balance")), "total": None, "used": None,
+                   "unit": "credits", "unlimited": bool(c.get("unlimited"))}
+    extra = {}
+    resets = data.get("rate_limit_reset_credits")
+    if isinstance(resets, dict) and resets.get("available_count"):
+        extra["reset_credits"] = resets["available_count"]
     return usage_result(
-        provider, USAGE_OK, account=data.get("account_id") or creds.get("account_id"),
-        plan=data.get("plan_type"), source=creds["source"], windows=windows, credits=credits)
+        provider, USAGE_OK, account=data.get("email") or data.get("account_id") or creds.get("account_id"),
+        plan=data.get("plan_type"), source=creds["source"], windows=windows, credits=credits, extra=extra)
+
+
+def _codex_window_label(seconds):
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0:
+        return None
+    if seconds % 86400 == 0:
+        days = seconds // 86400
+        return "weekly" if days == 7 else ("daily" if days == 1 else f"{days}d")
+    if seconds % 3600 == 0:
+        hours = seconds // 3600
+        return "5h session" if hours == 5 else f"{hours}h"
+    return f"{seconds // 60}m"
+
+
+def _codex_rate_limit_windows(rl, prefix):
+    """Windows are named by their duration, not by primary/secondary position,
+    so a weekly-only response still labels correctly."""
+    if not isinstance(rl, dict):
+        return []
+    out = []
+    fallback = {"primary_window": "5h session", "secondary_window": "weekly"}
+    for key in ("primary_window", "secondary_window"):
+        w = rl.get(key)
+        if not isinstance(w, dict) or w.get("used_percent") is None:
+            continue
+        label = _codex_window_label(w.get("limit_window_seconds")) or fallback[key]
+        out.append(usage_window(f"{prefix}{label}".strip(), used_pct=w["used_percent"],
+                                resets_at=w.get("reset_at")))
+    return out
+
+
+def _usage_number(value):
+    """Coerce a JSON number-or-numeric-string to float; None otherwise."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
 
 
 def _probe_claude(provider="claude"):
@@ -6364,7 +6443,13 @@ def _probe_copilot(provider="copilot"):
     creds = _copilot_credentials()
     if not creds:
         return _unauth(provider, "no GitHub token — run 'copilot login' or set GH_TOKEN")
-    headers = {"Authorization": f"token {creds['token']}"}
+    headers = {
+        "Authorization": f"token {creds['token']}",
+        "Editor-Version": "vscode/1.96.2",
+        "Editor-Plugin-Version": "copilot-chat/0.26.7",
+        "User-Agent": "GitHubCopilotChat/0.26.7",
+        "X-GitHub-Api-Version": "2025-04-01",
+    }
     data = _usage_get_json("https://api.github.com/copilot_internal/user", headers)
     windows = []
     snapshots = data.get("quota_snapshots") or {}
@@ -6486,21 +6571,39 @@ def _probe_cursor(provider="cursor"):
                "Referer": "https://cursor.com/dashboard"}
     data = _usage_get_json("https://cursor.com/api/usage-summary", headers)
     windows = []
-    plan_usage = data.get("individualUsage") or data.get("planUsage") or {}
-    plan_used = plan_usage.get("plan", plan_usage) if isinstance(plan_usage, dict) else {}
-    if isinstance(plan_used, dict) and (plan_used.get("used") is not None or plan_used.get("limit") is not None):
-        windows.append(usage_window("plan (billing cycle)", used=plan_used.get("used"),
-                                    limit=plan_used.get("limit"), unit="USD",
-                                    resets_at=data.get("billingCycleEnd")))
-    spend = None
-    on_demand = data.get("onDemand") or plan_usage.get("onDemand") if isinstance(plan_usage, dict) else None
+    cycle_end = data.get("billingCycleEnd")
+    individual = data.get("individualUsage") if isinstance(data.get("individualUsage"), dict) else {}
+    plan_usage = individual.get("plan") if isinstance(individual.get("plan"), dict) else None
+    if plan_usage:
+        for key, label in (("totalPercentUsed", "included usage"), ("autoPercentUsed", "Cursor models"),
+                           ("apiPercentUsed", "other models")):
+            pct = _usage_number(plan_usage.get(key))
+            if pct is not None:
+                windows.append(usage_window(label, used_pct=pct, resets_at=cycle_end))
+    else:
+        for key, label in (("autoModelSelectedDisplayMessage", "Cursor models"),
+                           ("namedModelSelectedDisplayMessage", "other models")):
+            m = re.search(r"(\d+(?:\.\d+)?)%", str(data.get(key) or ""))
+            if m:
+                windows.append(usage_window(label, used_pct=float(m.group(1)), resets_at=cycle_end))
+    overall = individual.get("overall") if isinstance(individual.get("overall"), dict) else {}
+    used_cents, limit_cents = _usage_number(overall.get("used")), _usage_number(overall.get("limit"))
+    if used_cents is not None and limit_cents:
+        windows.append(usage_window("included usage (USD)", used=round(used_cents / 100, 2),
+                                    limit=round(limit_cents / 100, 2), unit="USD", resets_at=cycle_end))
+    extra = {}
+    on_demand = individual.get("onDemand")
+    team = data.get("teamUsage") if isinstance(data.get("teamUsage"), dict) else {}
+    if not isinstance(on_demand, dict):
+        on_demand = team.get("onDemand")
     if isinstance(on_demand, dict):
-        spend = {"amount": on_demand.get("used"), "currency": "USD", "period": "billing cycle",
-                 "limit": on_demand.get("limit")}
+        extra["on_demand_enabled"] = bool(on_demand.get("enabled"))
     plan = data.get("membershipType")
     if data.get("isUnlimited"):
         plan = f"{plan} (unlimited)" if plan else "unlimited"
-    return usage_result(provider, USAGE_OK, plan=plan, source=creds["source"], windows=windows, spend=spend)
+    if not windows and not plan:
+        raise UsageProbeError("unrecognised usage-summary payload")
+    return usage_result(provider, USAGE_OK, plan=plan, source=creds["source"], windows=windows, extra=extra)
 
 
 def _probe_amp(provider="amp"):
@@ -6555,20 +6658,16 @@ def _probe_kilo(provider="kilo"):
     if not creds:
         return _unauth(provider, "no Kilo session — run 'kilo auth login' or set KILO_API_KEY")
     headers = {"Authorization": f"Bearer {creds['token']}"}
-    base = "https://app.kilo.ai/api/trpc"
-    blocks = _trpc_get(base, "user.getCreditBlocks", headers)
-    payload = ((blocks.get("result") or {}).get("data") or {}).get("json", blocks)
-    total = None
-    if isinstance(payload, dict):
-        total = payload.get("totalBalance_mUsd")
-        if total is None and isinstance(payload.get("blocks"), list):
-            total = sum(float(b.get("balance_mUsd") or 0) for b in payload["blocks"] if isinstance(b, dict))
-    elif isinstance(payload, list):
-        total = sum(float(b.get("balance_mUsd") or 0) for b in payload if isinstance(b, dict))
-    credits = None
-    if total is not None:
-        credits = {"remaining": round(float(total) / 1000.0, 4), "total": None, "used": None, "unit": "USD"}
-    return usage_result(provider, USAGE_OK, source=creds["source"], credits=credits)
+    org = os.environ.get("KILO_ORGANIZATION_ID", "").strip()
+    if org:
+        headers["X-KiloCode-OrganizationId"] = org
+    data = _usage_get_json("https://api.kilo.ai/api/profile/balance", headers)
+    balance = _usage_number(data.get("balance"))
+    if balance is None:
+        raise UsageProbeError("balance missing from profile/balance response")
+    credits = {"remaining": round(balance, 4), "total": None, "used": None, "unit": "USD"}
+    return usage_result(provider, USAGE_OK, source=creds["source"], credits=credits,
+                        extra={"organization": org} if org else None)
 
 
 def _probe_opencode(provider="opencode"):
@@ -6632,34 +6731,74 @@ def _probe_zai(provider="zai"):
         return _unauth(provider, "set Z_AI_API_KEY")
     base = os.environ.get("Z_AI_BASE_URL", "https://api.z.ai").rstrip("/")
     data = _usage_get_json(f"{base}/api/monitor/usage/quota/limit", {"Authorization": f"Bearer {key}"})
-    payload = data.get("data") if isinstance(data.get("data"), dict) else data
+    if data.get("success") is False or (data.get("code") not in (None, 200, "200")):
+        raise UsageProbeError(f"z.ai API error (code {data.get('code')}): {sk.truncate(str(data.get('msg') or ''), 80)}")
+    payload = data.get("data")
+    if not isinstance(payload, dict):
+        raise UsageProbeError("z.ai response missing 'data'")
     windows = []
-    for limit in payload.get("limits") or payload.get("quotas") or []:
+    for limit in payload.get("limits") or []:
         if not isinstance(limit, dict):
             continue
-        windows.append(usage_window(limit.get("type") or limit.get("name") or "quota",
-                                    used=limit.get("used") or limit.get("usage"),
-                                    limit=limit.get("total") or limit.get("limit"),
-                                    used_pct=limit.get("percentage"), resets_at=limit.get("nextResetTime")))
-    return usage_result(provider, USAGE_OK, plan=payload.get("planName") or payload.get("plan"),
-                        source=src, windows=windows)
+        kind, unit = limit.get("type"), limit.get("unit")
+        if kind in ("TOKENS_LIMIT", "CREDIT_LIMIT"):
+            label = _ZAI_UNIT_LABELS.get(unit) or f"{limit.get('number') or ''} unit-{unit}".strip()
+            windows.append(usage_window(label, used_pct=_usage_number(limit.get("percentage")),
+                                        resets_at=limit.get("nextResetTime")))
+        elif kind == "TIME_LIMIT":
+            windows.append(usage_window("MCP tools (monthly)", used=_usage_number(limit.get("currentValue")),
+                                        limit=_usage_number(limit.get("usage")),
+                                        used_pct=_usage_number(limit.get("percentage")), unit="calls",
+                                        resets_at=limit.get("nextResetTime")))
+    level = payload.get("level") or payload.get("planName") or payload.get("plan")
+    plan = f"GLM Coding {str(level).capitalize()}" if isinstance(level, str) and level else None
+    return usage_result(provider, USAGE_OK, plan=plan, source=src, windows=windows)
+
+
+_ZAI_UNIT_LABELS = {3: "5h session", 6: "weekly"}
 
 
 def _probe_kimi(provider="kimi"):
     creds = _kimi_credentials()
     if not creds:
         return _unauth(provider, "no Kimi Code session — run 'kimi' and sign in, or set KIMI_API_KEY")
-    data = _usage_get_json("https://api.kimi.com/coding/v1/usages", {"Authorization": f"Bearer {creds['token']}"})
+    if creds.get("expired"):
+        return _unauth(provider, "Kimi Code token expired — run 'kimi' to refresh", source=creds["source"])
+    base = "https://api.kimi.ai/coding/v1" if creds.get("region") == "global" else "https://api.kimi.com/coding/v1"
+    headers = {"Authorization": f"Bearer {creds['token']}"}
+    data = _usage_get_json(f"{base}/usages", headers)
     windows = []
-    usages = data.get("usages") or data.get("data") or ([data] if data.get("limit") is not None else [])
-    for entry in usages:
+    weekly = data.get("usage")
+    if isinstance(weekly, dict) and weekly.get("limit") is not None:
+        windows.append(_kimi_window("weekly", weekly))
+    for entry in data.get("limits") or []:
         if not isinstance(entry, dict):
             continue
-        windows.append(usage_window(entry.get("name") or entry.get("window") or "quota",
-                                    used=entry.get("used"), limit=entry.get("limit"),
-                                    resets_at=entry.get("reset_time") or entry.get("resetTime")))
-    return usage_result(provider, USAGE_OK, plan=data.get("membership") or data.get("plan"),
-                        source=creds["source"], windows=windows)
+        win, detail = entry.get("window") or {}, entry.get("detail") or {}
+        if not isinstance(win, dict) or not isinstance(detail, dict):
+            continue
+        duration, unit = _usage_number(win.get("duration")), str(win.get("timeUnit") or "")
+        if duration is None:
+            continue
+        minutes = duration * (60 if "HOUR" in unit else 1440 if "DAY" in unit else 1)
+        label = "5h session" if minutes == 300 else f"{int(minutes)}m" if minutes < 60 else f"{minutes / 60:g}h"
+        windows.append(_kimi_window(label, detail))
+    level = ((data.get("user") or {}).get("membership") or {}).get("level")
+    plan = None
+    if isinstance(level, str) and level.strip():
+        plan = " ".join(w.capitalize() for w in level.removeprefix("LEVEL_").split("_") if w)
+    if not plan:
+        status, me, _ = _usage_http(f"{base}/me", headers=headers)
+        if status == 200 and isinstance(me, dict) and str(me.get("user_level_name") or "").strip():
+            plan = str(me["user_level_name"]).strip()
+    return usage_result(provider, USAGE_OK, plan=plan, source=creds["source"], windows=windows)
+
+
+def _kimi_window(label, detail):
+    return usage_window(label, used=_usage_number(detail.get("used")), limit=_usage_number(detail.get("limit")),
+                        unit="requests",
+                        resets_at=detail.get("resetTime") or detail.get("resetAt") or detail.get("reset_at")
+                        or detail.get("reset_time"))
 
 
 def _probe_devin(provider="devin"):
@@ -6678,13 +6817,218 @@ def _probe_devin(provider="devin"):
     return usage_result(provider, USAGE_OK, account=org, plan=data.get("plan"), source=src, windows=windows)
 
 
+def _probe_codebuff(provider="codebuff"):
+    creds = _codebuff_credentials()
+    if not creds:
+        return _unauth(provider, "no Codebuff session — run 'codebuff login' or set CODEBUFF_API_KEY")
+    headers = {"Authorization": f"Bearer {creds['token']}"}
+    data = _usage_get_json("https://www.codebuff.com/api/v1/usage", headers)
+    used = _usage_number(data.get("usage") if data.get("usage") is not None else data.get("used"))
+    total = _usage_number(data.get("quota") if data.get("quota") is not None else data.get("limit"))
+    remaining = _usage_number(data.get("remainingBalance") if data.get("remainingBalance") is not None
+                              else data.get("remaining"))
+    windows = []
+    if used is not None or total is not None:
+        windows.append(usage_window("credits (billing cycle)", used=used, limit=total, unit="credits",
+                                    resets_at=data.get("next_quota_reset")))
+    credits = None
+    if remaining is not None:
+        credits = {"remaining": remaining, "total": total, "used": used, "unit": "credits"}
+    plan = account = None
+    status, sub, _ = _usage_http("https://www.codebuff.com/api/user/subscription", headers=headers)
+    if status == 200 and isinstance(sub, dict):
+        s = sub.get("subscription") if isinstance(sub.get("subscription"), dict) else {}
+        plan = s.get("displayName") or sub.get("displayName") or s.get("tier") or sub.get("tier")
+        user = sub.get("user") if isinstance(sub.get("user"), dict) else {}
+        account = sub.get("email") or user.get("email")
+        rl = sub.get("rateLimit") if isinstance(sub.get("rateLimit"), dict) else {}
+        if rl.get("weeklyLimit") is not None or rl.get("limit") is not None:
+            windows.append(usage_window(
+                "weekly", used=_usage_number(rl.get("weeklyUsed", rl.get("used"))),
+                limit=_usage_number(rl.get("weeklyLimit", rl.get("limit"))), unit="credits",
+                resets_at=rl.get("weeklyResetsAt")))
+    return usage_result(provider, USAGE_OK, account=account, plan=plan, source=creds["source"],
+                        windows=windows, credits=credits)
+
+
+def _probe_deepseek(provider="deepseek"):
+    key, src = _usage_env("DEEPSEEK_API_KEY")
+    if not key:
+        return _unauth(provider, "set DEEPSEEK_API_KEY")
+    data = _usage_get_json("https://api.deepseek.com/user/balance", {"Authorization": f"Bearer {key}"})
+    infos = [b for b in data.get("balance_infos") or [] if isinstance(b, dict)]
+    if not infos:
+        raise UsageProbeError("balance_infos missing from response")
+    infos.sort(key=lambda b: 0 if b.get("currency") == "USD" else 1)
+    b = infos[0]
+    total = _usage_number(b.get("total_balance"))
+    if total is None:
+        raise UsageProbeError("total_balance missing from response")
+    currency = b.get("currency") or "USD"
+    credits = {"remaining": total, "total": None, "used": None, "unit": currency,
+               "granted": _usage_number(b.get("granted_balance")),
+               "topped_up": _usage_number(b.get("topped_up_balance"))}
+    extra = {"is_available": bool(data.get("is_available")),
+             "currencies": [i.get("currency") for i in infos]}
+    return usage_result(provider, USAGE_OK, source=src, credits=credits, extra=extra)
+
+
+def _probe_moonshot(provider="moonshot"):
+    key, src = _usage_env("MOONSHOT_API_KEY")
+    if not key:
+        return _unauth(provider, "set MOONSHOT_API_KEY")
+    base = os.environ.get("MOONSHOT_BASE_URL", "https://api.moonshot.ai").rstrip("/")
+    data = _usage_get_json(f"{base}/v1/users/me/balance", {"Authorization": f"Bearer {key}"})
+    if data.get("status") is False or data.get("code") not in (None, 0, "0"):
+        raise UsageProbeError(f"Moonshot API error (code {data.get('code')})")
+    payload = data.get("data")
+    if not isinstance(payload, dict) or _usage_number(payload.get("available_balance")) is None:
+        raise UsageProbeError("available_balance missing from response")
+    currency = "CNY" if ".cn" in base else "USD"
+    credits = {"remaining": _usage_number(payload["available_balance"]), "total": None, "used": None,
+               "unit": currency, "voucher": _usage_number(payload.get("voucher_balance")),
+               "cash": _usage_number(payload.get("cash_balance"))}
+    return usage_result(provider, USAGE_OK, source=src, credits=credits)
+
+
+def _probe_minimax(provider="minimax"):
+    key, src = _usage_env("MINIMAX_API_KEY")
+    if not key:
+        return _unauth(provider, "set MINIMAX_API_KEY")
+    base = os.environ.get("MINIMAX_BASE_URL", "https://api.minimax.io").rstrip("/")
+    data = _usage_get_json(f"{base}/v1/token_plan/remains", {"Authorization": f"Bearer {key}"})
+    resp = data.get("base_resp") if isinstance(data.get("base_resp"), dict) else {}
+    if resp.get("status_code") not in (None, 0):
+        code = resp.get("status_code")
+        if code in (1004, 2049):
+            raise UsageProbeError("credentials rejected — check MINIMAX_API_KEY")
+        raise UsageProbeError(f"MiniMax API error {code}: {sk.truncate(str(resp.get('status_msg') or ''), 80)}")
+    remains = data.get("model_remains")
+    if not isinstance(remains, list):
+        raise UsageProbeError("model_remains missing from response")
+    windows = []
+    for entry in remains:
+        if not isinstance(entry, dict):
+            continue
+        model = entry.get("model_name") or "model"
+        int_total = _usage_number(entry.get("current_interval_total_count"))
+        if int_total:
+            windows.append(usage_window(
+                f"{model} (rolling)", used=_usage_number(entry.get("current_interval_usage_count")),
+                limit=int_total, unit="requests", resets_at=entry.get("end_time")))
+        wk_total = _usage_number(entry.get("current_weekly_total_count"))
+        if wk_total:
+            windows.append(usage_window(
+                f"{model} (weekly)", used=_usage_number(entry.get("current_weekly_usage_count")),
+                limit=wk_total, unit="requests", resets_at=entry.get("weekly_end_time")))
+    return usage_result(provider, USAGE_OK, source=src, windows=windows)
+
+
+def _novita_usd(value):
+    """Novita reports integer-strings in 1/10000 USD."""
+    num = _usage_number(value)
+    return None if num is None else round(num / 10_000.0, 4)
+
+
+def _probe_novita(provider="novita"):
+    key, src = _usage_env("NOVITA_API_KEY")
+    if not key:
+        return _unauth(provider, "set NOVITA_API_KEY")
+    data = _usage_get_json("https://api.novita.ai/openapi/v1/billing/balance/detail",
+                           {"Authorization": f"Bearer {key}"})
+    available = _usage_number(data.get("availableBalance"))
+    if available is None:
+        raise UsageProbeError("availableBalance missing from response")
+    credits = {"remaining": _novita_usd(available), "total": None, "used": None, "unit": "USD",
+               "cash": _novita_usd(data.get("cashBalance")), "credit_limit": _novita_usd(data.get("creditLimit")),
+               "pending_charges": _novita_usd(data.get("pendingCharges"))}
+    return usage_result(provider, USAGE_OK, source=src, credits=credits)
+
+
+def _month_start_utc():
+    now = datetime.now(timezone.utc)
+    return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def _probe_anthropic_api(provider="anthropic-api"):
+    key, src = _usage_env("ANTHROPIC_ADMIN_KEY", "ANTHROPIC_ADMIN_API_KEY")
+    if not key:
+        return _unauth(provider, "set ANTHROPIC_ADMIN_KEY")
+    headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    start = _month_start_utc().isoformat().replace("+00:00", "Z")
+    total_cents = 0.0
+    page = None
+    for _ in range(50):
+        url = f"https://api.anthropic.com/v1/organizations/cost_report?starting_at={quote(start)}&bucket_width=1d"
+        if page:
+            url += f"&page={quote(page)}"
+        report = _usage_get_json(url, headers)
+        for bucket in report.get("data") or []:
+            for row in (bucket.get("results") or []) if isinstance(bucket, dict) else []:
+                amt = _usage_number(row.get("amount")) if isinstance(row, dict) else None
+                if amt is None:
+                    raise UsageProbeError("cost_report amount missing or non-numeric")
+                total_cents += amt
+        if not report.get("has_more"):
+            break
+        page = report.get("next_page")
+        if not page:
+            raise UsageProbeError("cost_report has_more without next_page — refusing partial month")
+    else:
+        raise UsageProbeError("cost_report pagination did not terminate")
+    spend = {"amount": round(total_cents / 100.0, 2), "currency": "USD", "period": "month-to-date", "limit": None}
+    return usage_result(provider, USAGE_OK, source=src, spend=spend)
+
+
+def _probe_openai_api(provider="openai-api"):
+    key, src = _usage_env("OPENAI_ADMIN_KEY", "OPENAI_ADMIN_API_KEY")
+    if not key:
+        return _unauth(provider, "set OPENAI_ADMIN_KEY")
+    headers = {"Authorization": f"Bearer {key}"}
+    start = int(_month_start_utc().timestamp())
+    total = 0.0
+    page = None
+    for _ in range(20):
+        url = f"https://api.openai.com/v1/organization/costs?start_time={start}&bucket_width=1d&limit=31"
+        if page:
+            url += f"&page={quote(page)}"
+        report = _usage_get_json(url, headers)
+        for bucket in report.get("data") or []:
+            for row in (bucket.get("results") or []) if isinstance(bucket, dict) else []:
+                amount = row.get("amount") if isinstance(row, dict) else None
+                value = _usage_number(amount.get("value")) if isinstance(amount, dict) else None
+                if value is not None:
+                    total += value
+        if not report.get("has_more"):
+            break
+        page = report.get("next_page")
+        if not page:
+            raise UsageProbeError("costs has_more without next_page — refusing partial month")
+    else:
+        raise UsageProbeError("costs pagination did not terminate")
+    spend = {"amount": round(total, 2), "currency": "USD", "period": "month-to-date", "limit": None}
+    return usage_result(provider, USAGE_OK, source=src, spend=spend)
+
+
+# API-key billing/quota sources that are not installable agents.
+USAGE_ONLY_PROVIDERS = {
+    "deepseek": {"name": "DeepSeek API", "vendor": "DeepSeek", "icon": "🐋"},
+    "moonshot": {"name": "Moonshot API", "vendor": "Moonshot AI", "icon": "🌙"},
+    "minimax": {"name": "MiniMax Coding Plan", "vendor": "MiniMax", "icon": "🅼"},
+    "novita": {"name": "Novita AI", "vendor": "Novita", "icon": "🅽"},
+    "anthropic-api": {"name": "Anthropic API (org spend)", "vendor": "Anthropic", "icon": "🅐"},
+    "openai-api": {"name": "OpenAI API (org spend)", "vendor": "OpenAI", "icon": "🅞"},
+}
+
 USAGE_PROBES = {
     "codex": _probe_codex, "claude": _probe_claude, "copilot": _probe_copilot,
     "gemini": _probe_gemini, "grok": _probe_grok, "kiro": _probe_kiro,
     "cursor": _probe_cursor, "amp": _probe_amp, "droid": _probe_droid,
     "kilo": _probe_kilo, "opencode": _probe_opencode, "openrouter": _probe_openrouter,
     "synthetic": _probe_synthetic, "zai": _probe_zai, "kimi": _probe_kimi,
-    "devin": _probe_devin,
+    "devin": _probe_devin, "codebuff": _probe_codebuff,
+    "deepseek": _probe_deepseek, "moonshot": _probe_moonshot, "minimax": _probe_minimax,
+    "novita": _probe_novita, "anthropic-api": _probe_anthropic_api, "openai-api": _probe_openai_api,
 }
 
 
@@ -6781,9 +7125,13 @@ def print_usage_table(results, *, show_all=False):
         if spend and spend.get("amount") is not None:
             cap = f" / {_fmt_money(spend['limit'])}" if spend.get("limit") is not None else ""
             money.append(f"{_fmt_money(spend['amount'], spend.get('currency', 'USD'))}{cap} {spend.get('period', '')}".strip())
+        reset_credits = (r.get("extra") or {}).get("reset_credits")
+        if reset_credits:
+            money.append(f"{reset_credits} reset credit(s)")
         detail = windows or r.get("message") or ""
+        meta = AGENTS.get(r["provider"]) or USAGE_ONLY_PROVIDERS.get(r["provider"], {})
         rows.append([
-            f"{AGENTS.get(r['provider'], {}).get('icon', '')} {r['name']}".strip(),
+            f"{meta.get('icon', '')} {r['name']}".strip(),
             r.get("account") or "",
             r.get("plan") or "",
             detail,

@@ -25,7 +25,10 @@ def aikit(tool_loader, tmp_path, monkeypatch):
     monkeypatch.setattr(m, "_usage_home", lambda: home)
     monkeypatch.setattr(m, "_CURRENT_PLATFORM", "Linux")
     for var in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "GROK_HOME",
-                "GH_TOKEN", "GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN", "AMP_API_KEY", "FACTORY_API_KEY",
+                "GH_TOKEN", "GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN", "GITHUB_COPILOT_TOKEN",
+                "CODEBUFF_API_KEY", "DEEPSEEK_API_KEY", "MOONSHOT_API_KEY", "MINIMAX_API_KEY",
+                "NOVITA_API_KEY", "ANTHROPIC_ADMIN_KEY", "ANTHROPIC_ADMIN_API_KEY", "OPENAI_ADMIN_KEY",
+                "OPENAI_ADMIN_API_KEY", "KILO_ORGANIZATION_ID", "MOONSHOT_BASE_URL", "MINIMAX_BASE_URL", "AMP_API_KEY", "FACTORY_API_KEY",
                 "KILO_API_KEY", "KILOCODE_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_MANAGEMENT_API_KEY",
                 "SYNTHETIC_API_KEY", "Z_AI_API_KEY", "ZAI_API_KEY", "KIMI_API_KEY", "DEVIN_BEARER_TOKEN",
                 "DEVIN_AUTHORIZATION", "DEVIN_ORG_ID", "CURSOR_SESSION_TOKEN"):
@@ -161,6 +164,18 @@ def test_copilot_probe_prefers_env_token_and_parses_quota_snapshots(aikit, monke
     premium = next(w for w in r["windows"] if w["label"] == "premium_interactions")
     assert premium["used"] == 180 and premium["limit"] == 300 and premium["used_pct"] == 60.0
     assert calls[0]["headers"]["Authorization"] == f"token {TOKEN}"
+    assert calls[0]["headers"]["Editor-Version"].startswith("vscode/")
+
+
+def test_copilot_probe_reads_copilot_apps_json(aikit, monkeypatch):
+    write_json(aikit._test_home / ".config" / "github-copilot" / "apps.json",
+               {"github.com:Iv1.abc": {"user": "octocat", "oauth_token": TOKEN}})
+    stub_http(monkeypatch, aikit, {
+        "https://api.github.com/copilot_internal/user": (200, {"quota_snapshots": {}}),
+        "https://api.github.com/user": (200, {"login": "octocat"}),
+    })
+    r = aikit.probe_usage("copilot")
+    assert r["status"] == "ok" and r["source"].endswith("apps.json")
 
 
 def test_copilot_probe_falls_back_to_gh_hosts_file(aikit, monkeypatch):
@@ -256,14 +271,39 @@ def test_cursor_probe_builds_session_cookie_from_state_db(aikit, monkeypatch):
     con.close()
     calls = stub_http(monkeypatch, aikit, {
         "https://cursor.com/api/usage-summary": (200, {
-            "membershipType": "pro", "billingCycleEnd": "2026-02-01T00:00:00Z",
-            "individualUsage": {"plan": {"used": 12.5, "limit": 20}, "onDemand": {"used": 3, "limit": 50}},
+            "membershipType": "pro", "billingCycleEnd": "2026-02-01T00:00:00Z", "isUnlimited": False,
+            "individualUsage": {
+                "plan": {"autoPercentUsed": 12.4, "apiPercentUsed": 61.0, "totalPercentUsed": 42.6},
+                "overall": {"used": 852, "limit": 2000},
+                "onDemand": {"enabled": True}},
         }),
     })
     r = aikit.probe_usage("cursor")
     assert r["status"] == "ok" and r["plan"] == "pro"
-    assert r["windows"][0]["used"] == 12.5 and r["spend"]["limit"] == 50
+    assert [w["label"] for w in r["windows"]] == [
+        "included usage", "Cursor models", "other models", "included usage (USD)"]
+    assert r["windows"][0]["used_pct"] == 42.6 and r["windows"][3]["used"] == 8.52
+    assert r["extra"] == {"on_demand_enabled": True}
     assert calls[0]["headers"]["Cookie"] == f"WorkosCursorSessionToken=user_42%3A%3A{jwt}"
+
+
+def test_cursor_falls_back_to_cursor_agent_auth_and_display_messages(aikit, monkeypatch):
+    import base64
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": "auth0|user_7"}).encode()).rstrip(b"=").decode()
+    jwt = f"hdr.{payload}.sig"
+    write_json(aikit._test_home / ".config" / "cursor" / "auth.json", {"accessToken": jwt})
+    stub_http(monkeypatch, aikit, {
+        "https://cursor.com/api/usage-summary": (200, {
+            "membershipType": "enterprise", "billingCycleEnd": "2026-02-01T00:00:00Z",
+            "teamUsage": {"onDemand": {"enabled": False}},
+            "autoModelSelectedDisplayMessage": "You've used 42% of your included total usage",
+            "namedModelSelectedDisplayMessage": "You've used 7% of your included total usage",
+        }),
+    })
+    r = aikit.probe_usage("cursor")
+    assert r["status"] == "ok" and r["source"].endswith("cursor/auth.json")
+    assert [(w["label"], w["used_pct"]) for w in r["windows"]] == [("Cursor models", 42.0), ("other models", 7.0)]
+    assert r["extra"] == {"on_demand_enabled": False}
 
 
 def test_amp_probe_uses_env_key_and_balance_rpc(aikit, monkeypatch):
@@ -294,15 +334,22 @@ def test_droid_probe_reads_factory_env_file(aikit, monkeypatch):
     assert r["windows"][0]["used_pct"] == 25.0 and r["spend"]["amount"] == 1.5
 
 
-def test_kilo_probe_sums_credit_blocks_in_musd(aikit, monkeypatch):
+def test_kilo_probe_reads_profile_balance(aikit, monkeypatch):
     write_json(aikit._test_home / ".local" / "share" / "kilo" / "auth.json", {"kilo": {"access": TOKEN}})
+    monkeypatch.setenv("KILO_ORGANIZATION_ID", "org_9")
     calls = stub_http(monkeypatch, aikit, {
-        "https://app.kilo.ai/api/trpc/user.getCreditBlocks": (200, {"result": {"data": {"json": {
-            "blocks": [{"balance_mUsd": 1500}, {"balance_mUsd": 250}]}}}}),
+        "https://api.kilo.ai/api/profile/balance": (200, {"balance": 1.75}),
     })
     r = aikit.probe_usage("kilo")
     assert r["status"] == "ok" and r["credits"] == {"remaining": 1.75, "total": None, "used": None, "unit": "USD"}
-    assert "input=" in calls[0]["url"]
+    assert calls[0]["headers"]["X-KiloCode-OrganizationId"] == "org_9" and r["extra"] == {"organization": "org_9"}
+
+
+def test_kilo_probe_errors_when_balance_missing(aikit, monkeypatch):
+    monkeypatch.setenv("KILO_API_KEY", TOKEN)
+    stub_http(monkeypatch, aikit, {"https://api.kilo.ai/api/profile/balance": (200, {"ok": True})})
+    r = aikit.probe_usage("kilo")
+    assert r["status"] == "error" and "balance" in r["message"]
 
 
 def test_opencode_go_probe_reads_auth_json_windows(aikit, monkeypatch):
@@ -341,6 +388,189 @@ def test_devin_probe_requires_org_id(aikit, monkeypatch):
     r = aikit.probe_usage("devin")
     assert r["status"] == "ok" and r["windows"][0]["unit"] == "ACU" and r["windows"][0]["used_pct"] == 16.0
     assert calls[0]["headers"]["Authorization"] == f"Bearer {TOKEN}"
+
+
+def test_codex_labels_windows_by_duration_and_collects_extra_limits(aikit, monkeypatch):
+    write_json(aikit._test_home / ".codex" / "auth.json", {"tokens": {"access_token": TOKEN}})
+    stub_http(monkeypatch, aikit, {
+        "https://chatgpt.com/backend-api/wham/usage": (200, {
+            "email": "me@example.com", "plan_type": "pro",
+            "rate_limit": {"secondary_window": {"used_percent": 3, "limit_window_seconds": 604800}},
+            "code_review_rate_limit": {"primary_window": {"used_percent": 50, "limit_window_seconds": 18000}},
+            "additional_rate_limits": [{"limit_name": "GPT-5 Pro", "rate_limit": {
+                "primary_window": {"used_percent": 20, "limit_window_seconds": 86400}}}],
+            "rate_limit_reset_credits": {"available_count": 2},
+        }),
+    })
+    r = aikit.probe_usage("codex")
+    assert r["account"] == "me@example.com"
+    assert [w["label"] for w in r["windows"]] == ["weekly", "code review 5h session", "GPT-5 Pro daily"]
+    assert r["extra"] == {"reset_credits": 2}
+
+
+def test_zai_probe_parses_semantic_quota_buckets(aikit, monkeypatch):
+    monkeypatch.setenv("Z_AI_API_KEY", TOKEN)
+    stub_http(monkeypatch, aikit, {
+        "https://api.z.ai/api/monitor/usage/quota/limit": (200, {"code": 200, "success": True, "data": {
+            "level": "pro", "limits": [
+                {"type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 30, "nextResetTime": 1_800_000_000_000},
+                {"type": "TOKENS_LIMIT", "unit": 6, "number": 1, "percentage": 12},
+                {"type": "TIME_LIMIT", "usage": 1000, "currentValue": 250, "percentage": 25},
+            ]}}),
+    })
+    r = aikit.probe_usage("zai")
+    assert r["status"] == "ok" and r["plan"] == "GLM Coding Pro"
+    assert [(w["label"], w["used_pct"]) for w in r["windows"]] == [
+        ("5h session", 30.0), ("weekly", 12.0), ("MCP tools (monthly)", 25.0)]
+    assert r["windows"][0]["resets_at"] == "2027-01-15T08:00:00Z"
+
+
+def test_zai_probe_surfaces_api_level_error(aikit, monkeypatch):
+    monkeypatch.setenv("ZAI_API_KEY", TOKEN)
+    stub_http(monkeypatch, aikit, {
+        "https://api.z.ai/api/monitor/usage/quota/limit": (200, {"code": 1002, "success": False, "msg": "invalid key"}),
+    })
+    r = aikit.probe_usage("zai")
+    assert r["status"] == "error" and "1002" in r["message"] and TOKEN not in r["message"]
+
+
+def test_kimi_probe_uses_region_membership_and_duration_labels(aikit, monkeypatch):
+    kimi = aikit._test_home / ".kimi-code"
+    write_json(kimi / "credentials" / "kimi-code.json", {"access_token": TOKEN, "expires_at": 4_000_000_000})
+    (kimi / "region").write_text("global\n")
+    calls = stub_http(monkeypatch, aikit, {
+        "https://api.kimi.ai/coding/v1/usages": (200, {
+            "user": {"membership": {"level": "LEVEL_MOON_PLUS"}},
+            "usage": {"limit": 1000, "used": 250, "resetTime": "2026-02-01T00:00:00Z"},
+            "limits": [{"window": {"duration": 5, "timeUnit": "TIME_UNIT_HOUR"},
+                        "detail": {"limit": 100, "used": 40, "resetTime": "2026-01-20T05:00:00Z"}}],
+        }),
+    })
+    r = aikit.probe_usage("kimi")
+    assert r["status"] == "ok" and r["plan"] == "Moon Plus"
+    assert [(w["label"], w["used_pct"]) for w in r["windows"]] == [("weekly", 25.0), ("5h session", 40.0)]
+    assert len(calls) == 1 and calls[0]["url"].startswith("https://api.kimi.ai/")
+
+
+def test_kimi_probe_reports_expired_token_without_network(aikit, monkeypatch):
+    write_json(aikit._test_home / ".kimi-code" / "credentials" / "kimi-code.json",
+               {"access_token": TOKEN, "expires_at": 1_000_000})
+    calls = stub_http(monkeypatch, aikit, {})
+    r = aikit.probe_usage("kimi")
+    assert r["status"] == "unauthenticated" and "expired" in r["message"] and calls == []
+
+
+def test_codebuff_probe_reads_manicode_credentials(aikit, monkeypatch):
+    write_json(aikit._test_home / ".config" / "manicode" / "credentials.json", {"default": {"authToken": TOKEN}})
+    stub_http(monkeypatch, aikit, {
+        "https://www.codebuff.com/api/v1/usage": (200, {"usage": 300, "quota": 1000, "remainingBalance": 700,
+                                                        "next_quota_reset": "2026-02-01T00:00:00Z"}),
+        "https://www.codebuff.com/api/user/subscription": (200, {"subscription": {"displayName": "Pro"},
+                                                                  "user": {"email": "me@example.com"}}),
+    })
+    r = aikit.probe_usage("codebuff")
+    assert r["status"] == "ok" and r["plan"] == "Pro" and r["account"] == "me@example.com"
+    assert r["windows"][0]["used_pct"] == 30.0 and r["credits"]["remaining"] == 700
+
+
+def test_deepseek_probe_prefers_usd_balance(aikit, monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", TOKEN)
+    stub_http(monkeypatch, aikit, {
+        "https://api.deepseek.com/user/balance": (200, {"is_available": True, "balance_infos": [
+            {"currency": "CNY", "total_balance": "70.00", "granted_balance": "0", "topped_up_balance": "70.00"},
+            {"currency": "USD", "total_balance": "9.50", "granted_balance": "1.50", "topped_up_balance": "8.00"}]}),
+    })
+    r = aikit.probe_usage("deepseek")
+    assert r["status"] == "ok" and r["name"] == "DeepSeek API"
+    assert r["credits"]["remaining"] == 9.5 and r["credits"]["unit"] == "USD" and r["credits"]["granted"] == 1.5
+    assert r["extra"]["currencies"] == ["USD", "CNY"]
+
+
+def test_moonshot_probe_reads_available_balance(aikit, monkeypatch):
+    monkeypatch.setenv("MOONSHOT_API_KEY", TOKEN)
+    stub_http(monkeypatch, aikit, {
+        "https://api.moonshot.ai/v1/users/me/balance": (200, {"code": 0, "status": True, "data": {
+            "available_balance": 49.5, "voucher_balance": 10, "cash_balance": 39.5}}),
+    })
+    r = aikit.probe_usage("moonshot")
+    assert r["status"] == "ok" and r["credits"]["remaining"] == 49.5 and r["credits"]["unit"] == "USD"
+
+
+def test_minimax_probe_maps_model_remains_to_windows(aikit, monkeypatch):
+    monkeypatch.setenv("MINIMAX_API_KEY", TOKEN)
+    stub_http(monkeypatch, aikit, {
+        "https://api.minimax.io/v1/token_plan/remains": (200, {
+            "base_resp": {"status_code": 0, "status_msg": "success"},
+            "model_remains": [{"model_name": "MiniMax-M2", "current_interval_total_count": 100,
+                               "current_interval_usage_count": 25, "end_time": 1_800_000_000_000,
+                               "current_weekly_total_count": 1000, "current_weekly_usage_count": 100}]}),
+    })
+    r = aikit.probe_usage("minimax")
+    assert [(w["label"], w["used_pct"]) for w in r["windows"]] == [("MiniMax-M2 (rolling)", 25.0), ("MiniMax-M2 (weekly)", 10.0)]
+
+
+def test_minimax_probe_maps_auth_status_codes(aikit, monkeypatch):
+    monkeypatch.setenv("MINIMAX_API_KEY", TOKEN)
+    stub_http(monkeypatch, aikit, {
+        "https://api.minimax.io/v1/token_plan/remains": (200, {"base_resp": {"status_code": 1004, "status_msg": "login fail"}}),
+    })
+    r = aikit.probe_usage("minimax")
+    assert r["status"] == "error" and "rejected" in r["message"]
+
+
+def test_novita_probe_converts_ten_thousandths_to_usd(aikit, monkeypatch):
+    monkeypatch.setenv("NOVITA_API_KEY", TOKEN)
+    stub_http(monkeypatch, aikit, {
+        "https://api.novita.ai/openapi/v1/billing/balance/detail": (200, {
+            "availableBalance": "123456", "cashBalance": "100000", "creditLimit": "0", "pendingCharges": "1200"}),
+    })
+    r = aikit.probe_usage("novita")
+    assert r["credits"]["remaining"] == 12.3456 and r["credits"]["pending_charges"] == 0.12
+
+
+def test_anthropic_admin_probe_paginates_cost_report(aikit, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_ADMIN_KEY", TOKEN)
+    calls = []
+
+    def fake(url, *, headers=None, method="GET", body=None, timeout=15):
+        calls.append(url)
+        assert headers["x-api-key"] == TOKEN and "anthropic-version" in headers
+        if "page=" in url:
+            return 200, {"data": [{"results": [{"amount": "250"}]}], "has_more": False}, ""
+        return 200, {"data": [{"results": [{"amount": "1000"}, {"amount": "6"}]}], "has_more": True,
+                     "next_page": "p2"}, ""
+
+    monkeypatch.setattr(aikit, "_usage_http", fake)
+    r = aikit.probe_usage("anthropic-api")
+    assert r["status"] == "ok" and r["spend"] == {"amount": 12.56, "currency": "USD", "period": "month-to-date", "limit": None}
+    assert len(calls) == 2 and "page=p2" in calls[1]
+
+
+def test_anthropic_admin_probe_refuses_partial_totals(aikit, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_ADMIN_KEY", TOKEN)
+    stub_http(monkeypatch, aikit, {
+        "https://api.anthropic.com/v1/organizations/cost_report": (200, {"data": [{"results": [{"amount": "1"}]}],
+                                                                     "has_more": True}),
+    })
+    r = aikit.probe_usage("anthropic-api")
+    assert r["status"] == "error" and "partial" in r["message"]
+
+
+def test_openai_admin_probe_sums_month_to_date_costs(aikit, monkeypatch):
+    monkeypatch.setenv("OPENAI_ADMIN_KEY", TOKEN)
+    calls = stub_http(monkeypatch, aikit, {
+        "https://api.openai.com/v1/organization/costs": (200, {"data": [
+            {"results": [{"amount": {"value": 1.25, "currency": "usd"}}]},
+            {"results": [{"amount": {"value": 0.75, "currency": "usd"}}]}], "has_more": False}),
+    })
+    r = aikit.probe_usage("openai-api")
+    assert r["status"] == "ok" and r["spend"]["amount"] == 2.0
+    assert "start_time=" in calls[0]["url"] and calls[0]["headers"]["Authorization"] == f"Bearer {TOKEN}"
+
+
+def test_usage_only_providers_render_with_names(aikit, capsys):
+    r = aikit.usage_result("deepseek", aikit.USAGE_OK, credits={"remaining": 3, "total": None, "used": None, "unit": "USD"})
+    assert r["name"] == "DeepSeek API" and r["vendor"] == "DeepSeek"
 
 
 def test_every_probe_degrades_to_unauthenticated_in_empty_home(aikit, monkeypatch):

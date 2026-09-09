@@ -94,8 +94,11 @@ aikit setup
 
 `aikit usage` reads the credentials the CLIs already store on disk (OAuth tokens,
 session cookies, API keys — nothing is ever written back) and queries each
-provider's own usage endpoint, the same endpoints the open-source
-[CodexBar](https://github.com/steipete/CodexBar) menu-bar app uses. Every
+provider's own usage endpoint — the same endpoints the open-source trackers
+[CodexBar](https://github.com/steipete/CodexBar),
+[ai-usagebar](https://github.com/akitaonrails/ai-usagebar), MeterBar, UsageOwl
+and OpenUsage use, cross-checked against each other so parsers key on semantic
+fields (window durations, quota types) rather than array positions. Every
 provider is normalised into one record — `account`, `plan`, rate-limit
 `windows` (label / used % / used / limit / resets_at), `credits`
 (remaining / total / used), `spend` (amount / currency / period / limit) and a
@@ -112,24 +115,39 @@ aikit usage --all                # also list not-signed-in / unsupported provide
 
 | Provider | Credential source (read-only) | What is reported |
 |----------|-------------------------------|------------------|
-| Codex | `~/.codex/auth.json` (`$CODEX_HOME`) | plan, 5h + weekly windows, credit balance, account id |
+| Codex | `~/.codex/auth.json` (`$CODEX_HOME`) | plan, email, windows labelled by duration (5h/weekly/daily), code-review + per-model extra limits, credit balance, banked reset credits |
 | Claude Code | `~/.claude/.credentials.json` (`$CLAUDE_CONFIG_DIR`), macOS Keychain | plan, 5h / weekly / per-model windows, extra-usage spend |
-| GitHub Copilot | `$COPILOT_GITHUB_TOKEN` / `$GH_TOKEN` / `$GITHUB_TOKEN`, `~/.config/gh/hosts.yml`, `~/.config/github-copilot/{apps,hosts}.json` | plan, premium-request quota, entitlements, reset date, login |
+| GitHub Copilot | `$GITHUB_COPILOT_TOKEN` / `$COPILOT_GITHUB_TOKEN` / `$GH_TOKEN` / `$GITHUB_TOKEN`, `~/.config/github-copilot/{apps,hosts}.json`, `~/.config/gh/hosts.yml`, `gh auth token` (keyring) | plan, premium-request quota, entitlements, reset date, login |
 | Gemini CLI | `~/.gemini/oauth_creds.json` | tier, per-model remaining quota + reset, project |
 | Grok CLI | `~/.grok/auth.json` | tier, credit usage %, on-demand spend/cap, period end |
 | Kiro CLI | `kiro-cli/data.sqlite3` (Linux/macOS) | plan, credit usage vs limit, overage, reset |
-| Cursor | Cursor desktop `state.vscdb` session, `$CURSOR_SESSION_TOKEN` | membership, plan usage $, on-demand spend, billing cycle end |
+| Cursor | `$CURSOR_SESSION_TOKEN`, Cursor desktop `state.vscdb`, headless `cursor-agent` `~/.config/cursor/auth.json` | membership, included-usage % (total / Cursor models / other models), included $ used, on-demand enabled, billing cycle end |
 | Amp | `$AMP_API_KEY`, `~/.config/amp/secrets.json` | plan, free quota, credit balance, email |
 | Droid (Factory) | `$FACTORY_API_KEY`, `~/.factory/.env` | plan, standard/premium token allowance, overage, period end |
-| Kilo Code | `$KILO_API_KEY`, `~/.local/share/kilo/auth.json` | credit balance (USD) |
+| Kilo Code | `$KILO_API_KEY`, `~/.local/share/kilo/auth.json` (+ `$KILO_ORGANIZATION_ID`) | credit balance (USD) via `/api/profile/balance` |
 | OpenCode Go | `~/.local/share/opencode/auth.json` | rolling / weekly / monthly windows |
 | OpenRouter | `$OPENROUTER_API_KEY` (+ `$OPENROUTER_MANAGEMENT_API_KEY`) | key label, key spend vs limit, credits purchased / used / remaining |
 | Synthetic | `$SYNTHETIC_API_KEY` | per-quota usage with resets |
-| z.ai | `$Z_AI_API_KEY` | coding-plan quota windows |
-| Kimi Code | `$KIMI_API_KEY`, `~/.kimi-code/credentials/kimi-code.json` | plan, usage windows, reset |
+| z.ai | `$Z_AI_API_KEY` | GLM Coding plan level, 5h session + weekly token quota, monthly MCP-tool calls |
+| Kimi Code | `$KIMI_API_KEY`, `~/.kimi-code/credentials/kimi-code.json` (+ `region` → `.ai`/`.com`) | membership level, weekly + 5h windows, token expiry |
+| Codebuff | `$CODEBUFF_API_KEY`, `~/.config/manicode/credentials.json` | plan, credits used / quota, remaining balance, weekly limit |
 | Devin | `$DEVIN_BEARER_TOKEN` + `$DEVIN_ORG_ID` | ACU usage vs plan limit |
 
+API-key billing sources that are not installable agents (probed automatically
+when the env var is set; e.g. `aikit usage deepseek openai-api`):
+
+| Provider | Credential | What is reported |
+|----------|------------|------------------|
+| DeepSeek API (`deepseek`) | `$DEEPSEEK_API_KEY` | balance (USD preferred), granted / topped-up split |
+| Moonshot API (`moonshot`) | `$MOONSHOT_API_KEY` (+ `$MOONSHOT_BASE_URL` for `.cn`) | available / voucher / cash balance |
+| MiniMax Coding Plan (`minimax`) | `$MINIMAX_API_KEY` (+ `$MINIMAX_BASE_URL`) | per-model rolling + weekly request windows |
+| Novita AI (`novita`) | `$NOVITA_API_KEY` | available / cash balance, credit limit, pending charges |
+| Anthropic API (`anthropic-api`) | `$ANTHROPIC_ADMIN_KEY` (org admin key) | month-to-date org spend (paginated `cost_report`; refuses partial totals) |
+| OpenAI API (`openai-api`) | `$OPENAI_ADMIN_KEY` (org admin key) | month-to-date org spend (`/v1/organization/costs`) |
+
 All other agents report `unsupported` (their vendors expose no usage API).
+Trackers that rely on browser-only HttpOnly cookies (Windsurf, Warp, Zed) or
+local-transcript cost estimates were reviewed and deliberately not replicated.
 
 ### Multi-Select Picker
 

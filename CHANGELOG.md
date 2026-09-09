@@ -81,14 +81,22 @@ Newest entries on top, within each tool.
 
 ### 1.19.0 — 2026-09-09
 - **New `aikit usage [providers...] [--json] [--all]`** — a unified snapshot of
-  plan, account, credits, spend and rate-limit windows across 16 providers
+  plan, account, credits, spend and rate-limit windows across 23 providers
   (Codex, Claude Code, Copilot, Gemini CLI, Grok, Kiro, Cursor, Amp, Droid,
-  Kilo, OpenCode Go, OpenRouter, Synthetic, z.ai, Kimi Code, Devin). Probes reuse
-  the credentials each CLI already stores (OAuth tokens, session DBs, API keys —
-  read-only, never refreshed or written back) and hit the same provider usage
-  endpoints CodexBar uses. Every provider is normalised to one record
-  (`status` ok/unauthenticated/error/unsupported, `windows`, `credits`, `spend`);
-  probes run in parallel, never raise, and never emit secrets.
+  Kilo, OpenCode Go, OpenRouter, Synthetic, z.ai, Kimi Code, Codebuff, Devin,
+  plus API-key billing sources DeepSeek, Moonshot, MiniMax, Novita, Anthropic
+  org spend, OpenAI org spend). Probes reuse the credentials each CLI already
+  stores (OAuth tokens, session DBs, API keys — read-only, never refreshed or
+  written back) and hit the provider usage endpoints cross-checked across
+  CodexBar, ai-usagebar, MeterBar, UsageOwl and OpenUsage: windows are labelled
+  by duration / quota type rather than array position (Codex `limit_window_seconds`,
+  z.ai `TOKENS_LIMIT` unit codes, Kimi `window.duration`), Copilot sends the
+  VS Code-compatible headers the private endpoint expects, Cursor falls back to
+  the headless `cursor-agent` auth file, Kilo uses `/api/profile/balance`, and
+  Kimi honours the `region` file and token expiry. Every provider is normalised
+  to one record (`status` ok/unauthenticated/error/unsupported, `windows`,
+  `credits`, `spend`); probes run in parallel, never raise, and never emit
+  secrets.
 - **4 new agents (38 total):** Jules (`@google/jules`, `jules login`), Roo Code
   CLI (installer script, BYOK), Codebuff (`npm`, browser sign-in /
   `CODEBUFF_API_KEY`), Qoder CLI (installer script, `/login` /
