@@ -130,7 +130,7 @@ aikit usage --all                # also list not-signed-in / unsupported provide
 | Synthetic | `$SYNTHETIC_API_KEY` | per-quota usage with resets |
 | z.ai | `$Z_AI_API_KEY` | GLM Coding plan level, 5h session + weekly token quota, monthly MCP-tool calls |
 | Kimi Code | `$KIMI_API_KEY`, `~/.kimi-code/credentials/kimi-code.json` (+ `region` → `.ai`/`.com`) | membership level, weekly + 5h windows, token expiry |
-| Codebuff | `$CODEBUFF_API_KEY`, `~/.config/manicode/credentials.json` | plan, credits used / quota, remaining balance, weekly limit |
+| Codebuff | `$CODEBUFF_API_KEY` (balance only), `~/.config/manicode/credentials.json` (+ plan, weekly limit) | credits used / quota, remaining balance, plan, weekly limit |
 | Devin | `$DEVIN_BEARER_TOKEN` + `$DEVIN_ORG_ID` | ACU usage vs plan limit |
 
 API-key billing sources that are not installable agents (probed automatically

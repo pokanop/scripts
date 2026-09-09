@@ -462,7 +462,7 @@ def test_kimi_probe_reports_expired_token_without_network(aikit, monkeypatch):
 
 def test_codebuff_probe_reads_manicode_credentials(aikit, monkeypatch):
     write_json(aikit._test_home / ".config" / "manicode" / "credentials.json", {"default": {"authToken": TOKEN}})
-    stub_http(monkeypatch, aikit, {
+    calls = stub_http(monkeypatch, aikit, {
         "https://www.codebuff.com/api/v1/usage": (200, {"usage": 300, "quota": 1000, "remainingBalance": 700,
                                                         "next_quota_reset": "2026-02-01T00:00:00Z"}),
         "https://www.codebuff.com/api/user/subscription": (200, {"subscription": {"displayName": "Pro"},
@@ -471,6 +471,16 @@ def test_codebuff_probe_reads_manicode_credentials(aikit, monkeypatch):
     r = aikit.probe_usage("codebuff")
     assert r["status"] == "ok" and r["plan"] == "Pro" and r["account"] == "me@example.com"
     assert r["windows"][0]["used_pct"] == 30.0 and r["credits"]["remaining"] == 700
+    assert calls[0]["method"] == "POST" and calls[0]["body"] == {"fingerprintId": "aikit-usage"}
+
+
+def test_codebuff_api_key_skips_subscription_call(aikit, monkeypatch):
+    monkeypatch.setenv("CODEBUFF_API_KEY", TOKEN)
+    calls = stub_http(monkeypatch, aikit, {
+        "https://www.codebuff.com/api/v1/usage": (200, {"usage": 1, "quota": 10, "remainingBalance": 9}),
+    })
+    r = aikit.probe_usage("codebuff")
+    assert r["status"] == "ok" and r["plan"] is None and len(calls) == 1
 
 
 def test_deepseek_probe_prefers_usd_balance(aikit, monkeypatch):

@@ -6822,7 +6822,9 @@ def _probe_codebuff(provider="codebuff"):
     if not creds:
         return _unauth(provider, "no Codebuff session — run 'codebuff login' or set CODEBUFF_API_KEY")
     headers = {"Authorization": f"Bearer {creds['token']}"}
-    data = _usage_get_json("https://www.codebuff.com/api/v1/usage", headers)
+    base = os.environ.get("CODEBUFF_API_URL", "https://www.codebuff.com").rstrip("/")
+    data = _usage_get_json(f"{base}/api/v1/usage", headers, method="POST",
+                           body={"fingerprintId": "aikit-usage"})
     used = _usage_number(data.get("usage") if data.get("usage") is not None else data.get("used"))
     total = _usage_number(data.get("quota") if data.get("quota") is not None else data.get("limit"))
     remaining = _usage_number(data.get("remainingBalance") if data.get("remainingBalance") is not None
@@ -6835,8 +6837,12 @@ def _probe_codebuff(provider="codebuff"):
     if remaining is not None:
         credits = {"remaining": remaining, "total": total, "used": used, "unit": "credits"}
     plan = account = None
-    status, sub, _ = _usage_http("https://www.codebuff.com/api/user/subscription", headers=headers)
-    if status == 200 and isinstance(sub, dict):
+    sub = None
+    if creds["source"].endswith("credentials.json"):
+        status, sub, _ = _usage_http(f"{base}/api/user/subscription", headers=headers)
+        if status != 200:
+            sub = None
+    if isinstance(sub, dict):
         s = sub.get("subscription") if isinstance(sub.get("subscription"), dict) else {}
         plan = s.get("displayName") or sub.get("displayName") or s.get("tier") or sub.get("tier")
         user = sub.get("user") if isinstance(sub.get("user"), dict) else {}
