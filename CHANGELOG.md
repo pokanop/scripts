@@ -96,7 +96,12 @@ Newest entries on top, within each tool.
   Kimi honours the `region` file and token expiry. Every provider is normalised
   to one record (`status` ok/unauthenticated/error/unsupported, `windows`,
   `credits`, `spend`); probes run in parallel, never raise, and never emit
-  secrets.
+  secrets. Live-account fixes: Claude / Grok tokens past their stored expiry
+  report "expired — run the CLI once" instead of a confusing HTTP 401 (no
+  network call is made); Claude extra-usage spend is converted from cents to
+  dollars; Codex omits the credits cell when the balance is zero/absent;
+  OpenRouter no longer echoes an API-key-shaped label as the account; and
+  OpenRouter / Synthetic / z.ai carry proper names and icons in the table.
 - **4 new agents (38 total):** Jules (`@google/jules`, `jules login`), Roo Code
   CLI (installer script, BYOK), Codebuff (`npm`, browser sign-in /
   `CODEBUFF_API_KEY`), Qoder CLI (installer script, `/login` /

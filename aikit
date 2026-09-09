@@ -6095,7 +6095,7 @@ def _claude_credentials():
         oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
         if isinstance(oauth, dict) and oauth.get("accessToken"):
             return {"token": oauth["accessToken"], "tier": oauth.get("subscriptionType"),
-                    "expires_at": oauth.get("expiresAt"), "source": str(path)}
+                    "expired": _epoch_expired(oauth.get("expiresAt")), "source": str(path)}
     if _CURRENT_PLATFORM == "Darwin" and which("security"):
         code, out, _ = run(["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
                            timeout=5, shell=False)
@@ -6106,8 +6106,31 @@ def _claude_credentials():
                 oauth = {}
             if oauth.get("accessToken"):
                 return {"token": oauth["accessToken"], "tier": oauth.get("subscriptionType"),
-                        "expires_at": oauth.get("expiresAt"), "source": "macOS Keychain"}
+                        "expired": _epoch_expired(oauth.get("expiresAt")), "source": "macOS Keychain"}
     return None
+
+
+def _epoch_expired(value):
+    """True when a unix timestamp (seconds or milliseconds) is in the past."""
+    ts = _usage_number(value)
+    if ts is None or ts <= 0:
+        return False
+    if ts > 1e11:
+        ts /= 1000.0
+    return ts < time.time()
+
+
+def _iso_expired(value):
+    """True when an ISO-8601 timestamp string is in the past; False if unparseable."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt < datetime.now(timezone.utc)
 
 
 def _copilot_credentials():
@@ -6164,7 +6187,8 @@ def _grok_credentials():
         return None
     entries.sort(key=lambda se: 0 if se[1].get("auth_mode") == "oidc" or "oidc" in se[0] else 1)
     scope, entry = entries[0]
-    return {"token": entry["key"], "email": entry.get("email"), "source": str(path)}
+    return {"token": entry["key"], "email": entry.get("email"), "source": str(path),
+            "expired": _iso_expired(entry.get("expires_at"))}
 
 
 def _kiro_db_path():
@@ -6239,8 +6263,9 @@ def _cursor_credentials():
     access = _sqlite_value(db, "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'")
     source = str(db)
     if not access:
-        xdg = Path(os.environ.get("XDG_CONFIG_HOME") or _usage_home() / ".config")
-        agent_auth = xdg / "cursor" / "auth.json"
+        # cursor-agent writes its own auth.json under the platform config dir
+        # (~/.config on Linux, ~/Library/Application Support on macOS, %APPDATA% on Windows).
+        agent_auth = _cursor_db_path().parents[3] / "cursor" / "auth.json"
         data = _usage_read_json(agent_auth)
         access = data.get("accessToken") if isinstance(data, dict) else None
         source = str(agent_auth)
@@ -6360,7 +6385,7 @@ def _probe_codex(provider="codex"):
         windows += _codex_rate_limit_windows(extra.get("rate_limit"), f"{name} ")
     credits = None
     c = data.get("credits") or {}
-    if isinstance(c, dict) and (c.get("has_credits") is not None or c.get("balance") is not None):
+    if isinstance(c, dict) and (c.get("has_credits") or c.get("unlimited") or _usage_number(c.get("balance"))):
         credits = {"remaining": _usage_number(c.get("balance")), "total": None, "used": None,
                    "unit": "credits", "unlimited": bool(c.get("unlimited"))}
     extra = {}
@@ -6420,6 +6445,9 @@ def _probe_claude(provider="claude"):
     creds = _claude_credentials()
     if not creds:
         return _unauth(provider, "no Claude Code OAuth session — run 'claude' and sign in")
+    if creds.get("expired"):
+        return _unauth(provider, "Claude Code OAuth token expired — run 'claude' once to refresh it",
+                       source=creds["source"])
     data = _usage_get_json(
         "https://api.anthropic.com/api/oauth/usage",
         {"Authorization": f"Bearer {creds['token']}", "anthropic-beta": "oauth-2025-04-20"})
@@ -6433,8 +6461,12 @@ def _probe_claude(provider="claude"):
     spend = None
     extra_usage = data.get("extra_usage") or {}
     if isinstance(extra_usage, dict) and extra_usage.get("is_enabled"):
-        spend = {"amount": extra_usage.get("used_credits"), "currency": "USD", "period": "monthly",
-                 "limit": extra_usage.get("monthly_limit")}
+        used_cents = _usage_number(extra_usage.get("used_credits"))
+        limit_cents = _usage_number(extra_usage.get("monthly_limit"))
+        if used_cents is not None:
+            spend = {"amount": round(used_cents / 100.0, 2), "currency": extra_usage.get("currency") or "USD",
+                     "period": "monthly",
+                     "limit": None if limit_cents is None else round(limit_cents / 100.0, 2)}
     return usage_result(provider, USAGE_OK, plan=creds.get("tier"), source=creds["source"],
                         windows=windows, spend=spend)
 
@@ -6512,6 +6544,8 @@ def _probe_grok(provider="grok"):
     creds = _grok_credentials()
     if not creds:
         return _unauth(provider, "no Grok session — run 'grok login'")
+    if creds.get("expired"):
+        return _unauth(provider, "Grok token expired — run 'grok' once to refresh it", source=creds["source"])
     data = _usage_get_json(
         "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
         {"Authorization": f"Bearer {creds['token']}", "x-xai-token-auth": "xai-grok-cli"})
@@ -6566,7 +6600,7 @@ def _probe_kiro(provider="kiro"):
 def _probe_cursor(provider="cursor"):
     creds = _cursor_credentials()
     if not creds:
-        return _unauth(provider, "no Cursor desktop session found (sign in to the Cursor app)")
+        return _unauth(provider, "no Cursor session — sign in to the Cursor app, or run 'cursor-agent login'")
     headers = {"Cookie": f"WorkosCursorSessionToken={creds['cookie']}", "Origin": "https://cursor.com",
                "Referer": "https://cursor.com/dashboard"}
     data = _usage_get_json("https://cursor.com/api/usage-summary", headers)
@@ -6706,7 +6740,10 @@ def _probe_openrouter(provider="openrouter"):
     windows = []
     if info.get("limit") is not None:
         windows.append(usage_window("key limit", used=info.get("usage"), limit=info.get("limit"), unit="USD"))
-    return usage_result(provider, USAGE_OK, account=info.get("label"),
+    label = info.get("label")
+    if isinstance(label, str) and label.startswith("sk-"):
+        label = None
+    return usage_result(provider, USAGE_OK, account=label,
                         plan="free tier" if info.get("is_free_tier") else "paid",
                         source=src, windows=windows, credits=credits, spend=spend)
 
@@ -7018,6 +7055,9 @@ def _probe_openai_api(provider="openai-api"):
 
 # API-key billing/quota sources that are not installable agents.
 USAGE_ONLY_PROVIDERS = {
+    "openrouter": {"name": "OpenRouter", "vendor": "OpenRouter", "icon": "🔀"},
+    "synthetic": {"name": "Synthetic", "vendor": "Synthetic", "icon": "🧪"},
+    "zai": {"name": "Z.ai Coding Plan", "vendor": "Zhipu AI", "icon": "🇿"},
     "deepseek": {"name": "DeepSeek API", "vendor": "DeepSeek", "icon": "🐋"},
     "moonshot": {"name": "Moonshot API", "vendor": "Moonshot AI", "icon": "🌙"},
     "minimax": {"name": "MiniMax Coding Plan", "vendor": "MiniMax", "icon": "🅼"},

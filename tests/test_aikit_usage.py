@@ -135,14 +135,33 @@ def test_claude_probe_honours_config_dir_and_extra_usage(aikit, monkeypatch):
             "five_hour": {"utilization": 63.2, "resets_at": "2026-01-01T00:00:00Z"},
             "seven_day": {"utilization": 20, "resets_at": "2026-01-05T00:00:00Z"},
             "seven_day_opus": {"utilization": None},
-            "extra_usage": {"is_enabled": True, "monthly_limit": 50, "used_credits": 12},
+            "extra_usage": {"is_enabled": True, "monthly_limit": 10000, "used_credits": 1250},
         }),
     })
     r = aikit.probe_usage("claude")
     assert r["status"] == "ok" and r["plan"] == "max"
     assert [w["label"] for w in r["windows"]] == ["5h session", "weekly"]
-    assert r["spend"] == {"amount": 12, "currency": "USD", "period": "monthly", "limit": 50}
+    assert r["spend"] == {"amount": 12.5, "currency": "USD", "period": "monthly", "limit": 100.0}
     assert calls[0]["headers"]["anthropic-beta"] == "oauth-2025-04-20"
+
+
+def test_claude_probe_reports_expired_token_without_network(aikit, monkeypatch):
+    cfg = aikit._test_home / "claude-cfg"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+    write_json(cfg / ".credentials.json",
+               {"claudeAiOauth": {"accessToken": TOKEN, "subscriptionType": "max", "expiresAt": 1_000_000_000_000}})
+    calls = stub_http(monkeypatch, aikit, {})
+    r = aikit.probe_usage("claude")
+    assert r["status"] == "unauthenticated" and "expired" in r["message"] and calls == []
+
+
+def test_grok_probe_reports_expired_token_without_network(aikit, monkeypatch):
+    write_json(aikit._test_home / ".grok" / "auth.json", {
+        "https://auth.x.ai::abc": {"key": TOKEN, "auth_mode": "oidc", "expires_at": "2001-01-01T00:00:00Z"},
+    })
+    calls = stub_http(monkeypatch, aikit, {})
+    r = aikit.probe_usage("grok")
+    assert r["status"] == "unauthenticated" and "expired" in r["message"] and calls == []
 
 
 def test_copilot_probe_prefers_env_token_and_parses_quota_snapshots(aikit, monkeypatch):
