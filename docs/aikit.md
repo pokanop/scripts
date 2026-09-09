@@ -1,6 +1,6 @@
 # 🤖 aikit — AI Coding Agent CLI Installer & Manager
 
-**Install, update, authenticate, and manage 34 AI coding agent CLIs from one tool.**
+**Install, update, authenticate, and manage 38 AI coding agent CLIs from one tool.**
 
 `aikit` · Python 3 · `rich` · `flask` · `requests`
 
@@ -25,7 +25,7 @@ aikit setup
 
 ---
 
-## Agents (34)
+## Agents (38)
 
 | # | Agent | Install | Auth |
 |---|-------|---------|------|
@@ -63,6 +63,10 @@ aikit setup
 | 32 | 🧬 **MiMo Code** | `curl` script / `npm` | First-run wizard in `mimo` (MiMo Auto free, Xiaomi OAuth, Claude Code import, or any OpenAI-compatible API) |
 | 33 | 🥧 **Oh My Pi** | `curl` script / `npm` | `/login` in `omp` (subscription OAuth) or provider env vars (Anthropic/OpenAI/Gemini/Groq/xAI/OpenRouter) |
 | 34 | 🌊 **Mistral Vibe** | `curl` script / `pip` | `vibe` first-run wizard (browser OAuth to a Mistral account) or `MISTRAL_API_KEY` |
+| 35 | 🪐 **Jules** | `npm` | `jules login` (Google account OAuth; async cloud-VM agent) |
+| 36 | 🦘 **Roo Code CLI** | `curl` script (Linux x64 / macOS arm64) | BYOK — `OPENROUTER_API_KEY` (default) or another provider key / `--provider --api-key` |
+| 37 | 🐃 **Codebuff** | `npm` | First launch of `codebuff` opens a browser sign-in; `CODEBUFF_API_KEY` for CI |
+| 38 | 🧿 **Qoder CLI** | `curl` script / PowerShell | `/login` inside `qoder` (browser OAuth) or `QODER_PERSONAL_ACCESS_TOKEN` for CI |
 
 ### Not managed
 
@@ -78,12 +82,54 @@ aikit setup
 | `aikit install [agents...]` | Install agents (multi-select picker if none) |
 | `aikit update [agents...]` | Update agents (all installed if none) |
 | `aikit uninstall [agent...]` | Remove agents |
-| `aikit list` | Status table of all 34 agents |
+| `aikit list` | Status table of all 38 agents |
 | `aikit auth [agent] [--force]` | Guided authentication setup; `--force` replaces cached auth status and signs in again |
 | `aikit doctor` | Diagnose environment and agent health |
 | `aikit serve` | Start web dashboard |
 | `aikit config get/set/list` | Manage `~/.aikit/config.json` |
 | `aikit gateway on/off/status/coverage/models` | Route AI tools through a LiteLLM gateway — see **[gateway docs](aikit-gateway.md)** |
+| `aikit usage [providers...] [--json] [--all]` | Unified plan / credits / spend / rate-limit snapshot across providers — see below |
+
+### Usage snapshot (`aikit usage`)
+
+`aikit usage` reads the credentials the CLIs already store on disk (OAuth tokens,
+session cookies, API keys — nothing is ever written back) and queries each
+provider's own usage endpoint, the same endpoints the open-source
+[CodexBar](https://github.com/steipete/CodexBar) menu-bar app uses. Every
+provider is normalised into one record — `account`, `plan`, rate-limit
+`windows` (label / used % / used / limit / resets_at), `credits`
+(remaining / total / used), `spend` (amount / currency / period / limit) and a
+`status` of `ok`, `unauthenticated`, `error` or `unsupported` — and rendered as
+one table. Probes run in parallel and never raise: a provider that is not
+signed in shows the exact command or env var to fix it, an API failure shows the
+HTTP status, and secrets never appear in any output (including `--json`).
+
+```bash
+aikit usage                      # every provider with a usage API that is signed in
+aikit usage claude codex --json  # machine-readable snapshot for scripting
+aikit usage --all                # also list not-signed-in / unsupported providers
+```
+
+| Provider | Credential source (read-only) | What is reported |
+|----------|-------------------------------|------------------|
+| Codex | `~/.codex/auth.json` (`$CODEX_HOME`) | plan, 5h + weekly windows, credit balance, account id |
+| Claude Code | `~/.claude/.credentials.json` (`$CLAUDE_CONFIG_DIR`), macOS Keychain | plan, 5h / weekly / per-model windows, extra-usage spend |
+| GitHub Copilot | `$COPILOT_GITHUB_TOKEN` / `$GH_TOKEN` / `$GITHUB_TOKEN`, `~/.config/gh/hosts.yml`, `~/.config/github-copilot/{apps,hosts}.json` | plan, premium-request quota, entitlements, reset date, login |
+| Gemini CLI | `~/.gemini/oauth_creds.json` | tier, per-model remaining quota + reset, project |
+| Grok CLI | `~/.grok/auth.json` | tier, credit usage %, on-demand spend/cap, period end |
+| Kiro CLI | `kiro-cli/data.sqlite3` (Linux/macOS) | plan, credit usage vs limit, overage, reset |
+| Cursor | Cursor desktop `state.vscdb` session, `$CURSOR_SESSION_TOKEN` | membership, plan usage $, on-demand spend, billing cycle end |
+| Amp | `$AMP_API_KEY`, `~/.config/amp/secrets.json` | plan, free quota, credit balance, email |
+| Droid (Factory) | `$FACTORY_API_KEY`, `~/.factory/.env` | plan, standard/premium token allowance, overage, period end |
+| Kilo Code | `$KILO_API_KEY`, `~/.local/share/kilo/auth.json` | credit balance (USD) |
+| OpenCode Go | `~/.local/share/opencode/auth.json` | rolling / weekly / monthly windows |
+| OpenRouter | `$OPENROUTER_API_KEY` (+ `$OPENROUTER_MANAGEMENT_API_KEY`) | key label, key spend vs limit, credits purchased / used / remaining |
+| Synthetic | `$SYNTHETIC_API_KEY` | per-quota usage with resets |
+| z.ai | `$Z_AI_API_KEY` | coding-plan quota windows |
+| Kimi Code | `$KIMI_API_KEY`, `~/.kimi-code/credentials/kimi-code.json` | plan, usage windows, reset |
+| Devin | `$DEVIN_BEARER_TOKEN` + `$DEVIN_ORG_ID` | ACU usage vs plan limit |
+
+All other agents report `unsupported` (their vendors expose no usage API).
 
 ### Multi-Select Picker
 
@@ -97,7 +143,7 @@ Select agents to install
    2. [ ] 🛸 Antigravity
    3. [X] 🖱️ Cursor CLI
   ...
-  Selected: 1/34  cursor
+  Selected: 1/38  cursor
 ```
 
 Press `Space` or enter numbers to toggle. Press `Enter` to confirm. Press `q` to cancel.
@@ -188,7 +234,7 @@ logged.
 
 ```
 aikit                          # Single-file Python script (~1,600 lines)
-├── Agent registry             # 34 agents, each with platform-aware install commands
+├── Agent registry             # 38 agents, each with platform-aware install commands
 ├── Subprocess runner          # Install/update/uninstall execution
 ├── Config system              # JSON-based, three-tier loading, env var overrides
 ├── Rich TUI                   # Tables, panels, interactive multi-select picker

@@ -530,7 +530,15 @@ def test_aikit_validate_agent_keys_ok(tool_loader):
 
 def test_aikit_new_agent_registry_entries(tool_loader):
     m = tool_loader("aikit")
-    assert len(m.AGENTS) == 34
+    assert len(m.AGENTS) == 38
+    for key in ("jules", "roo", "codebuff", "qoder"):
+        assert m.AGENTS[key]["install"]["Linux"]
+        assert m.AGENTS[key]["update_cmd"]
+        assert m.resolve_uninstall_cmd(m.AGENTS[key])
+    assert m.AGENTS["jules"]["version_cmd"] == "jules version"
+    assert m.AGENTS["roo"]["install"]["Windows"] is None
+    assert "$HOME/.roo" in m.resolve_uninstall_cmd(m.AGENTS["roo"])
+    assert "$HOME/.qoder" in m.resolve_uninstall_cmd(m.AGENTS["qoder"])
     goose = m.AGENTS["goose"]
     assert goose["bin"] == "goose"
     assert goose["update_cmd"] == "goose update"
@@ -1195,8 +1203,12 @@ def test_aikit_auth_registry_login_commands(tool_loader):
         key for key, agent in m.AGENTS.items() if agent.get("auth_cmd_confirms")
     } == {
         "cursor", "codex", "copilot", "grok", "kiro", "amp", "continue",
-        "devin", "auggie",
+        "devin", "auggie", "jules",
     }
+    assert m.AGENTS["jules"]["auth_cmd"] == "jules login"
+    assert "QODER_PERSONAL_ACCESS_TOKEN" in m.AGENTS["qoder"]["auth_env_vars"]
+    assert "CODEBUFF_API_KEY" in m.AGENTS["codebuff"]["auth_env_vars"]
+    assert m.AGENTS["roo"]["auth_type"] == "api_key"
     assert m.AGENTS["vibe"].get("auth_cmd_confirms") is None
 
 

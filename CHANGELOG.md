@@ -79,6 +79,22 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 1.19.0 — 2026-09-09
+- **New `aikit usage [providers...] [--json] [--all]`** — a unified snapshot of
+  plan, account, credits, spend and rate-limit windows across 16 providers
+  (Codex, Claude Code, Copilot, Gemini CLI, Grok, Kiro, Cursor, Amp, Droid,
+  Kilo, OpenCode Go, OpenRouter, Synthetic, z.ai, Kimi Code, Devin). Probes reuse
+  the credentials each CLI already stores (OAuth tokens, session DBs, API keys —
+  read-only, never refreshed or written back) and hit the same provider usage
+  endpoints CodexBar uses. Every provider is normalised to one record
+  (`status` ok/unauthenticated/error/unsupported, `windows`, `credits`, `spend`);
+  probes run in parallel, never raise, and never emit secrets.
+- **4 new agents (38 total):** Jules (`@google/jules`, `jules login`), Roo Code
+  CLI (installer script, BYOK), Codebuff (`npm`, browser sign-in /
+  `CODEBUFF_API_KEY`), Qoder CLI (installer script, `/login` /
+  `QODER_PERSONAL_ACCESS_TOKEN`). All four carry install/update/uninstall/auth
+  metadata and gateway-coverage entries.
+
 ### 1.18.3 — 2026-09-07
 - **Fix missing update checks for kiro and openclaw (POK-317).** The registry
   entries for Kiro CLI and OpenClaw had no `version_check` block, so `aikit

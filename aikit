@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.18.3
-Install, update, authenticate, and manage 34 AI coding agent CLIs from one tool.
+aikit — AI Coding Agent CLI Installer & Manager  v1.19.0
+Install, update, authenticate, and manage 38 AI coding agent CLIs from one tool.
 
 Architecture:
     Agent registry → platform-aware install → auth multiplexing → web dashboard
@@ -18,11 +18,13 @@ Usage:
     aikit config get/set/list       Manage configuration
     aikit gateway on/off/purge      Toggle the LiteLLM gateway (purge forgets creds)
     aikit gateway coverage          Show which agents route through the gateway (and which can't)
+    aikit usage [providers...]      Unified plan / credits / rate-limit snapshot across providers
 
 Dependencies:
     pip install rich requests flask readchar
 """
 
+import base64
 import difflib
 import json
 import os
@@ -31,6 +33,7 @@ import re
 import shlex
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -38,7 +41,8 @@ import textwrap
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 try:
@@ -52,7 +56,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.18.3"
+__version__ = "1.19.0"
 
 import scriptkit as sk
 
@@ -245,6 +249,24 @@ def omp_uninstall_cmd():
     )
 
 
+def roo_uninstall_cmd():
+    """Roo Code CLI: install.sh unpacks @roo-code/cli into ~/.roo/cli and shims
+    ~/.local/bin/roo (not a global npm install despite the npm version_check), so
+    derive nothing — remove the shim, the CLI tree and the ~/.roo state dir."""
+    return binary_uninstall_cmd("roo", vendor_dirs=["$HOME/.roo"])
+
+
+def qoder_uninstall_cmd():
+    """Qoder CLI: the curl installer drops a self-contained binary (npm is only an
+    alternate channel), so remove the binary plus ~/.qoder; fall back to npm
+    uninstall when the package is present in a global prefix."""
+    parts = [binary_uninstall_cmd("qoder", vendor_dirs=["$HOME/.qoder"])]
+    for prefix in _npm_global_prefixes():
+        if _npm_package_dir(prefix, "@qoder-ai/qodercli").exists():
+            parts.insert(0, f"npm uninstall -g @qoder-ai/qodercli --prefix {shlex.quote(str(prefix))}")
+    return " ; ".join(parts)
+
+
 def grok_uninstall_cmd():
     """Grok Build: remove ~/.grok data dir and PATH shims (incl. shared 'agent' alias)."""
     return binary_uninstall_cmd(
@@ -284,7 +306,7 @@ def uninstall_removes_vendor_data(uninstall_cmd):
 
 
 # =============================================================================
-# Agent Registry — 34 coding agents, platform-aware install commands
+# Agent Registry — 38 coding agents, platform-aware install commands
 # =============================================================================
 
 _CURRENT_PLATFORM = platform.system()  # "Linux", "Darwin", "Windows"
@@ -1128,6 +1150,96 @@ AGENTS = {
         "auth_note": "Set OPENAI_API_KEY (or other provider env var) before running 'interpreter'. On first run, 'interpreter' prompts for an API key if none is set. Use '--local' for Ollama-hosted models.",
         "requires": ["python3", "pip"],
         "tags": ["interpreter", "open-source", "code-execution", "local-llm", "provider-agnostic"],
+    },
+    "jules": {
+        "name": "Jules",
+        "bin": "jules",
+        "vendor": "Google",
+        "homepage": "https://jules.google/docs/cli/reference",
+        "icon": "🪐",
+        "install": {
+            "Linux": npm_install_cmd("@google/jules"),
+            "Darwin": npm_install_cmd("@google/jules"),
+            "Windows": npm_install_cmd("@google/jules"),
+        },
+        "version_cmd": "jules version",
+        "update_cmd": npm_install_cmd("@google/jules@latest"),
+        "path_markers": ["@google/jules", "/.jules/"],
+        "version_check": {"type": "npm", "package": "@google/jules"},
+        "uninstall_cmd": lambda: npm_uninstall_cmd("@google/jules") + " ; rm -rf $HOME/.jules $HOME/.config/jules",
+        "auth_type": "oauth_browser",
+        "auth_env_vars": [],
+        "auth_cmd": "jules login",
+        "auth_cmd_confirms": True,
+        "auth_note": "Run 'jules login' for Google account OAuth (browser). Jules runs tasks asynchronously in Google-hosted cloud VMs; 'jules logout' clears the session.",
+        "requires": ["node", "npm"],
+        "tags": ["jules", "google", "gemini", "async", "cloud-agent", "remote"],
+    },
+    "roo": {
+        "name": "Roo Code CLI",
+        "bin": "roo",
+        "vendor": "Roo Code",
+        "homepage": "https://github.com/RooCodeInc/Roo-Code/tree/main/apps/cli",
+        "icon": "🦘",
+        "install": {
+            "Linux": "curl -fsSL https://raw.githubusercontent.com/RooCodeInc/Roo-Code/main/apps/cli/install.sh | sh",
+            "Darwin": "curl -fsSL https://raw.githubusercontent.com/RooCodeInc/Roo-Code/main/apps/cli/install.sh | sh",
+            "Windows": None,
+        },
+        "version_cmd": "roo --version",
+        "update_cmd": "roo upgrade",
+        "path_markers": ["/.roo/", "@roo-code/cli"],
+        "version_check": {"type": "npm", "package": "@roo-code/cli"},
+        "uninstall_cmd": roo_uninstall_cmd(),
+        "auth_type": "api_key",
+        "auth_env_vars": ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"],
+        "auth_note": "Set OPENROUTER_API_KEY (default provider) or another provider key, or pass '--provider <name> --api-key <key>'. Requires Node.js 20+; macOS Apple Silicon and Linux x64 only.",
+        "requires": ["curl", "node"],
+        "tags": ["roo", "roo-code", "open-source", "byok", "provider-agnostic", "modes"],
+    },
+    "codebuff": {
+        "name": "Codebuff",
+        "bin": "codebuff",
+        "vendor": "Codebuff",
+        "homepage": "https://www.codebuff.com",
+        "icon": "🐃",
+        "install": {
+            "Linux": npm_install_cmd("codebuff"),
+            "Darwin": npm_install_cmd("codebuff"),
+            "Windows": npm_install_cmd("codebuff"),
+        },
+        "version_cmd": "codebuff --version",
+        "update_cmd": npm_install_cmd("codebuff@latest"),
+        "path_markers": ["/codebuff", "/.config/manicode/"],
+        "version_check": {"type": "npm", "package": "codebuff"},
+        "uninstall_cmd": lambda: npm_uninstall_cmd("codebuff") + " ; rm -rf $HOME/.config/manicode $HOME/.config/codebuff",
+        "auth_type": "oauth_browser",
+        "auth_env_vars": ["CODEBUFF_API_KEY"],
+        "auth_note": "Run 'codebuff' — first launch opens a browser to sign in and stores the session under ~/.config/manicode/credentials.json. For CI/headless, set CODEBUFF_API_KEY (from codebuff.com/api-keys).",
+        "requires": ["node", "npm"],
+        "tags": ["codebuff", "multi-agent", "credits", "free-tier", "open-source"],
+    },
+    "qoder": {
+        "name": "Qoder CLI",
+        "bin": "qoder",
+        "vendor": "Qoder",
+        "homepage": "https://docs.qoder.com/cli/quick-start",
+        "icon": "🧿",
+        "install": {
+            "Linux": "curl -fsSL https://qoder.com/install | bash",
+            "Darwin": "curl -fsSL https://qoder.com/install | bash",
+            "Windows": "powershell -c \"irm https://qoder.com/install.ps1 | iex\"",
+        },
+        "version_cmd": "qoder --version",
+        "update_cmd": "qoder update",
+        "path_markers": ["/.qoder/", "@qoder-ai/qodercli"],
+        "version_check": {"type": "npm", "package": "@qoder-ai/qodercli"},
+        "uninstall_cmd": qoder_uninstall_cmd,
+        "auth_type": "oauth_browser",
+        "auth_env_vars": ["QODER_PERSONAL_ACCESS_TOKEN"],
+        "auth_note": "Run 'qoder' and enter '/login' for Qoder account OAuth (browser; headless terminals print the sign-in URL instead). For CI, set QODER_PERSONAL_ACCESS_TOKEN (Qoder settings → Personal Access Tokens). Config lives in ~/.qoder (override with QODER_CONFIG_DIR).",
+        "requires": ["curl"],
+        "tags": ["qoder", "alibaba", "quest-mode", "auto-upgrade", "multi-model"],
     },
 }
 
@@ -4425,6 +4537,10 @@ GATEWAY_COVERAGE = {
                   "reason": "Pi fork with provider-agnostic BYOK; config under ~/.omp/agent/models.yml — needs a renderer if OPENAI_BASE_URL / ANTHROPIC_BASE_URL override is confirmed"},
     "vibe":      {"state": COVERAGE_PENDING,
                   "reason": "Mistral Vibe stores creds locally under ~/.vibe/; no verified OPENAI_BASE_URL / MISTRAL_BASE_URL override for gateway routing — needs a renderer or env wire"},
+    "roo":       {"state": COVERAGE_PENDING,
+                  "reason": "provider-agnostic BYOK via --provider/--api-key; base URL lives in the Roo Code provider profile under ~/.roo/ — needs a renderer if an OPENAI_BASE_URL override is confirmed"},
+    "codebuff":  {"state": COVERAGE_PENDING,
+                  "reason": "Codebuff routes through its own credit-metered backend by default; BYOK is configured in-app, not via a provider env var — needs a renderer or confirmed env override"},
     # -- unsupported / passthrough-candidate: first-party CLIs. Each declares its
     #    native protocol + the LiteLLM passthrough route that wraps it (verified against
     #    llm_passthrough_endpoints.py), the auth var the tool reads, and whether the
@@ -4461,6 +4577,10 @@ GATEWAY_COVERAGE = {
                     "reason": "Augment's backend is proprietary — no OpenAI-compatible passthrough route or base-URL override exposed; cannot be routed via the LiteLLM gateway"},
     "droid":       {"state": COVERAGE_UNSUPPORTED,
                     "reason": "Droid routes through Factory AI's proprietary backend — no OpenAI-compatible passthrough route or env-var base-URL override exposed"},
+    "jules":       {"state": COVERAGE_UNSUPPORTED,
+                    "reason": "Jules runs remotely in Google-hosted VMs against Google's own models — nothing local to route through the gateway"},
+    "qoder":       {"state": COVERAGE_UNSUPPORTED,
+                    "reason": "Qoder CLI routes through Qoder's proprietary backend (account-locked) — no OpenAI-compatible passthrough route or base-URL override exposed"},
 }
 
 
@@ -5789,6 +5909,920 @@ def do_serve(host=None, port=None, detach=False, stop=False):
 # CLI Main
 # =============================================================================
 
+# =============================================================================
+# Usage — unified subscription / credits / quota snapshot
+#
+# Read-only probes modelled on CodexBar (github.com/steipete/CodexBar). Each
+# probe reuses the credentials the provider's own CLI already stored on disk
+# (or an API key from the environment), calls the provider's usage endpoint,
+# and normalises the answer into one record shape. Nothing here refreshes or
+# rewrites provider-owned credential files, and nothing prints a token.
+# =============================================================================
+
+USAGE_TIMEOUT = 15
+USAGE_OK = "ok"
+USAGE_UNAUTHENTICATED = "unauthenticated"
+USAGE_ERROR = "error"
+USAGE_UNSUPPORTED = "unsupported"
+
+
+class UsageProbeError(Exception):
+    """Probe failure with a user-safe message (never includes credentials)."""
+
+
+def _usage_home():
+    return _REAL_HOME
+
+
+def _usage_env(*names):
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value, f"${name}"
+    return None, None
+
+
+def _usage_read_json(path):
+    """Parse a JSON file; None when missing/empty/invalid."""
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return None
+    if not text.strip():
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def _usage_http(url, *, headers=None, method="GET", body=None, timeout=USAGE_TIMEOUT):
+    """HTTP call returning (status, parsed_json_or_None, text). Network and
+    HTTP errors become :class:`UsageProbeError`; auth headers never leak."""
+    data = None
+    hdrs = {"User-Agent": f"aikit/{__version__}", "Accept": "application/json"}
+    hdrs.update(headers or {})
+    if body is not None:
+        data = json.dumps(body).encode()
+        hdrs.setdefault("Content-Type", "application/json")
+    req = Request(url, data=data, headers=hdrs, method=method)
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            status = resp.status
+            text = resp.read().decode("utf-8", errors="replace")
+    except HTTPError as e:
+        status = e.code
+        text = e.read().decode("utf-8", errors="replace") if e.fp else ""
+    except (URLError, TimeoutError, OSError) as e:
+        raise UsageProbeError(f"network error: {getattr(e, 'reason', e)}")
+    parsed = None
+    if text.strip():
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            parsed = None
+    return status, parsed, text
+
+
+def _usage_get_json(url, headers, **kw):
+    status, parsed, text = _usage_http(url, headers=headers, **kw)
+    if status in (401, 403):
+        raise UsageProbeError(f"credentials rejected (HTTP {status}) — re-run the provider's login")
+    if status >= 400:
+        detail = ""
+        if isinstance(parsed, dict):
+            detail = str(parsed.get("message") or parsed.get("error") or parsed.get("detail") or "")
+        raise UsageProbeError(f"HTTP {status}{' — ' + sk.truncate(detail, 80) if detail else ''}")
+    if parsed is None:
+        raise UsageProbeError("non-JSON response")
+    return parsed
+
+
+def _iso_from_epoch(value):
+    """Epoch seconds/millis → ISO-8601 UTC string; None when not a number."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if num > 1e11:
+        num /= 1000.0
+    try:
+        return datetime.fromtimestamp(num, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _pct(used, limit):
+    try:
+        used, limit = float(used), float(limit)
+    except (TypeError, ValueError):
+        return None
+    if limit <= 0:
+        return None
+    return max(0.0, min(100.0, used / limit * 100.0))
+
+
+def usage_window(label, *, used_pct=None, resets_at=None, used=None, limit=None, unit=None):
+    """One rate-limit / quota bucket (session, weekly, monthly, per-model …)."""
+    if used_pct is None and used is not None and limit is not None:
+        used_pct = _pct(used, limit)
+    if isinstance(resets_at, (int, float)) and not isinstance(resets_at, bool):
+        resets_at = _iso_from_epoch(resets_at)
+    return {
+        "label": label,
+        "used_pct": None if used_pct is None else round(float(used_pct), 1),
+        "used": used,
+        "limit": limit,
+        "unit": unit,
+        "resets_at": resets_at,
+    }
+
+
+def usage_result(provider, status, *, account=None, plan=None, source=None, windows=(),
+                 credits=None, spend=None, message=None, extra=None):
+    """The normalised snapshot every probe returns.
+
+    credits: {"remaining": float|None, "total": float|None, "used": float|None, "unit": str}
+    spend:   {"amount": float, "currency": str, "period": str, "limit": float|None}
+    """
+    agent = AGENTS.get(provider, {})
+    return {
+        "provider": provider,
+        "name": agent.get("name", provider),
+        "vendor": agent.get("vendor", ""),
+        "status": status,
+        "account": account,
+        "plan": plan,
+        "source": source,
+        "windows": list(windows),
+        "credits": credits,
+        "spend": spend,
+        "message": message,
+        "extra": extra or {},
+        "fetched_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+
+def _unauth(provider, message, source=None):
+    return usage_result(provider, USAGE_UNAUTHENTICATED, message=message, source=source)
+
+
+# --- credential readers -------------------------------------------------------
+
+def _codex_credentials():
+    home = _usage_home()
+    codex_home = Path(os.environ.get("CODEX_HOME") or home / ".codex")
+    auth = _usage_read_json(codex_home / "auth.json")
+    if not auth:
+        return None
+    tokens = auth.get("tokens") if isinstance(auth.get("tokens"), dict) else {}
+    token = tokens.get("access_token") or tokens.get("accessToken") or auth.get("OPENAI_API_KEY")
+    account = tokens.get("account_id") or tokens.get("accountId") or auth.get("chatgpt_account_id")
+    if not token:
+        return None
+    return {"token": token, "account_id": account, "source": str(codex_home / "auth.json")}
+
+
+def _claude_credentials():
+    home = _usage_home()
+    cfg_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude")
+    candidates = [cfg_dir / ".credentials.json", cfg_dir / "credentials.json"]
+    for path in candidates:
+        creds = _usage_read_json(path)
+        oauth = creds.get("claudeAiOauth") if isinstance(creds, dict) else None
+        if isinstance(oauth, dict) and oauth.get("accessToken"):
+            return {"token": oauth["accessToken"], "tier": oauth.get("subscriptionType"),
+                    "expires_at": oauth.get("expiresAt"), "source": str(path)}
+    if _CURRENT_PLATFORM == "Darwin" and which("security"):
+        code, out, _ = run(["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                           timeout=5, shell=False)
+        if code == 0 and out.strip():
+            try:
+                oauth = json.loads(out).get("claudeAiOauth") or {}
+            except (json.JSONDecodeError, AttributeError):
+                oauth = {}
+            if oauth.get("accessToken"):
+                return {"token": oauth["accessToken"], "tier": oauth.get("subscriptionType"),
+                        "expires_at": oauth.get("expiresAt"), "source": "macOS Keychain"}
+    return None
+
+
+def _copilot_credentials():
+    token, src = _usage_env("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
+    if token:
+        return {"token": token, "source": src}
+    home = _usage_home()
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    for path in (xdg / "github-copilot" / "apps.json", xdg / "github-copilot" / "hosts.json"):
+        data = _usage_read_json(path)
+        if isinstance(data, dict):
+            for key, entry in data.items():
+                if "github.com" in key and isinstance(entry, dict) and entry.get("oauth_token"):
+                    return {"token": entry["oauth_token"], "source": str(path)}
+    hosts = xdg / "gh" / "hosts.yml"
+    try:
+        text = hosts.read_text()
+    except OSError:
+        text = ""
+    m = re.search(r"oauth_token:\s*(\S+)", text)
+    if m:
+        return {"token": m.group(1), "source": str(hosts)}
+    return None
+
+
+def _gemini_credentials():
+    home = _usage_home()
+    creds = _usage_read_json(home / ".gemini" / "oauth_creds.json")
+    if not isinstance(creds, dict) or not creds.get("access_token"):
+        return None
+    expiry = creds.get("expiry_date")
+    expired = False
+    if isinstance(expiry, (int, float)):
+        expired = (expiry / 1000.0 if expiry > 1e11 else expiry) < time.time()
+    return {"token": creds["access_token"], "expired": expired,
+            "source": str(home / ".gemini" / "oauth_creds.json")}
+
+
+def _grok_credentials():
+    home = _usage_home()
+    path = Path(os.environ.get("GROK_HOME") or home / ".grok") / "auth.json"
+    data = _usage_read_json(path)
+    if not isinstance(data, dict):
+        return None
+    entries = [(scope, e) for scope, e in data.items() if isinstance(e, dict) and e.get("key")]
+    if not entries:
+        return None
+    entries.sort(key=lambda se: 0 if se[1].get("auth_mode") == "oidc" or "oidc" in se[0] else 1)
+    scope, entry = entries[0]
+    return {"token": entry["key"], "email": entry.get("email"), "source": str(path)}
+
+
+def _kiro_db_path():
+    home = _usage_home()
+    if _CURRENT_PLATFORM == "Darwin":
+        return home / "Library" / "Application Support" / "kiro-cli" / "data.sqlite3"
+    xdg = Path(os.environ.get("XDG_DATA_HOME") or home / ".local" / "share")
+    return xdg / "kiro-cli" / "data.sqlite3"
+
+
+def _sqlite_value(db_path, sql):
+    """Run a single-value read-only SQLite query; None on any failure."""
+    if not Path(db_path).exists():
+        return None
+    try:
+        uri = f"file:{Path(db_path).as_posix()}?mode=ro&immutable=1"
+        con = sqlite3.connect(uri, uri=True, timeout=2)
+        try:
+            row = con.execute(sql).fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
+
+def _kiro_credentials():
+    db = _kiro_db_path()
+    token_json = _sqlite_value(db, "SELECT value FROM auth_kv WHERE key = 'kirocli:odic:token'")
+    profile_json = _sqlite_value(db, "SELECT value FROM state WHERE key = 'api.codewhisperer.profile'")
+    if not token_json or not profile_json:
+        return None
+    try:
+        token = json.loads(token_json).get("access_token")
+        arn = json.loads(profile_json).get("arn")
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    if not token or not arn:
+        return None
+    return {"token": token, "profile_arn": arn, "source": str(db)}
+
+
+def _cursor_db_path():
+    home = _usage_home()
+    if _CURRENT_PLATFORM == "Darwin":
+        return home / "Library" / "Application Support" / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    if _CURRENT_PLATFORM == "Windows":
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else home / "AppData" / "Roaming"
+        return base / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    return xdg / "Cursor" / "User" / "globalStorage" / "state.vscdb"
+
+
+def _jwt_subject(token):
+    parts = token.split(".")
+    if len(parts) < 2:
+        return None
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return claims.get("sub") if isinstance(claims, dict) else None
+
+
+def _cursor_credentials():
+    token, src = _usage_env("CURSOR_SESSION_TOKEN")
+    if token:
+        return {"cookie": token, "source": src}
+    db = _cursor_db_path()
+    access = _sqlite_value(db, "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'")
+    if not access:
+        return None
+    sub = _jwt_subject(access) or ""
+    user_id = sub.split("|", 1)[1] if "|" in sub else sub
+    if not user_id:
+        return None
+    return {"cookie": f"{user_id}%3A%3A{access}", "source": str(db)}
+
+
+def _amp_credentials():
+    token, src = _usage_env("AMP_API_KEY")
+    if token:
+        return {"token": token, "source": src}
+    home = _usage_home()
+    xdg = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    for path in (xdg / "amp" / "secrets.json", home / ".amp" / "secrets.json"):
+        data = _usage_read_json(path)
+        if isinstance(data, dict):
+            for key, value in data.items():
+                if key.startswith("apiKey") and isinstance(value, str) and value:
+                    return {"token": value, "source": str(path)}
+    return None
+
+
+def _droid_credentials():
+    token, src = _usage_env("FACTORY_API_KEY")
+    if token:
+        return {"token": token, "source": src}
+    env_file = _usage_home() / ".factory" / ".env"
+    try:
+        text = env_file.read_text()
+    except OSError:
+        return None
+    m = re.search(r"^\s*(?:export\s+)?FACTORY_API_KEY\s*=\s*[\"']?([^\"'\s]+)", text, re.M)
+    return {"token": m.group(1), "source": str(env_file)} if m else None
+
+
+def _kilo_credentials():
+    token, src = _usage_env("KILO_API_KEY", "KILOCODE_API_KEY")
+    if token:
+        return {"token": token, "source": src}
+    home = _usage_home()
+    xdg = Path(os.environ.get("XDG_DATA_HOME") or home / ".local" / "share")
+    path = xdg / "kilo" / "auth.json"
+    data = _usage_read_json(path)
+    entry = data.get("kilo") if isinstance(data, dict) else None
+    if isinstance(entry, dict) and entry.get("access"):
+        return {"token": entry["access"], "source": str(path)}
+    return None
+
+
+def _opencode_go_credentials():
+    home = _usage_home()
+    xdg = Path(os.environ.get("XDG_DATA_HOME") or home / ".local" / "share")
+    path = xdg / "opencode" / "auth.json"
+    data = _usage_read_json(path)
+    entry = data.get("opencode-go") if isinstance(data, dict) else None
+    if isinstance(entry, dict) and entry.get("key"):
+        return {"token": entry["key"], "source": str(path)}
+    return None
+
+
+def _kimi_credentials():
+    token, src = _usage_env("KIMI_API_KEY")
+    if token:
+        return {"token": token, "source": src}
+    path = _usage_home() / ".kimi-code" / "credentials" / "kimi-code.json"
+    data = _usage_read_json(path)
+    if isinstance(data, dict):
+        token = data.get("access_token") or data.get("api_key") or data.get("token")
+        if token:
+            return {"token": token, "source": str(path)}
+    return None
+
+
+# --- probes -------------------------------------------------------------------
+
+def _probe_codex(provider="codex"):
+    creds = _codex_credentials()
+    if not creds:
+        return _unauth(provider, "no Codex session — run 'codex login'")
+    headers = {"Authorization": f"Bearer {creds['token']}"}
+    if creds.get("account_id"):
+        headers["ChatGPT-Account-Id"] = creds["account_id"]
+    data = _usage_get_json("https://chatgpt.com/backend-api/wham/usage", headers)
+    windows = []
+    rl = data.get("rate_limit") or {}
+    for key, label in (("primary_window", "5h session"), ("secondary_window", "weekly")):
+        w = rl.get(key) or {}
+        if w:
+            windows.append(usage_window(
+                label, used_pct=w.get("used_percent"), resets_at=w.get("reset_at")))
+    for extra in data.get("additional_rate_limits") or []:
+        w = (extra.get("rate_limit") or {}).get("primary_window") or {}
+        if w:
+            windows.append(usage_window(
+                extra.get("limit_name") or extra.get("metered_feature") or "additional",
+                used_pct=w.get("used_percent"), resets_at=w.get("reset_at")))
+    credits = None
+    c = data.get("credits") or {}
+    if c.get("has_credits") is not None or c.get("balance") is not None:
+        credits = {"remaining": c.get("balance"), "total": None, "used": None, "unit": "credits",
+                   "unlimited": bool(c.get("unlimited"))}
+    return usage_result(
+        provider, USAGE_OK, account=data.get("account_id") or creds.get("account_id"),
+        plan=data.get("plan_type"), source=creds["source"], windows=windows, credits=credits)
+
+
+def _probe_claude(provider="claude"):
+    creds = _claude_credentials()
+    if not creds:
+        return _unauth(provider, "no Claude Code OAuth session — run 'claude' and sign in")
+    data = _usage_get_json(
+        "https://api.anthropic.com/api/oauth/usage",
+        {"Authorization": f"Bearer {creds['token']}", "anthropic-beta": "oauth-2025-04-20"})
+    labels = (("five_hour", "5h session"), ("seven_day", "weekly"), ("seven_day_opus", "weekly Opus"),
+              ("seven_day_sonnet", "weekly Sonnet"), ("seven_day_oauth_apps", "weekly OAuth apps"))
+    windows = []
+    for key, label in labels:
+        w = data.get(key)
+        if isinstance(w, dict) and w.get("utilization") is not None:
+            windows.append(usage_window(label, used_pct=w["utilization"], resets_at=w.get("resets_at")))
+    spend = None
+    extra_usage = data.get("extra_usage") or {}
+    if isinstance(extra_usage, dict) and extra_usage.get("is_enabled"):
+        spend = {"amount": extra_usage.get("used_credits"), "currency": "USD", "period": "monthly",
+                 "limit": extra_usage.get("monthly_limit")}
+    return usage_result(provider, USAGE_OK, plan=creds.get("tier"), source=creds["source"],
+                        windows=windows, spend=spend)
+
+
+def _probe_copilot(provider="copilot"):
+    creds = _copilot_credentials()
+    if not creds:
+        return _unauth(provider, "no GitHub token — run 'copilot login' or set GH_TOKEN")
+    headers = {"Authorization": f"token {creds['token']}"}
+    data = _usage_get_json("https://api.github.com/copilot_internal/user", headers)
+    windows = []
+    snapshots = data.get("quota_snapshots") or {}
+    for key, snap in snapshots.items():
+        if not isinstance(snap, dict):
+            continue
+        if snap.get("unlimited"):
+            windows.append(usage_window(key, used_pct=0, resets_at=data.get("quota_reset_date")))
+            continue
+        entitlement = snap.get("entitlement")
+        remaining = snap.get("remaining")
+        used = None
+        if entitlement is not None and remaining is not None:
+            used = entitlement - remaining
+        windows.append(usage_window(
+            key, used=used, limit=entitlement, unit="requests",
+            used_pct=(100 - snap["percent_remaining"]) if snap.get("percent_remaining") is not None else None,
+            resets_at=data.get("quota_reset_date")))
+    account = None
+    login_status, login, _ = _usage_http("https://api.github.com/user", headers=headers)
+    if login_status == 200 and isinstance(login, dict):
+        account = login.get("login")
+    return usage_result(provider, USAGE_OK, account=account,
+                        plan=data.get("copilot_plan") or data.get("access_type_sku"),
+                        source=creds["source"], windows=windows,
+                        extra={"billing_mode": data.get("chat_enabled") and "chat" or None})
+
+
+def _probe_gemini(provider="gemini"):
+    creds = _gemini_credentials()
+    if not creds:
+        return _unauth(provider, "no Gemini CLI OAuth session — run 'gemini' and sign in with Google")
+    if creds.get("expired"):
+        return _unauth(provider, "Gemini CLI OAuth token expired — run 'gemini' once to refresh it",
+                       source=creds["source"])
+    headers = {"Authorization": f"Bearer {creds['token']}"}
+    meta = _usage_get_json(
+        "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist", headers, method="POST",
+        body={"metadata": {"ideType": "GEMINI_CLI", "pluginType": "GEMINI"}})
+    project = meta.get("cloudaicompanionProject")
+    if isinstance(project, dict):
+        project = project.get("id")
+    tier = (meta.get("currentTier") or {}).get("id") or (meta.get("paidTier") or {}).get("name")
+    quota = _usage_get_json(
+        "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota", headers, method="POST",
+        body={"project": project} if project else {})
+    windows = []
+    for bucket in quota.get("buckets") or quota.get("quotaBuckets") or []:
+        if not isinstance(bucket, dict):
+            continue
+        remaining = bucket.get("remainingFraction")
+        used_pct = None if remaining is None else (1 - float(remaining)) * 100
+        windows.append(usage_window(bucket.get("modelId") or bucket.get("model") or "quota",
+                                    used_pct=used_pct, resets_at=bucket.get("resetTime")))
+    return usage_result(provider, USAGE_OK, account=project, plan=tier, source=creds["source"],
+                        windows=windows)
+
+
+def _probe_grok(provider="grok"):
+    creds = _grok_credentials()
+    if not creds:
+        return _unauth(provider, "no Grok session — run 'grok login'")
+    data = _usage_get_json(
+        "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+        {"Authorization": f"Bearer {creds['token']}", "x-xai-token-auth": "xai-grok-cli"})
+    cfg = data.get("config") or {}
+    period_end = (cfg.get("currentPeriod") or {}).get("end") or cfg.get("billingPeriodEnd")
+    windows = []
+    if cfg.get("creditUsagePercent") is not None:
+        windows.append(usage_window("plan credits", used_pct=cfg["creditUsagePercent"], resets_at=period_end))
+    spend = None
+    cap = (cfg.get("onDemandCap") or {}).get("val")
+    used = (cfg.get("onDemandUsed") or {}).get("val")
+    if cap is not None or used is not None:
+        spend = {"amount": used, "currency": "USD", "period": "billing period", "limit": cap}
+    return usage_result(provider, USAGE_OK, account=creds.get("email"),
+                        plan=cfg.get("subscriptionTier") or data.get("subscriptionTier"),
+                        source=creds["source"], windows=windows, spend=spend)
+
+
+_KIRO_REGION_ENDPOINTS = {
+    "us-east-1": "https://codewhisperer.us-east-1.amazonaws.com/",
+    "eu-central-1": "https://q.eu-central-1.amazonaws.com/",
+}
+
+
+def _probe_kiro(provider="kiro"):
+    creds = _kiro_credentials()
+    if not creds:
+        return _unauth(provider, "no Kiro CLI session — run 'kiro-cli login'")
+    arn_parts = creds["profile_arn"].split(":")
+    region = arn_parts[3] if len(arn_parts) > 3 else "us-east-1"
+    endpoint = _KIRO_REGION_ENDPOINTS.get(region, f"https://codewhisperer.{region}.amazonaws.com/")
+    data = _usage_get_json(
+        endpoint,
+        {"Authorization": f"Bearer {creds['token']}",
+         "X-Amz-Target": "AmazonCodeWhispererService.GetUsageLimits",
+         "Content-Type": "application/x-amz-json-1.0"},
+        method="POST", body={"profileArn": creds["profile_arn"]})
+    windows, credits = [], None
+    for item in data.get("usageBreakdownList") or []:
+        if not isinstance(item, dict) or item.get("resourceType") != "CREDIT":
+            continue
+        limit = item.get("usageLimitWithPrecision", item.get("usageLimit"))
+        used = item.get("currentUsageWithPrecision", item.get("currentUsage"))
+        reset = item.get("nextDateReset") or data.get("nextDateReset")
+        windows.append(usage_window("monthly credits", used=used, limit=limit, unit="credits", resets_at=reset))
+        credits = {"remaining": None if used is None or limit is None else max(0.0, float(limit) - float(used)),
+                   "total": limit, "used": used, "unit": "credits"}
+    plan = (data.get("subscriptionInfo") or {}).get("subscriptionTitle") or data.get("subscriptionTitle")
+    return usage_result(provider, USAGE_OK, plan=plan, source=creds["source"], windows=windows, credits=credits)
+
+
+def _probe_cursor(provider="cursor"):
+    creds = _cursor_credentials()
+    if not creds:
+        return _unauth(provider, "no Cursor desktop session found (sign in to the Cursor app)")
+    headers = {"Cookie": f"WorkosCursorSessionToken={creds['cookie']}", "Origin": "https://cursor.com",
+               "Referer": "https://cursor.com/dashboard"}
+    data = _usage_get_json("https://cursor.com/api/usage-summary", headers)
+    windows = []
+    plan_usage = data.get("individualUsage") or data.get("planUsage") or {}
+    plan_used = plan_usage.get("plan", plan_usage) if isinstance(plan_usage, dict) else {}
+    if isinstance(plan_used, dict) and (plan_used.get("used") is not None or plan_used.get("limit") is not None):
+        windows.append(usage_window("plan (billing cycle)", used=plan_used.get("used"),
+                                    limit=plan_used.get("limit"), unit="USD",
+                                    resets_at=data.get("billingCycleEnd")))
+    spend = None
+    on_demand = data.get("onDemand") or plan_usage.get("onDemand") if isinstance(plan_usage, dict) else None
+    if isinstance(on_demand, dict):
+        spend = {"amount": on_demand.get("used"), "currency": "USD", "period": "billing cycle",
+                 "limit": on_demand.get("limit")}
+    plan = data.get("membershipType")
+    if data.get("isUnlimited"):
+        plan = f"{plan} (unlimited)" if plan else "unlimited"
+    return usage_result(provider, USAGE_OK, plan=plan, source=creds["source"], windows=windows, spend=spend)
+
+
+def _probe_amp(provider="amp"):
+    creds = _amp_credentials()
+    if not creds:
+        return _unauth(provider, "no Amp key — run 'amp login' or set AMP_API_KEY")
+    data = _usage_get_json(
+        "https://ampcode.com/api/internal?userDisplayBalanceInfo",
+        {"Authorization": f"Bearer {creds['token']}"}, method="POST",
+        body={"method": "userDisplayBalanceInfo"})
+    info = data.get("result") if isinstance(data.get("result"), dict) else data
+    windows = []
+    if info.get("freeQuota") is not None:
+        windows.append(usage_window("free tier", used=info.get("freeUsed"), limit=info.get("freeQuota"),
+                                    unit="USD", resets_at=info.get("freeResetsAt")))
+    credits = None
+    if info.get("individualCredits") is not None or info.get("balance") is not None:
+        credits = {"remaining": info.get("individualCredits", info.get("balance")), "total": None,
+                   "used": None, "unit": "USD"}
+    return usage_result(provider, USAGE_OK, account=info.get("email") or info.get("organization"),
+                        plan=info.get("plan"), source=creds["source"], windows=windows, credits=credits)
+
+
+def _probe_droid(provider="droid"):
+    creds = _droid_credentials()
+    if not creds:
+        return _unauth(provider, "no Factory key — set FACTORY_API_KEY (or ~/.factory/.env)")
+    headers = {"Authorization": f"Bearer {creds['token']}"}
+    data = _usage_get_json("https://app.factory.ai/api/organization/subscription/usage?useCache=true", headers)
+    windows = []
+    for key, label in (("standard", "standard tokens"), ("premium", "premium tokens")):
+        bucket = data.get(key) or {}
+        if isinstance(bucket, dict) and (bucket.get("usage") is not None or bucket.get("allowance") is not None):
+            windows.append(usage_window(label, used=bucket.get("usage"), limit=bucket.get("allowance"),
+                                        unit="tokens", resets_at=data.get("endDate") or data.get("billingEnd")))
+    spend = None
+    overage = data.get("overage") or {}
+    if isinstance(overage, dict) and overage.get("used") is not None:
+        spend = {"amount": overage.get("used"), "currency": "USD", "period": "billing cycle",
+                 "limit": overage.get("limit")}
+    return usage_result(provider, USAGE_OK, plan=data.get("plan") or data.get("tier"),
+                        source=creds["source"], windows=windows, spend=spend)
+
+
+def _trpc_get(base, procedure, headers, payload=None):
+    query = json.dumps({"json": payload}) if payload is not None else '{"json":null}'
+    return _usage_get_json(f"{base}/{procedure}?input={quote(query)}", headers)
+
+
+def _probe_kilo(provider="kilo"):
+    creds = _kilo_credentials()
+    if not creds:
+        return _unauth(provider, "no Kilo session — run 'kilo auth login' or set KILO_API_KEY")
+    headers = {"Authorization": f"Bearer {creds['token']}"}
+    base = "https://app.kilo.ai/api/trpc"
+    blocks = _trpc_get(base, "user.getCreditBlocks", headers)
+    payload = ((blocks.get("result") or {}).get("data") or {}).get("json", blocks)
+    total = None
+    if isinstance(payload, dict):
+        total = payload.get("totalBalance_mUsd")
+        if total is None and isinstance(payload.get("blocks"), list):
+            total = sum(float(b.get("balance_mUsd") or 0) for b in payload["blocks"] if isinstance(b, dict))
+    elif isinstance(payload, list):
+        total = sum(float(b.get("balance_mUsd") or 0) for b in payload if isinstance(b, dict))
+    credits = None
+    if total is not None:
+        credits = {"remaining": round(float(total) / 1000.0, 4), "total": None, "used": None, "unit": "USD"}
+    return usage_result(provider, USAGE_OK, source=creds["source"], credits=credits)
+
+
+def _probe_opencode(provider="opencode"):
+    creds = _opencode_go_credentials()
+    if not creds:
+        return _unauth(provider, "no OpenCode Go subscription key — run 'opencode auth login' → OpenCode Go")
+    data = _usage_get_json("https://opencode.ai/zen/go/v1/usage", {"Authorization": f"Bearer {creds['token']}"})
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else data
+    windows = []
+    for key, label in (("rolling", "rolling window"), ("weekly", "weekly"), ("monthly", "monthly")):
+        w = usage.get(key)
+        if not isinstance(w, dict):
+            continue
+        pct = w.get("usagePercent", w.get("percent"))
+        windows.append(usage_window(label, used_pct=pct, used=w.get("used"), limit=w.get("limit"),
+                                    resets_at=w.get("resetsAt") or w.get("renewsAt") or w.get("reset")))
+    return usage_result(provider, USAGE_OK, plan="OpenCode Go", source=creds["source"], windows=windows)
+
+
+def _probe_openrouter(provider="openrouter"):
+    key, src = _usage_env("OPENROUTER_API_KEY")
+    if not key:
+        return _unauth(provider, "set OPENROUTER_API_KEY")
+    headers = {"Authorization": f"Bearer {key}"}
+    info = (_usage_get_json("https://openrouter.ai/api/v1/key", headers)).get("data") or {}
+    credits = None
+    mgmt, _ = _usage_env("OPENROUTER_MANAGEMENT_API_KEY")
+    cred_data = _usage_get_json(
+        "https://openrouter.ai/api/v1/credits", {"Authorization": f"Bearer {mgmt or key}"}).get("data") or {}
+    if cred_data:
+        total = cred_data.get("total_credits")
+        used = cred_data.get("total_usage")
+        remaining = None if total is None or used is None else float(total) - float(used)
+        credits = {"remaining": remaining, "total": total, "used": used, "unit": "USD"}
+    spend = {"amount": info.get("usage"), "currency": "USD", "period": "key lifetime", "limit": info.get("limit")}
+    windows = []
+    if info.get("limit") is not None:
+        windows.append(usage_window("key limit", used=info.get("usage"), limit=info.get("limit"), unit="USD"))
+    return usage_result(provider, USAGE_OK, account=info.get("label"),
+                        plan="free tier" if info.get("is_free_tier") else "paid",
+                        source=src, windows=windows, credits=credits, spend=spend)
+
+
+def _probe_synthetic(provider="synthetic"):
+    key, src = _usage_env("SYNTHETIC_API_KEY")
+    if not key:
+        return _unauth(provider, "set SYNTHETIC_API_KEY")
+    data = _usage_get_json("https://api.synthetic.new/v2/quotas", {"Authorization": f"Bearer {key}"})
+    windows = []
+    for name, quota in data.items():
+        if not isinstance(quota, dict):
+            continue
+        windows.append(usage_window(name, used=quota.get("requests") or quota.get("used"),
+                                    limit=quota.get("limit"), resets_at=quota.get("renewsAt") or quota.get("resetsAt")))
+    return usage_result(provider, USAGE_OK, source=src, windows=windows)
+
+
+def _probe_zai(provider="zai"):
+    key, src = _usage_env("Z_AI_API_KEY", "ZAI_API_KEY")
+    if not key:
+        return _unauth(provider, "set Z_AI_API_KEY")
+    base = os.environ.get("Z_AI_BASE_URL", "https://api.z.ai").rstrip("/")
+    data = _usage_get_json(f"{base}/api/monitor/usage/quota/limit", {"Authorization": f"Bearer {key}"})
+    payload = data.get("data") if isinstance(data.get("data"), dict) else data
+    windows = []
+    for limit in payload.get("limits") or payload.get("quotas") or []:
+        if not isinstance(limit, dict):
+            continue
+        windows.append(usage_window(limit.get("type") or limit.get("name") or "quota",
+                                    used=limit.get("used") or limit.get("usage"),
+                                    limit=limit.get("total") or limit.get("limit"),
+                                    used_pct=limit.get("percentage"), resets_at=limit.get("nextResetTime")))
+    return usage_result(provider, USAGE_OK, plan=payload.get("planName") or payload.get("plan"),
+                        source=src, windows=windows)
+
+
+def _probe_kimi(provider="kimi"):
+    creds = _kimi_credentials()
+    if not creds:
+        return _unauth(provider, "no Kimi Code session — run 'kimi' and sign in, or set KIMI_API_KEY")
+    data = _usage_get_json("https://api.kimi.com/coding/v1/usages", {"Authorization": f"Bearer {creds['token']}"})
+    windows = []
+    usages = data.get("usages") or data.get("data") or ([data] if data.get("limit") is not None else [])
+    for entry in usages:
+        if not isinstance(entry, dict):
+            continue
+        windows.append(usage_window(entry.get("name") or entry.get("window") or "quota",
+                                    used=entry.get("used"), limit=entry.get("limit"),
+                                    resets_at=entry.get("reset_time") or entry.get("resetTime")))
+    return usage_result(provider, USAGE_OK, plan=data.get("membership") or data.get("plan"),
+                        source=creds["source"], windows=windows)
+
+
+def _probe_devin(provider="devin"):
+    token, src = _usage_env("DEVIN_BEARER_TOKEN", "DEVIN_AUTHORIZATION")
+    org, _ = _usage_env("DEVIN_ORG_ID")
+    if not token or not org:
+        return _unauth(provider, "set DEVIN_BEARER_TOKEN and DEVIN_ORG_ID (internal org id from app.devin.ai)")
+    auth = token if token.lower().startswith("bearer ") else f"Bearer {token}"
+    data = _usage_get_json(f"https://app.devin.ai/api/{org}/billing/quota/usage", {"Authorization": auth})
+    windows = []
+    used = data.get("used") or data.get("acus_used") or data.get("usage")
+    limit = data.get("limit") or data.get("acus_limit") or data.get("quota")
+    if used is not None or limit is not None:
+        windows.append(usage_window("ACUs (billing cycle)", used=used, limit=limit, unit="ACU",
+                                    resets_at=data.get("reset_at") or data.get("period_end")))
+    return usage_result(provider, USAGE_OK, account=org, plan=data.get("plan"), source=src, windows=windows)
+
+
+USAGE_PROBES = {
+    "codex": _probe_codex, "claude": _probe_claude, "copilot": _probe_copilot,
+    "gemini": _probe_gemini, "grok": _probe_grok, "kiro": _probe_kiro,
+    "cursor": _probe_cursor, "amp": _probe_amp, "droid": _probe_droid,
+    "kilo": _probe_kilo, "opencode": _probe_opencode, "openrouter": _probe_openrouter,
+    "synthetic": _probe_synthetic, "zai": _probe_zai, "kimi": _probe_kimi,
+    "devin": _probe_devin,
+}
+
+
+def probe_usage(provider):
+    """Run one provider's usage probe; never raises."""
+    fn = USAGE_PROBES.get(provider)
+    if fn is None:
+        return usage_result(provider, USAGE_UNSUPPORTED,
+                            message="no usage/billing API known for this provider")
+    try:
+        return fn()
+    except UsageProbeError as e:
+        return usage_result(provider, USAGE_ERROR, message=str(e))
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
+        return usage_result(provider, USAGE_ERROR, message=f"unexpected response shape ({type(e).__name__})")
+
+
+def collect_usage(providers=None, *, max_workers=8):
+    """Probe several providers concurrently; results in registry order."""
+    keys = list(providers) if providers else list(USAGE_PROBES)
+    results = sk.parallel_map(probe_usage, keys, "Fetching usage", max_workers=max_workers)
+    order = {k: i for i, k in enumerate(keys)}
+    return sorted(results, key=lambda r: order.get(r["provider"], len(order)))
+
+
+def _fmt_reset(iso):
+    if not iso:
+        return ""
+    try:
+        when = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return str(iso)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    delta = when - datetime.now(timezone.utc)
+    secs = int(delta.total_seconds())
+    if secs <= 0:
+        return "now"
+    return f"in {sk.human_duration(secs)}"
+
+
+def _fmt_money(value, unit="USD"):
+    if value is None:
+        return "—"
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"${num:,.2f}" if unit == "USD" else f"{num:,.0f} {unit}"
+
+
+def _fmt_window(w):
+    parts = [w["label"] + ":"]
+    has_counts = w.get("used") is not None or w.get("limit") is not None
+    if has_counts:
+        unit = w.get("unit") or ""
+        used = "—" if w.get("used") is None else f"{float(w['used']):,.10g}"
+        limit = "∞" if w.get("limit") is None else f"{float(w['limit']):,.10g}"
+        parts.append(f"{used}/{limit} {unit}".rstrip())
+        if w.get("used_pct") is not None:
+            parts.append(f"({w['used_pct']:.0f}%)")
+    elif w.get("used_pct") is not None:
+        parts.append(f"{w['used_pct']:.0f}% used")
+    reset = _fmt_reset(w.get("resets_at"))
+    if reset:
+        parts.append(f"(resets {reset})")
+    return " ".join(parts)
+
+
+def _usage_status_cell(result):
+    status = result["status"]
+    if status == USAGE_OK:
+        return "[green]✓ ok[/green]"
+    if status == USAGE_UNAUTHENTICATED:
+        return "[yellow]○ not signed in[/yellow]"
+    if status == USAGE_UNSUPPORTED:
+        return "[dim]– n/a[/dim]"
+    return "[red]✗ error[/red]"
+
+
+def print_usage_table(results, *, show_all=False):
+    rows = []
+    for r in results:
+        if not show_all and r["status"] in (USAGE_UNAUTHENTICATED, USAGE_UNSUPPORTED):
+            continue
+        windows = "\n".join(_fmt_window(w) for w in r["windows"]) or ""
+        money = []
+        credits = r.get("credits")
+        if credits and credits.get("remaining") is not None:
+            money.append(f"{_fmt_money(credits['remaining'], credits.get('unit', 'USD'))} left")
+        elif credits and credits.get("unlimited"):
+            money.append("unlimited")
+        spend = r.get("spend")
+        if spend and spend.get("amount") is not None:
+            cap = f" / {_fmt_money(spend['limit'])}" if spend.get("limit") is not None else ""
+            money.append(f"{_fmt_money(spend['amount'], spend.get('currency', 'USD'))}{cap} {spend.get('period', '')}".strip())
+        detail = windows or r.get("message") or ""
+        rows.append([
+            f"{AGENTS.get(r['provider'], {}).get('icon', '')} {r['name']}".strip(),
+            r.get("account") or "",
+            r.get("plan") or "",
+            detail,
+            "\n".join(money),
+            _usage_status_cell(r),
+        ])
+    if not rows:
+        print_warning("No provider usage available. Sign in with a provider CLI or set an API key, "
+                      "then run 'aikit usage --all' to see every probe.")
+        return
+    sk.table(["Provider", "Account", "Plan", "Limits & usage", "Credits / spend", "Status"], rows,
+             title="AI subscriptions & usage")
+    skipped = [r for r in results if r["status"] in (USAGE_UNAUTHENTICATED, USAGE_UNSUPPORTED)]
+    if skipped and not show_all:
+        names = ", ".join(r["provider"] for r in skipped)
+        console.print(f"[dim]Not signed in / no usage API: {names}  (aikit usage --all to list)[/dim]")
+
+
+def do_usage(providers=None, *, as_json=False, show_all=False):
+    keys = list(providers or [])
+    unknown = [k for k in keys if k not in USAGE_PROBES and k not in AGENTS]
+    if unknown:
+        raise AikitError(f"unknown provider(s): {', '.join(unknown)} — "
+                         f"choose from: {', '.join(USAGE_PROBES)}")
+    if keys:
+        unsupported = [k for k in keys if k not in USAGE_PROBES]
+        results = collect_usage([k for k in keys if k in USAGE_PROBES]) if any(k in USAGE_PROBES for k in keys) else []
+        results += [probe_usage(k) for k in unsupported]
+        order = {k: i for i, k in enumerate(keys)}
+        results.sort(key=lambda r: order[r["provider"]])
+    else:
+        results = collect_usage()
+    if as_json:
+        print(json.dumps(results, indent=2))
+        return
+    print_usage_table(results, show_all=show_all or bool(keys))
+
+
+
 def build_parser():
     parser = sk.make_parser(
         "aikit", __version__, TAGLINE, icon=ICON,
@@ -5801,6 +6835,8 @@ def build_parser():
               aikit auth claude        Configure Claude auth
               aikit serve              Start web dashboard
               aikit doctor             Diagnose environment
+              aikit usage              Plan, credits & rate limits for every signed-in provider
+              aikit usage claude codex --json   Machine-readable snapshot for two providers
         """),
     )
 
@@ -5810,6 +6846,12 @@ def build_parser():
     install_p = sub.add_parser("install", help="Install AI coding agents")
     install_p.add_argument("agents", nargs="*", help="Agent keys to install (none = interactive picker)")
     install_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmations")
+
+    # usage
+    usage_p = sub.add_parser("usage", help="Show subscription plan, credits, spend and rate limits per provider")
+    usage_p.add_argument("providers", nargs="*", help=f"Provider keys (default: all with a usage API: {', '.join(USAGE_PROBES)})")
+    usage_p.add_argument("--json", action="store_true", help="Emit the normalised snapshot as JSON")
+    usage_p.add_argument("--all", action="store_true", help="Include providers that are not signed in / unsupported")
 
     # update
     update_p = sub.add_parser("update", help="Update installed agents")
@@ -5955,6 +6997,10 @@ def cmd_doctor(args):
     return do_doctor()
 
 
+def cmd_usage(args):
+    do_usage(args.providers or None, as_json=args.json, show_all=args.all)
+
+
 def cmd_setup(args):
     do_setup()
 
@@ -5995,7 +7041,7 @@ HANDLERS = {
     "install": cmd_install, "update": cmd_update, "uninstall": cmd_uninstall,
     "list": cmd_list, "auth": cmd_auth, "serve": cmd_serve,
     "doctor": cmd_doctor, "setup": cmd_setup, "config": cmd_config,
-    "gateway": cmd_gateway,
+    "gateway": cmd_gateway, "usage": cmd_usage,
 }
 
 # Bare `aikit` shows the agent table — the at-a-glance default.
