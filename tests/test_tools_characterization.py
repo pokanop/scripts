@@ -345,6 +345,24 @@ def test_aikit_bin_path_belongs_to_grok(tool_loader):
     assert not m.bin_path_belongs_to_agent("grok", cursor_bin)
 
 
+def test_aikit_agent_bin_collision_warnings(tool_loader, monkeypatch):
+    m = tool_loader("aikit")
+
+    def fake_which(name):
+        paths = {
+            "cursor-agent": "/Users/x/.local/bin/cursor-agent",
+            "grok": "/Users/x/.grok/bin/grok",
+            "agent": "/Users/x/.grok/bin/agent",
+        }
+        return paths.get(name)
+
+    monkeypatch.setattr(m.shutil, "which", fake_which)
+    warnings = m.agent_bin_collision_warnings()
+    assert len(warnings) == 1
+    assert "Grok Build" in warnings[0]
+    assert "cursor-agent" in warnings[0]
+
+
 def test_aikit_extract_version(tool_loader):
     m = tool_loader("aikit")
     assert m.extract_version("grok 0.2.67 (03e13f) [stable]") == "0.2.67"
