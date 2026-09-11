@@ -90,6 +90,36 @@ aikit setup
 | `aikit gateway on/off/status/coverage/models` | Route AI tools through a LiteLLM gateway — see **[gateway docs](aikit-gateway.md)** |
 | `aikit usage [providers...] [--json] [--all]` | Unified plan / credits / spend / rate-limit snapshot across providers — see below |
 
+### Updating existing installations
+
+`aikit update` inspects the executable you actually run. It prefers the agent's
+native updater when registered, then falls back to the detected package manager.
+It preserves npm/Bun install locations, pip interpreter ownership, and relocated
+pipx/uv roots. Homebrew, mise, Cargo, and pacman/AUR ownership comes from paths or
+installation metadata, not the OS name. Codex uses its manager or official installer;
+`codex update` is not a Codex subcommand.
+
+Maintenance commands clear inherited Python/Node injection, shell startup hooks,
+Git repository overrides, and package destination overrides while retaining HOME,
+PATH, manager roots, proxy settings, and certificates. Native and manager commands
+use argument lists so executable paths are not interpreted as shell syntax.
+
+Every update re-resolves the executable and checks its version. A failed updater,
+missing version, or unverified no-op exits **1** and reports the command, manager,
+active path, and other copies on PATH. An explicit “already up to date” check is
+successful; an ambiguous or failed check is unknown and does not skip the update.
+`--force` bypasses the initial current-version check, but still verifies the result.
+
+For AUR packages, aikit uses an available `paru` or `yay`; without either, it
+reports the owning package and asks you to use your AUR build workflow. It does
+not refresh system databases or perform a whole-system upgrade. If package
+repositories lag upstream, run your normal system update workflow and retry.
+Unknown npm/pip ownership and custom Cargo sources produce an actionable failure
+instead of guessing another installation destination.
+
+See [the mixed-installation regression dry run](aikit-update-reproduction.md) for
+the Omarchy reproduction and verification limits.
+
 ### Usage snapshot (`aikit usage`)
 
 `aikit usage` reads the credentials the CLIs already store on disk (OAuth tokens,

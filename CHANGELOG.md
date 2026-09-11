@@ -79,6 +79,19 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 2.0.0 — 2026-09-10
+- ⚠ `aikit update` now exits 1 if an update fails verification, including an
+  unchanged outdated executable; the dashboard also returns `success: false`.
+  This exit-code/API correction requires a major bump under the repo's versioning rules.
+- Detect the active executable's npm/Bun prefix, pip interpreter, pipx/uv root,
+  Cargo receipt, mise tool, Homebrew target, or pacman/AUR owner. Prefer native
+  updaters and retry through the detected manager on failure or a no-op.
+- Replace the invalid `codex update` invocation with the owning manager or the
+  official installer; pin Codex/OMP standalone reinstalls to the active bin directory.
+- Sanitize maintenance environments, require explicit native check verdicts,
+  and re-resolve/version-check after updates. Failures include command, owner,
+  active path, other PATH copies, and updater output (POK-387).
+
 ### 1.19.0 — 2026-09-09
 - **New `aikit usage [providers...] [--json] [--all]`** — a unified snapshot of
   plan, account, credits, spend and rate-limit windows across 23 providers
