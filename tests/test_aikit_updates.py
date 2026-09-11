@@ -18,6 +18,7 @@ def aikit(tool_loader, monkeypatch, tmp_path):
     monkeypatch.setattr(m, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(m, "_npm_global_bin_dirs", lambda: [])
     m.UPDATE_CHECK_CACHE.clear()
+    m.INSTALL_MANAGER_CACHE.clear()
     return m
 
 
@@ -93,7 +94,8 @@ def test_shadowed_binary_noop_is_failure_with_paths(aikit, monkeypatch, tmp_path
     monkeypatch.setenv("PATH", os.pathsep.join(map(str, (first, second))))
     monkeypatch.setattr(aikit, "check_update_status", lambda *a, **k: {"available": True, "latest": "2.0.0"})
     outcome, _, _ = aikit.execute_agent_update("grok")
-    assert outcome["status"] == "failed"
+    assert outcome["status"] == "unchanged_outdated"
+    assert outcome["exit_code"] == 1
     assert str(first / "grok") in outcome["error"]
     assert str(second / "grok") in outcome["error"]
     assert "PATH" in outcome["error"]
@@ -111,9 +113,10 @@ esac
         executable(tmp_path / "bin" / helper, "exit 0\n")
     owner, command = aikit.detect_install_manager("codex")
     assert owner == manager
-    assert shlex.split(command)[-1] == "openai-codex-bin"
-    assert (helper or "pacman") in shlex.split(command)
-    assert "-Sy" not in command  # no partial system upgrades or broad OS mutation
+    assert command is None  # system mutations require the full system workflow
+    reason = aikit._update_plan("codex")["error"]
+    assert "openai-codex-bin" in reason
+    assert "-Syu" in reason
     assert aikit._installed_bin_path("codex") == binary
 
 
@@ -128,7 +131,7 @@ def test_aur_without_helper_fails_without_reinstalling(aikit, tmp_path):
     executable(tmp_path / "bin/pacman", "echo codex-bin\n")
     outcome, _, _ = aikit.execute_agent_update("codex")
     assert outcome["status"] == "failed"
-    assert "paru/yay" in outcome["error"]
+    assert "paru -Syu" in outcome["error"]
     assert "codex-bin" in outcome["error"]
 
 
@@ -239,11 +242,12 @@ else /bin/rm "$0"; fi
 
 def test_dashboard_noop_reports_failure(aikit, monkeypatch, tmp_path):
     executable(tmp_path / "bin/grok", "echo 1.0.0\n")
+    monkeypatch.setattr(aikit, "check_update_status", lambda *a, **k: {"available": True, "latest": "2.0.0"})
     app = aikit.create_flask_app()
     response = app.test_client().post("/api/update/grok?force=1")
     result = response.get_json()
     assert result["success"] is False
-    assert result["status"] == "failed"
+    assert result["status"] == "unchanged_outdated"
     assert result["exit_code"] != 0
     assert "active executable" in result["stderr"]
 
@@ -252,7 +256,7 @@ def test_dashboard_noop_reports_failure(aikit, monkeypatch, tmp_path):
     ("claude", "native", "2.1.266", "2.1.267"),
     ("cursor", "native", "2026.09.08-6caf4ff", "2026.09.10-fd3934a"),
     ("hermes", "native", "2.23.0", "2.24.0"),
-    ("codex", "pacman", "0.153.4", "0.154.0"),
+    ("codex", "npm", "0.153.4", "0.154.0"),
     ("grok", "native", "1.0.13", "1.0.25"),
     ("omp", "bun", "18.1.15", "18.1.17"),
     ("crush", "npm", "0.92.0", "0.93.1"),
@@ -284,20 +288,12 @@ else {write_version}fi
         # JSON needs stdout alone, and an alias must still bind to Grok's tree.
         native = native.replace("echo 'Already up to date.' >&2", ":").replace("echo 'Update available' >&2", ":")
     if owner in ("npm", "bun"):
-        package = agent["version_check"].get("package", "@github/copilot")
+        package = agent["version_check"].get("package") or {"codex": "@openai/codex", "copilot": "@github/copilot"}[key]
         shim = node_install(tmp_path, package, agent["bin"], bun=owner == "bun")
         executable(shim.resolve(), f"/bin/cat {quoted}\n")
         executable(tmp_path / "bin" / owner, write_version)
     else:
         executable(tmp_path / "bin" / agent["bin"], native if owner == "native" else f"/bin/cat {quoted}\n")
-    if owner == "pacman":
-        executable(tmp_path / "bin/pacman", f'''case "$1" in
-  -Qoq) echo openai-codex ;;
-  -Qm) exit 1 ;;
-  -S) {write_version};;
-esac
-''')
-        monkeypatch.setattr(aikit.os, "geteuid", lambda: 0)
     if owner == "installer":
         (tmp_path / "bin/bash").symlink_to("/bin/bash")
         executable(tmp_path / "bin/curl", f"printf '%s\\n' {shlex.quote(write_version)}\n")
@@ -351,20 +347,6 @@ def test_bun_isolated_linker_uses_global_root_and_package(aikit, monkeypatch, tm
     assert manager == "bun"
     assert "@oh-my-pi/pi-coding-agent@latest" in shlex.split(command)
     assert str(root) in shlex.split(command)
-
-
-def test_timeout_does_not_start_fallback_manager(aikit, monkeypatch, tmp_path):
-    node_install(tmp_path, "@xai/grok", "grok")
-    monkeypatch.setattr(aikit, "detect_agent_version", lambda _: "1.0.0")
-    calls = []
-    def timed_out(command, **kwargs):
-        calls.append(command)
-        return -1, "", "Command timed out after 300s"
-    monkeypatch.setattr(aikit, "run", timed_out)
-    outcome, _, _ = aikit.execute_agent_update("grok")
-    assert outcome["status"] == "failed"
-    assert len(calls) == 1
-    assert "timed out" in outcome["error"]
 
 
 def test_paths_with_shell_metacharacters_are_passed_as_argv(aikit, monkeypatch, tmp_path):

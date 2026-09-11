@@ -671,7 +671,7 @@ def test_aikit_resolve_update_cmd_amp(tool_loader, monkeypatch):
 
 
 def test_aikit_detect_install_manager_mise(tool_loader, monkeypatch, tmp_path):
-    """Native updates take precedence; mise is retained as the owner fallback."""
+    """A mise-owned CLI updates through mise without an untracked native write."""
     m = tool_loader("aikit")
     monkeypatch.setattr(m.Path, "home", lambda: tmp_path)
     shim = tmp_path / ".local/share/mise/shims/claude"
@@ -682,8 +682,8 @@ def test_aikit_detect_install_manager_mise(tool_loader, monkeypatch, tmp_path):
     manager, cmd = m.detect_install_manager("claude")
     assert manager == "mise"
     assert cmd == "mise upgrade claude"
-    assert m.resolve_update_cmd("claude") == f"{shim} update"
-    assert m._update_plan("claude")["commands"][1] == ["mise", "upgrade", "claude"]
+    assert m.resolve_update_cmd("claude") == "mise upgrade claude"
+    assert m._update_plan("claude")["commands"] == [["mise", "upgrade", "claude"]]
 
 
 def test_aikit_detect_install_manager_brew(tool_loader, monkeypatch, tmp_path):

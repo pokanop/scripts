@@ -99,6 +99,7 @@ DEFAULT_CONFIG = {
 }
 
 UPDATE_CHECK_CACHE: dict[str, dict] = {}
+INSTALL_MANAGER_CACHE: dict[str, tuple] = {}
 
 # =============================================================================
 # npm global install helpers — always target ~/.local (on PATH for most setups)
@@ -127,10 +128,16 @@ def _npm_subprocess_env():
 
 
 def _run_npm(cmd, timeout=10):
-    """Run an npm shell command without leaving files under $HOME."""
+    """Read npm metadata without losing configured discovery locations."""
     cache, env = _npm_subprocess_env()
     try:
-        return run(cmd, timeout=timeout, env={**_maintenance_env(), **env})
+        discovery_env = _maintenance_env()
+        # These calls query configuration/releases, not installations. Keep
+        # both spellings so npm itself applies its normal precedence rules.
+        for key in os.environ:
+            if key.upper() in ("NPM_CONFIG_PREFIX", "NPM_CONFIG_USERCONFIG"):
+                discovery_env.pop(key, None)
+        return run(cmd, timeout=timeout, env={**discovery_env, **env})
     finally:
         shutil.rmtree(cache, ignore_errors=True)
 
@@ -1410,7 +1417,7 @@ def run(cmd, timeout=300, shell=True, capture=True, env=None):
             start_new_session=isolate,
         )
     except Exception as e:
-        return -1, "", str(e)
+        return -127, "", str(e)  # no child started; a manager retry is safe
 
     # With start_new_session the child leads its own group, so pgid == pid;
     # capture it up front so teardown can reach the whole tree even after the
@@ -1786,8 +1793,32 @@ for d in m.distributions():
 
 
 def _manager_installation(agent_key):
-    """Return owner, command, environment and diagnostic from binary evidence."""
+    """Memoize probes for unchanged binaries; updates explicitly invalidate."""
     bin_path = _installed_bin_path(agent_key)
+    try:
+        stat = bin_path.stat() if bin_path else None
+        fingerprint = (str(bin_path), str(bin_path.resolve()), stat.st_dev,
+                       stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_mode) if stat else None
+    except (OSError, RuntimeError):
+        fingerprint = (str(bin_path), None)
+    context = tuple(os.environ.get(key) for key in (
+        "HOME", "PATH", "MISE_DATA_DIR", "XDG_DATA_HOME", "PIPX_HOME",
+        "UV_TOOL_DIR", "BUN_INSTALL_GLOBAL_DIR",
+    ))
+    signature = (fingerprint, context, _CURRENT_PLATFORM)
+    cached = INSTALL_MANAGER_CACHE.get(agent_key)
+    now = time.monotonic()
+    if cached and cached[0] == signature and now - cached[1] < 60:
+        result = cached[2]
+    else:
+        result = _probe_manager_installation(bin_path)
+        INSTALL_MANAGER_CACHE[agent_key] = (signature, now, result)
+    manager, command, env, error = result
+    return manager, list(command) if command else None, dict(env), error
+
+
+def _probe_manager_installation(bin_path):
+    """Return owner, command, environment and diagnostic from binary evidence."""
     if not bin_path:
         return None, None, {}, "No installed executable could be resolved"
     raw = bin_path.as_posix()
@@ -1806,12 +1837,8 @@ def _manager_installation(agent_key):
                 continue
             foreign, _, _ = run(["pacman", "-Qm", package], shell=False, timeout=10, env=_maintenance_env())
             if foreign == 0:
-                helper = next((h for h in ("paru", "yay") if shutil.which(h)), None)
-                if not helper:
-                    return "aur", None, {}, f"AUR package {package} owns {raw}; install paru/yay or update it with your AUR build workflow"
-                return "aur", [helper, "-S", "--needed", "--noconfirm", package], {}, ""
-            prefix = ["sudo", "-n"] if hasattr(os, "geteuid") and os.geteuid() != 0 else []
-            return "pacman", [*prefix, "pacman", "-S", "--needed", "--noconfirm", package], {}, ""
+                return "aur", None, {}, f"AUR package {package} owns {raw}; run your full system/AUR update workflow (omarchy update, paru -Syu, or yay -Syu), then retry"
+            return "pacman", None, {}, f"pacman package {package} owns {raw}; run omarchy update or sudo pacman -Syu, then retry; aikit does not perform partial system upgrades"
 
     for path in paths:
         if any(marker in path for marker in _mise_data_markers()):
@@ -1907,7 +1934,10 @@ def _update_plan(agent_key):
     primary = agent.get("bin", "")
     native = registry if registry and (registry == primary or registry.startswith(primary + " ")) else None
     commands = []
-    if native:
+    # Native updates are appropriate for standalone/npm/Bun installations.
+    # Other owners maintain receipts/environments: use their updater only,
+    # including on failure, rather than overwriting files behind their backs.
+    if native and manager in (None, "npm", "bun"):
         commands.append(_bind_agent_command(agent_key, native))
     if managed_cmd:
         commands.append(managed_cmd)
@@ -1928,7 +1958,7 @@ def _update_plan(agent_key):
 
 
 def resolve_update_cmd(agent_key):
-    """Prefer the native updater; fall back to the detected owner's command."""
+    """Select the updater appropriate to the detected installation owner."""
     plan = _update_plan(agent_key)
     command = next(iter(plan["commands"]), None)
     return _quote_command(command) if isinstance(command, list) else command
@@ -2057,9 +2087,19 @@ def _text_update_availability(spec, text):
     """Only an explicit verdict is evidence; banners/errors are inconclusive."""
     text = re.sub(r"\x1b\[[0-9;]*m", "", text).casefold()
     available = spec.get("available_substr", "").casefold()
-    if available and available in text:
+    negative_pattern = (
+        r"\b(?:already up[ -]to[ -]date|no updates? (?:available|found)|"
+        r"you(?: are|'re|’re) up[ -]to[ -]date|"
+        r"(?:you(?: are|'re|’re)|already) on the latest (?:release|version)|"
+        r"latest (?:release|version) (?:is )?already installed)\b"
+    )
+    negative = bool(re.search(negative_pattern, text))
+    # "No update available" contains the positive phrase; remove explicit
+    # negatives before looking for it. Conflicting verdicts remain unknown.
+    positive = bool(available and available in re.sub(negative_pattern, "", text))
+    if positive and not negative:
         return True
-    if re.search(r"\b(?:already up[ -]to[ -]date|no updates? available|you are up[ -]to[ -]date)\b", text):
+    if negative and not positive:
         return False
     return None
 
@@ -2255,6 +2295,7 @@ def _update_failure_detail(agent_key, command, before, after, outcome, output, m
 
 def execute_agent_update(agent_key):
     """Update the active installation, retry its owner, and verify each attempt."""
+    INSTALL_MANAGER_CACHE.pop(agent_key, None)
     plan = _update_plan(agent_key)
     before = _installed_bin_path(agent_key)
     if not plan["commands"]:
@@ -2273,6 +2314,7 @@ def execute_agent_update(agent_key):
         after = _installed_bin_path(agent_key)
         new_version_raw = detect_agent_version(agent_key)
         UPDATE_CHECK_CACHE.pop(agent_key, None)
+        INSTALL_MANAGER_CACHE.pop(agent_key, None)
         outcome = classify_update_outcome(
             agent_key, old_version_raw=old_version_raw, new_version_raw=new_version_raw,
             exit_code=exit_code, stderr=stderr or stdout,
@@ -2285,9 +2327,9 @@ def execute_agent_update(agent_key):
                        manager=plan["manager"], path_before=str(before), path_after=str(after), attempts=list(attempts))
         if outcome["status"] in ("upgraded", "up_to_date"):
             return outcome, "\n".join(outputs), "\n".join(errors)
-        outcome["status"] = "failed"
-        outcome["exit_code"] = exit_code or 1
-        outcome["error"] = _update_failure_detail(agent_key, command, before, after, outcome, stderr or stdout, plan["manager"])
+        if outcome["status"] in ("failed", "unchanged_outdated"):
+            outcome["exit_code"] = exit_code or 1
+            outcome["error"] = _update_failure_detail(agent_key, command, before, after, outcome, stderr or stdout, plan["manager"])
         # A timeout may have interrupted a partial mutation. Do not start a
         # second updater after an uncertain termination.
         if exit_code == -1:
@@ -2912,16 +2954,12 @@ def _do_update_impl(agent_keys, *, force=False):
             _persist_agent_after_update(config, key)
             up_to_date.append(key)
         elif status == "unchanged_outdated":
-            latest = outcome.get("latest")
-            detail = f"still {new_v or old_v or 'unknown'}"
-            if latest and latest not in (new_v, old_v, "latest"):
-                detail += f", latest is {latest}"
-            print_warning(f"{icon} {name} — update ran but version unchanged ({detail})")
+            print_warning(f"{icon} {name} — still outdated: {outcome.get('error')}")
             _persist_agent_after_update(config, key)
             unchanged_outdated.append(key)
         elif status == "unchanged":
             ver = new_v or old_v or "—"
-            print_info(f"{icon} {name} — no version change detected [dim]({ver})[/dim]")
+            print_info(f"{icon} {name} — version unchanged; update check inconclusive [dim]({ver})[/dim]")
             _persist_agent_after_update(config, key)
             unchanged.append(key)
         else:
@@ -2947,7 +2985,7 @@ def _do_update_impl(agent_keys, *, force=False):
         )
     if failed:
         console.print(f"[bold red]❌ Failed ({len(failed)}):[/bold red] {_agent_names(failed)}")
-    return 1 if failed or unchanged_outdated or unchanged else 0
+    return 1 if failed or unchanged_outdated else 0
 
 
 def do_uninstall(agent_keys, yes=False):
@@ -5911,7 +5949,7 @@ def create_flask_app():
 
         outcome, stdout, stderr = execute_agent_update(agent_key)
         status = outcome["status"] if outcome else "failed"
-        success = status in ("upgraded", "up_to_date")
+        success = status in ("upgraded", "up_to_date", "unchanged")
         if success:
             config = load_config()
             _persist_agent_after_update(config, agent_key)
@@ -5925,7 +5963,7 @@ def create_flask_app():
             "new_version": outcome.get("new") if outcome else None,
             "latest_version": outcome.get("latest") if outcome else None,
             "stdout": stdout[:500] if stdout else "",
-            "stderr": ((outcome or {}).get("error") or stderr) if (outcome or stderr) else "",
+            "stderr": ((outcome or {}).get("error") or stderr)[:500] if (outcome or stderr) else "",
         })
 
     @app.route("/api/doctor")
@@ -6084,8 +6122,11 @@ async function updateAgent(key) {{
     try {{
         const resp = await fetch(`/api/update/${{key}}`, {{ method: 'POST' }});
         const data = await resp.json();
-        if (data.success) {{
-            log(`✅ ${{key}} updated!`, 'success');
+        if (data.status === 'unchanged') {{
+            log(`ℹ️ ${{key}}: version unchanged; update check inconclusive.`);
+        }} else if (data.success) {{
+            const current = ['up_to_date', 'skipped_up_to_date'].includes(data.status);
+            log(current ? `✓ ${{key}} already up to date.` : `✅ ${{key}} updated!`, 'success');
             location.reload();
         }} else {{
             log(`❌ ${{key}} update failed: ${{data.stderr || data.stdout}}`, 'error');
