@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v2.0.0
+aikit — AI Coding Agent CLI Installer & Manager  v2.0.1
 Install, update, authenticate, and manage 38 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -57,7 +57,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 import scriptkit as sk
 
@@ -1619,25 +1619,6 @@ def detect_agent_version(agent_key):
     return None
 
 
-def agent_bin_collision_warnings():
-    """Warnings when multiple agents share the ambiguous 'agent' command."""
-    if not (detect_agent_bin("cursor") and detect_agent_bin("grok")):
-        return []
-    agent_path = shutil.which("agent")
-    if not agent_path:
-        return []
-    if bin_path_belongs_to_agent("grok", agent_path):
-        winner = "Grok Build"
-    elif bin_path_belongs_to_agent("cursor", agent_path):
-        winner = "Cursor CLI"
-    else:
-        winner = "another tool"
-    return [
-        "Both Cursor CLI and Grok Build are installed; bare 'agent' currently runs "
-        f"{winner}. Use 'cursor-agent' or 'grok' to disambiguate."
-    ]
-
-
 def _installed_bin_path(agent_key):
     """Absolute path of the installed agent binary on PATH, or None."""
     agent = AGENTS.get(agent_key)
@@ -2741,8 +2722,6 @@ def print_agent_table(agent_keys=None):
     console.print(table)
     if upgrades:
         sk.info(f"{upgrades} upgrade(s) available — run [bold]aikit update[/bold]")
-    for warning in agent_bin_collision_warnings():
-        sk.warning(warning)
 
 
 # =============================================================================
@@ -2860,9 +2839,6 @@ def do_install(agent_keys, yes=False):
     if needs_auth:
         console.print(f"\n[bold yellow]🔑 Some agents need authentication:[/bold yellow] {', '.join(needs_auth)}")
         console.print("  Run [bold]aikit auth <agent>[/bold] for guided setup.")
-
-    for warning in agent_bin_collision_warnings():
-        sk.warning(warning)
 
 
 def do_update(agent_keys=None, *, force=False):
@@ -5704,7 +5680,6 @@ def do_doctor() -> int:
         tips.append(f"{upgrade_count} upgrade(s) available — run aikit update")
     if not_installed:
         tips.append("Not installed: " + ", ".join(not_installed) + "  (aikit install)")
-    tips.extend(agent_bin_collision_warnings())
 
     return sk.doctor(
         "aikit", __version__, TAGLINE, ICON,
