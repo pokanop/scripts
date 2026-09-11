@@ -79,6 +79,30 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 2.0.0 — 2026-09-10
+- ⚠ `aikit update` now exits 1 for updater errors or a confirmed outdated
+  executable; the dashboard also returns `success: false`.
+  This exit-code/API correction requires a major bump under the repo's versioning rules.
+- Detect the active executable's npm/Bun prefix, pip interpreter, pipx/uv root,
+  Cargo receipt, mise tool, Homebrew target, or pacman/AUR owner. Use native
+  updates for standalone/npm/Bun installs, with manager retry; other managed
+  installations use their owner exclusively to preserve package receipts.
+- Replace the invalid `codex update` invocation with the owning manager or the
+  official installer; pin Codex/OMP standalone reinstalls to the active bin directory.
+- Sanitize maintenance environments, require explicit native check verdicts,
+  and re-resolve/version-check after updates. Failures include command, owner,
+  active path, other PATH copies, and updater output (POK-387).
+- Preserve successful unchanged updates with inconclusive checks as neutral
+  outcomes (exit 0); recognize more explicit current-version phrasings.
+- Keep configured npm prefixes during discovery. Cache ownership probes for
+  unchanged binaries, invalidate before/after updates, and distinguish spawn
+  failures (manager retry) from timeouts (stop).
+- Report pacman/AUR owners with full-system update instructions; never run
+  elevated partial package upgrades. Bound dashboard error output to 500 characters.
+- Fix Bun updates to use supported `BUN_INSTALL_GLOBAL_DIR`/`BUN_INSTALL_BIN`
+  overrides with `bun install -g`, preserving default and relocated destinations
+  without unsupported CLI flags; verified with Bun 1.3.14 and Oh My Pi.
+
 ### 1.19.0 — 2026-09-09
 - **New `aikit usage [providers...] [--json] [--all]`** — a unified snapshot of
   plan, account, credits, spend and rate-limit windows across 23 providers

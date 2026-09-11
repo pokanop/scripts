@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v1.19.0
+aikit — AI Coding Agent CLI Installer & Manager  v2.0.0
 Install, update, authenticate, and manage 38 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -57,7 +57,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.19.0"
+__version__ = "2.0.0"
 
 import scriptkit as sk
 
@@ -99,6 +99,7 @@ DEFAULT_CONFIG = {
 }
 
 UPDATE_CHECK_CACHE: dict[str, dict] = {}
+INSTALL_MANAGER_CACHE: dict[str, tuple] = {}
 
 # =============================================================================
 # npm global install helpers — always target ~/.local (on PATH for most setups)
@@ -127,10 +128,16 @@ def _npm_subprocess_env():
 
 
 def _run_npm(cmd, timeout=10):
-    """Run an npm shell command without leaving files under $HOME."""
+    """Read npm metadata without losing configured discovery locations."""
     cache, env = _npm_subprocess_env()
     try:
-        return run(cmd, timeout=timeout, env=env)
+        discovery_env = _maintenance_env()
+        # These calls query configuration/releases, not installations. Keep
+        # both spellings so npm itself applies its normal precedence rules.
+        for key in os.environ:
+            if key.upper() in ("NPM_CONFIG_PREFIX", "NPM_CONFIG_USERCONFIG"):
+                discovery_env.pop(key, None)
+        return run(cmd, timeout=timeout, env={**discovery_env, **env})
     finally:
         shutil.rmtree(cache, ignore_errors=True)
 
@@ -435,7 +442,10 @@ AGENTS = {
             "Windows": 'powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"',
         },
         "version_cmd": "codex --version",
-        "update_cmd": "codex update",
+        # Codex accepts a bare word as a prompt; `codex update` is not an updater.
+        "update_cmd": None,
+        "update_via_install": True,
+        "installer_bin_dir_env": "CODEX_INSTALL_DIR",
         "version_check": {"type": "github_release", "repo": "openai/codex", "tag_prefix": "rust-v"},
         "uninstall_cmd": binary_uninstall_cmd("codex", vendor_dirs=["$HOME/.codex"]),
         "auth_type": "oauth_browser",
@@ -756,6 +766,7 @@ AGENTS = {
         "version_cmd": "omp --version",
         "update_cmd": None,
         "update_via_install": True,
+        "installer_bin_dir_env": "PI_INSTALL_DIR",
         # Curl installer runs `bun install -g @oh-my-pi/pi-coding-agent` (or drops
         # a prebuilt binary); npm i -g is an alternate path, hence the npm
         # version_check.
@@ -1380,7 +1391,15 @@ def run(cmd, timeout=300, shell=True, capture=True, env=None):
     survives the interrupt, in tmux or a plain terminal alike. A timeout kills
     the tree the same way and reports it instead of leaking a runaway process.
     """
-    run_env = {**os.environ, **env} if env else None
+    # A None override removes an inherited variable (maintenance subprocesses
+    # must not inherit another application's Python/Node injection settings).
+    run_env = {k: v for k, v in {**os.environ, **env}.items() if v is not None} if env else None
+    if os.name == "nt" and not shell and isinstance(cmd, (list, tuple)) and cmd:
+        # CreateProcess does not search PATHEXT like cmd.exe. npm commonly
+        # exposes npm.cmd, so resolve it before launching an argv command.
+        executable = shutil.which(str(cmd[0]), path=(run_env or os.environ).get("PATH"))
+        if executable:
+            cmd = [executable, *cmd[1:]]
     pipe = subprocess.PIPE if capture else None
     # Isolate captured commands in their own session so we can tear down the
     # whole tree on abort — POSIX only (start_new_session/killpg are no-ops or
@@ -1398,7 +1417,7 @@ def run(cmd, timeout=300, shell=True, capture=True, env=None):
             start_new_session=isolate,
         )
     except Exception as e:
-        return -1, "", str(e)
+        return -127, "", str(e)  # no child started; a manager retry is safe
 
     # With start_new_session the child leads its own group, so pgid == pid;
     # capture it up front so teardown can reach the whole tree even after the
@@ -1515,6 +1534,8 @@ def bin_path_belongs_to_agent(agent_key, bin_path):
     candidates = _agent_bin_candidates(agent_key)
     for check_path in (raw, resolved):
         name = Path(check_path).name
+        if _CURRENT_PLATFORM == "Windows" and Path(name).suffix.lower() in (".exe", ".cmd", ".bat", ".ps1"):
+            name = Path(name).stem
         if name not in candidates:
             continue
         owners = _agents_sharing_bin_name(name)
@@ -1557,14 +1578,8 @@ def detect_agent_bin(agent_key):
 
 
 def _version_command(agent_key, bin_name):
-    agent = AGENTS.get(agent_key, {})
-    template = agent.get("version_cmd")
-    if template:
-        parts = template.split(None, 1)
-        if len(parts) == 2:
-            return f"{bin_name} {parts[1]}"
-        return bin_name
-    return f"{bin_name} --version"
+    template = AGENTS.get(agent_key, {}).get("version_cmd")
+    return [str(bin_name), *(shlex.split(template)[1:] if template else ["--version"])]
 
 
 def _version_timeout(agent_key):
@@ -1595,8 +1610,9 @@ def detect_agent_version(agent_key):
         return None
     exit_code, stdout, _ = run(
         _version_command(agent_key, bin_name),
+        shell=False,
         timeout=_version_timeout(agent_key),
-        env=_version_env(agent_key),
+        env={**_maintenance_env(), **(_version_env(agent_key) or {})},
     )
     if exit_code == 0 and stdout:
         return _parse_version_stdout(stdout)
@@ -1631,6 +1647,9 @@ def _installed_bin_path(agent_key):
         path = shutil.which(name)
         if path and bin_path_belongs_to_agent(agent_key, path):
             return Path(path)
+    resolved = resolve_agent_bin(agent_key)
+    if resolved and Path(resolved).is_absolute():
+        return Path(resolved)
     return None
 
 
@@ -1645,106 +1664,306 @@ def _mise_data_markers():
     for base in bases:
         if not base:
             continue
-        root = str(Path(base))
+        root = Path(base).as_posix()
         markers.append(root + "/installs/")
         markers.append(root + "/shims/")
     return tuple(markers)
 
 
-def detect_install_manager(agent_key):
-    """Detect the package manager that owns the installed agent binary.
+def _quote_command(parts):
+    """Quote argv for the shell that run() uses on this platform."""
+    parts = [str(part) for part in parts]
+    return subprocess.list2cmdline(parts) if _CURRENT_PLATFORM == "Windows" else shlex.join(parts)
 
-    Inspects the resolved PATH entry for manager fingerprints (mise shims,
-    Homebrew Cellar paths, pipx/uv venv locations).
 
-    Returns (manager, upgrade_cmd) when the binary was installed by an
-    external package manager with an idiomatic upgrade command, else
-    (None, None). The detected command takes precedence over the registry's
-    update_cmd so agents installed via mise/brew/pipx/uv are upgraded by
-    that manager instead of self-updating out from under it. npm installs
-    are deliberately excluded — every npm-installed agent's registry
-    update_cmd already targets npm.
+def _maintenance_env():
+    """Keep identity, PATH, proxies, certificates and manager roots, drop injection.
+
+    Do not replace HOME or strip PATH: both identify the installation the user
+    actually invokes. Explicit manager targets below prevent a foreign prefix
+    or activated Python environment from redirecting an upgrade.
     """
-    bin_path = _installed_bin_path(agent_key)
-    if not bin_path:
-        return None, None
-    raw = str(bin_path)
+    removed = {
+        "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "VIRTUAL_ENV", "CONDA_PREFIX",
+        "CONDA_DEFAULT_ENV", "NODE_OPTIONS", "NODE_PATH", "BASH_ENV", "ENV",
+        "PIP_TARGET", "PIP_PREFIX", "PIP_USER", "PIP_REQUIRE_VIRTUALENV",
+        "NPM_CONFIG_PREFIX", "NPM_CONFIG_GLOBAL", "NPM_CONFIG_USERCONFIG",
+        "NPM_CONFIG_IGNORE_SCRIPTS", "NPM_CONFIG_DRY_RUN",
+        "LD_PRELOAD", "DYLD_INSERT_LIBRARIES",
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+    }
+    return {key: None for key in os.environ if key.upper() in removed or key.startswith(("BASH_FUNC_", "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
+
+
+def _node_installation(bin_path):
+    """Find the owning global package, including npm's Windows .cmd shims."""
+    resolved = bin_path.resolve()
+    paths = [resolved]
+    if bin_path.suffix.lower() in (".cmd", ".ps1", ".exe"):
+        # Windows shims are files rather than symlinks. Require a reference to
+        # the adjacent node_modules tree, not just a package installed nearby.
+        try:
+            with bin_path.open(errors="replace") as stream:
+                shim = stream.read(16384).replace("\\", "/")
+            for ref in re.findall(r"node_modules/((?:@[^/\s\"']+/)?[^/\s\"']+)/", shim):
+                paths.append(bin_path.parent / "node_modules" / ref / "package.json")
+        except OSError:
+            pass
+    for path in paths:
+        bun_dir = os.environ.get("BUN_INSTALL_GLOBAL_DIR")
+        bun_root = next((parent.parent for parent in path.parents if parent.name == "node_modules" and (
+            (parent.parent.name == "global" and parent.parent.parent.name == "install")
+            or (bun_dir and parent.parent == Path(bun_dir).expanduser().resolve())
+        )), None)
+        for tree in reversed(path.parents):
+            if tree.name != "node_modules":
+                continue
+            parts = path.relative_to(tree).parts
+            if parts[0].startswith("."):
+                continue  # Bun's .bun backing store is not a package name
+            count = 2 if parts[0].startswith("@") else 1
+            if len(parts) <= count:
+                continue
+            package = "/".join(parts[:count])
+            if not re.fullmatch(r"(?:@[\w.-]+/)?[\w.-]+", package):
+                continue
+            global_dir = tree.parent
+            if bun_root:
+                # Bun exposes these destinations through environment variables,
+                # not install flags. Pin both to the active installation.
+                return "bun", ["bun", "install", "-g", package + "@latest"], {
+                    "BUN_INSTALL_GLOBAL_DIR": str(bun_root),
+                    "BUN_INSTALL_BIN": str(bin_path.parent),
+                }
+            if global_dir.name == "lib":
+                prefix = global_dir.parent
+            elif bin_path.parent == global_dir:  # npm on Windows
+                prefix = global_dir
+            else:
+                continue  # local project dependency, not a global install
+            return "npm", ["npm", "install", "-g", package + "@latest", "--prefix", str(prefix)], {}
+    return None, None, {}
+
+
+def _python_installation(bin_path):
+    """Use the launcher interpreter and distribution RECORD, never aikit's pip."""
     try:
-        resolved = str(bin_path.resolve())
-    except OSError:
-        resolved = raw
-    name = bin_path.name
-
-    # mise shims are symlinks into <data>/mise/installs/<tool>/<ver>/
-    # (checked before the npm exclusion: mise npm-backend tools resolve into a
-    # mise-managed lib/node_modules but are mise-owned, not npm-owned)
-    mise_markers = _mise_data_markers()
-    for check in (raw, resolved):
-        if any(marker in check for marker in mise_markers):
-            tool = name
-            if "/installs/" in check:
-                after = check.split("/installs/", 1)[1].split("/")
-                if len(after) >= 2:
-                    tool = after[0]
-            return "mise", f"mise upgrade {tool}"
-
-    # npm global trees live under <prefix>/lib/node_modules/ — even when the
-    # prefix is Homebrew-managed (/opt/homebrew), the binary is npm-owned,
-    # so let the registry's npm update command handle it.
-    for check in (raw, resolved):
-        if "/lib/node_modules/" in check:
+        with bin_path.open("rb") as stream:
+            first = stream.readline(4096).decode("utf-8", errors="replace").strip()
+        if first.startswith("#!"):
+            interpreter = first[2:].strip()
+        elif bin_path.suffix.lower() == ".exe":
+            # pip's Windows distlib launcher embeds the interpreter shebang
+            # after its PE stub. RECORD verification below still proves owner.
+            with bin_path.open("rb") as stream:
+                launcher = stream.read(1024 * 1024)
+            match = re.search(rb'#!([^\r\n]+python(?:w)?\.exe"?)\r?\n', launcher, re.I)
+            if not match:
+                return None, None
+            interpreter = match.group(1).decode("utf-8").strip('"')
+        else:
             return None, None
+        if interpreter.startswith("/usr/bin/env "):
+            interpreter = shutil.which(interpreter.split()[-1]) or ""
+        if not interpreter or not re.fullmatch(r"python(?:w|\d+(?:\.\d+)*)?(?:\.exe)?", Path(interpreter).name, re.I):
+            return None, None
+        # Match RECORD to this executable; a console-script name alone could
+        # belong to another distribution installed in the same interpreter.
+        query = '''import importlib.metadata as m, json, pathlib, site, sys
+p = pathlib.Path(sys.argv[1]).resolve()
+for d in m.distributions():
+    if any(pathlib.Path(d.locate_file(f)).resolve() == p for f in (d.files or ())):
+        root = pathlib.Path(d.locate_file('')).resolve()
+        print(json.dumps({'name': d.metadata['Name'], 'user': root == pathlib.Path(site.getusersitepackages()).resolve()}))
+        break
+'''
+        code, out, _ = run([interpreter, "-c", query, str(bin_path)], shell=False, timeout=10, env=_maintenance_env())
+        if code or not out:
+            return None, None
+        package = json.loads(out)
+        name = package["name"]
+        if not re.fullmatch(r"[\w.-]+", name):
+            return None, None
+        command = [interpreter, "-m", "pip", "--isolated", "install", "--upgrade", "--no-input"]
+        if package.get("user"):
+            command.append("--user")
+        return "pip", [*command, name]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, None
 
-    for check in (raw, resolved):
-        if "/pipx/venvs/" in check:
-            pkg = check.split("/pipx/venvs/", 1)[1].split("/")[0]
-            return "pipx", f"pipx upgrade {pkg}"
-        if "/uv/tools/" in check:
-            pkg = check.split("/uv/tools/", 1)[1].split("/")[0]
-            return "uv", f"uv tool upgrade {pkg}"
 
-    # Homebrew: derive the formula name from the Cellar path segment when the
-    # resolved binary lives there (e.g. block-goose-cli, not the bin name goose).
-    formula = None
-    is_brew = False
-    for check in (raw, resolved):
-        if "/Cellar/" in check:
-            after = check.split("/Cellar/", 1)[1].split("/")
-            if after:
-                formula = formula or after[0]
-        if "/Cellar/" in check or "/homebrew/" in check:
-            is_brew = True
-    if is_brew:
-        return "brew", f"brew upgrade {shlex.quote(formula or name)}"
+def _manager_installation(agent_key):
+    """Memoize probes for unchanged binaries; updates explicitly invalidate."""
+    bin_path = _installed_bin_path(agent_key)
+    try:
+        stat = bin_path.stat() if bin_path else None
+        fingerprint = (str(bin_path), str(bin_path.resolve()), stat.st_dev,
+                       stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_mode) if stat else None
+    except (OSError, RuntimeError):
+        fingerprint = (str(bin_path), None)
+    context = tuple(os.environ.get(key) for key in (
+        "HOME", "PATH", "MISE_DATA_DIR", "XDG_DATA_HOME", "PIPX_HOME",
+        "UV_TOOL_DIR", "BUN_INSTALL_GLOBAL_DIR",
+    ))
+    signature = (fingerprint, context, _CURRENT_PLATFORM)
+    cached = INSTALL_MANAGER_CACHE.get(agent_key)
+    now = time.monotonic()
+    if cached and cached[0] == signature and now - cached[1] < 60:
+        result = cached[2]
+    else:
+        result = _probe_manager_installation(bin_path)
+        INSTALL_MANAGER_CACHE[agent_key] = (signature, now, result)
+    manager, command, env, error = result
+    return manager, list(command) if command else None, dict(env), error
 
-    return None, None
+
+def _probe_manager_installation(bin_path):
+    """Return owner, command, environment and diagnostic from binary evidence."""
+    if not bin_path:
+        return None, None, {}, "No installed executable could be resolved"
+    raw = bin_path.as_posix()
+    try:
+        resolved = bin_path.resolve().as_posix()
+    except (OSError, RuntimeError):
+        resolved = raw
+    paths = (raw, resolved)
+
+    # A package database is stronger evidence than directory names. Query both
+    # the shim and its target; never infer Arch ownership merely from Linux.
+    if shutil.which("pacman"):
+        for path in dict.fromkeys(paths):
+            code, package, _ = run(["pacman", "-Qoq", path], shell=False, timeout=10, env=_maintenance_env())
+            if code or not re.fullmatch(r"[\w@+.-]+", package):
+                continue
+            foreign, _, _ = run(["pacman", "-Qm", package], shell=False, timeout=10, env=_maintenance_env())
+            if foreign == 0:
+                return "aur", None, {}, f"AUR package {package} owns {raw}; run your full system/AUR update workflow (omarchy update, paru -Syu, or yay -Syu), then retry"
+            return "pacman", None, {}, f"pacman package {package} owns {raw}; run omarchy update or sudo pacman -Syu, then retry; aikit does not perform partial system upgrades"
+
+    for path in paths:
+        if any(marker in path for marker in _mise_data_markers()):
+            tool = path.split("/installs/", 1)[1].split("/")[0] if "/installs/" in path else bin_path.stem
+            if tool in ("node", "nodejs", "bun", "python"):
+                continue  # mise owns the runtime, not packages installed in it
+            return "mise", ["mise", "upgrade", tool], {}, ""
+
+    manager, command, env = _node_installation(bin_path)
+    if manager:
+        return manager, command, env, ""
+
+    # Include relocated manager homes and pin them for the update subprocess.
+    for manager, variable, marker, subdir in (
+        ("pipx", "PIPX_HOME", "/pipx/venvs/", "venvs"),
+        ("uv", "UV_TOOL_DIR", "/uv/tools/", ""),
+    ):
+        custom = os.environ.get(variable)
+        custom_marker = (Path(custom).expanduser() / subdir).as_posix() + "/" if custom else None
+        for path in paths:
+            match = next((m for m in (custom_marker, marker) if m and m in path), None)
+            if not match:
+                continue
+            pkg = path.split(match, 1)[1].split("/")[0]
+            root = path.split(match, 1)[0] + match.rstrip("/")
+            if subdir:
+                root = str(Path(root).parent)
+            args = ["pipx", "upgrade", pkg] if manager == "pipx" else ["uv", "tool", "upgrade", pkg]
+            return manager, args, {variable: root}, ""
+
+    # Require an actual Cellar/Caskroom target. /opt/homebrew/bin alone proves
+    # nothing (npm and manually copied executables also live there).
+    for path in paths:
+        for marker in ("/Cellar/", "/Caskroom/"):
+            if marker in path:
+                package = path.split(marker, 1)[1].split("/")[0]
+                args = ["brew", "upgrade", *(["--cask"] if marker == "/Caskroom/" else []), package]
+                return "brew", args, {}, ""
+
+    # Cargo records the crate, binaries, root and source in .crates2.json.
+    for path in (bin_path, Path(resolved)):
+        root = path.parent.parent
+        receipt = root / ".crates2.json"
+        if path.parent.name != "bin" or not receipt.is_file():
+            continue
+        try:
+            installs = json.loads(receipt.read_text()).get("installs", {})
+            for package, info in installs.items():
+                if path.name not in info.get("bins", []):
+                    continue
+                if not any(source in package for source in (
+                    "(registry+https://github.com/rust-lang/crates.io-index)",
+                    "(sparse+https://index.crates.io/)",
+                )):
+                    return "cargo", None, {}, f"Cargo owns {raw} via {package}; update its original custom source explicitly"
+                crate = package.split()[0]
+                args = ["cargo", "install", crate, "--locked", "--root", str(root)]
+                if info.get("features"):
+                    args.extend(["--features", ",".join(info["features"])])
+                if info.get("all_features"):
+                    args.append("--all-features")
+                if info.get("no_default_features"):
+                    args.append("--no-default-features")
+                if info.get("target"):
+                    args.extend(["--target", info["target"]])
+                return "cargo", args, {}, ""
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    manager, command = _python_installation(bin_path)
+    return manager, command, {}, ""
+
+
+def detect_install_manager(agent_key):
+    """Return the manager and command owning the active executable, if known."""
+    manager, command, _, _ = _manager_installation(agent_key)
+    return manager, _quote_command(command) if command else None
+
+
+def _bind_agent_command(agent_key, command):
+    """Bind a registry command to the exact executable, including safe aliases."""
+    primary = AGENTS[agent_key]["bin"]
+    if command == primary or command.startswith(primary + " "):
+        binary = _installed_bin_path(agent_key) or resolve_agent_bin(agent_key) or primary
+        return [str(binary), *shlex.split(command[len(primary):])]
+    return command
+
+
+def _update_plan(agent_key):
+    agent = AGENTS.get(agent_key, {})
+    manager, managed_cmd, env, error = _manager_installation(agent_key)
+    registry = agent.get("update_cmd")
+    primary = agent.get("bin", "")
+    native = registry if registry and (registry == primary or registry.startswith(primary + " ")) else None
+    commands = []
+    # Native updates are appropriate for standalone/npm/Bun installations.
+    # Other owners maintain receipts/environments: use their updater only,
+    # including on failure, rather than overwriting files behind their backs.
+    if native and manager in (None, "npm", "bun"):
+        commands.append(_bind_agent_command(agent_key, native))
+    if managed_cmd:
+        commands.append(managed_cmd)
+    elif not manager and not native:
+        fallback = registry or (agent.get("install", {}).get(_CURRENT_PLATFORM) if agent.get("update_via_install") else None)
+        # Never run a guessed npm/pip install for an existing binary. It may
+        # succeed while writing a second copy in an unrelated prefix.
+        if fallback and (not _installed_bin_path(agent_key) or not fallback.startswith(("npm ", "pip ", "bun ", "uv ", "cargo "))):
+            commands.append(fallback)
+            variable = agent.get("installer_bin_dir_env")
+            binary = _installed_bin_path(agent_key)
+            if variable and binary:
+                env[variable] = str(binary.parent)
+    return {
+        "manager": manager, "commands": commands,
+        "env": {**_maintenance_env(), **env}, "error": error,
+    }
 
 
 def resolve_update_cmd(agent_key):
-    """Return the shell command to update an agent, or None.
-
-    Prefers the idiomatic upgrade command of the manager that originally
-    installed the binary (mise, brew, pipx, uv, npm), falling back to the
-    registry's update_cmd / reinstall command.
-    """
-    agent = AGENTS.get(agent_key)
-    if not agent:
-        return None
-    manager, managed_cmd = detect_install_manager(agent_key)
-    if managed_cmd:
-        return managed_cmd
-    update_cmd = agent.get("update_cmd")
-    if update_cmd:
-        bin_name = resolve_agent_bin(agent_key) or agent["bin"]
-        primary = agent["bin"]
-        if update_cmd.startswith(f"{primary} "):
-            return f"{bin_name}{update_cmd[len(primary):]}"
-        if update_cmd == primary:
-            return bin_name
-        return update_cmd
-    if agent.get("update_via_install"):
-        return agent.get("install", {}).get(_CURRENT_PLATFORM)
-    return None
+    """Select the updater appropriate to the detected installation owner."""
+    plan = _update_plan(agent_key)
+    command = next(iter(plan["commands"]), None)
+    return _quote_command(command) if isinstance(command, list) else command
 
 
 def extract_version(text):
@@ -1842,7 +2061,7 @@ def fetch_latest_version(agent_key):
         if kind == "cmd_json":
             if not detect_agent_bin(agent_key):
                 return None
-            exit_code, stdout, _ = run(spec["cmd"], timeout=30)
+            exit_code, stdout, _ = _run_update_check(agent_key, spec, 30)
             if exit_code != 0 or not stdout:
                 return None
             payload = json.loads(stdout)
@@ -1854,7 +2073,7 @@ def fetch_latest_version(agent_key):
         if kind == "cmd_text":
             if not detect_agent_bin(agent_key):
                 return None
-            exit_code, stdout, stderr = run(spec["cmd"], timeout=60)
+            exit_code, stdout, stderr = _run_update_check(agent_key, spec, 60)
             if exit_code != 0:
                 return None
             haystack = f"{stdout}\n{stderr}"
@@ -1864,6 +2083,32 @@ def fetch_latest_version(agent_key):
     except (URLError, TimeoutError, json.JSONDecodeError, OSError, subprocess.SubprocessError):
         return None
     return None
+
+
+def _text_update_availability(spec, text):
+    """Only an explicit verdict is evidence; banners/errors are inconclusive."""
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text).casefold()
+    available = spec.get("available_substr", "").casefold()
+    negative_pattern = (
+        r"\b(?:already up[ -]to[ -]date|no updates? (?:available|found)|"
+        r"you(?: are|'re|’re) up[ -]to[ -]date|"
+        r"(?:you(?: are|'re|’re)|already) on the latest (?:release|version)|"
+        r"latest (?:release|version) (?:is )?already installed)\b"
+    )
+    negative = bool(re.search(negative_pattern, text))
+    # "No update available" contains the positive phrase; remove explicit
+    # negatives before looking for it. Conflicting verdicts remain unknown.
+    positive = bool(available and available in re.sub(negative_pattern, "", text))
+    if positive and not negative:
+        return True
+    if negative and not positive:
+        return False
+    return None
+
+
+def _run_update_check(agent_key, spec, timeout):
+    command = _bind_agent_command(agent_key, spec["cmd"])
+    return run(command, shell=isinstance(command, str), timeout=timeout, env=_maintenance_env())
 
 
 def check_update_status(agent_key, *, config=None, current_raw=None):
@@ -1883,18 +2128,22 @@ def check_update_status(agent_key, *, config=None, current_raw=None):
     now = time.time()
     agent = AGENTS.get(agent_key, {})
     spec = agent.get("version_check")
-    if current_raw is None and not (spec and spec.get("type") == "cmd_json"):
+    if current_raw is None:
         current_raw = detect_agent_version(agent_key)
     current = extract_version(current_raw) if current_raw else None
 
     if spec and spec.get("type") == "cmd_json":
         try:
-            exit_code, stdout, _ = run(spec["cmd"], timeout=30)
+            exit_code, stdout, _ = _run_update_check(agent_key, spec, 30)
             if exit_code == 0 and stdout:
                 payload = json.loads(stdout)
                 latest = payload.get(spec.get("latest_key", "latestVersion"))
-                cur = payload.get(spec.get("current_key", "currentVersion")) or current
-                available = bool(payload.get(spec.get("available_key", "updateAvailable")))
+                cur = current or payload.get(spec.get("current_key", "currentVersion"))
+                available = payload.get(spec.get("available_key", "updateAvailable"))
+                if not isinstance(available, bool):
+                    raise ValueError("Update check did not return a boolean verdict")
+                if current and latest and version_is_older(current, latest):
+                    available = True
                 result = {
                     "available": available,
                     "current": cur or current,
@@ -1903,19 +2152,19 @@ def check_update_status(agent_key, *, config=None, current_raw=None):
                 }
                 UPDATE_CHECK_CACHE[agent_key] = result
                 return result
-        except (json.JSONDecodeError, OSError):
+        except (ValueError, AttributeError, OSError):
             pass
 
     if spec and spec.get("type") == "cmd_text":
         try:
-            exit_code, stdout, stderr = run(spec["cmd"], timeout=60)
+            exit_code, stdout, stderr = _run_update_check(agent_key, spec, 60)
             if exit_code == 0:
                 haystack = f"{stdout}\n{stderr}"
-                available = spec.get("available_substr", "") in haystack
+                available = _text_update_availability(spec, haystack)
                 result = {
                     "available": available,
                     "current": current,
-                    "latest": "latest" if available else current,
+                    "latest": "latest" if available else current if available is False else None,
                     "checked_at": now,
                 }
                 UPDATE_CHECK_CACHE[agent_key] = result
@@ -1923,7 +2172,9 @@ def check_update_status(agent_key, *, config=None, current_raw=None):
         except OSError:
             pass
 
-    latest = fetch_latest_version(agent_key)
+    # A failed native check is unknown; do not run it again through the generic
+    # fetcher or infer "current" from incomplete JSON.
+    latest = None if spec and spec.get("type") in ("cmd_text", "cmd_json") else fetch_latest_version(agent_key)
     if spec and spec.get("type") == "cmd_text" and latest == "latest":
         available = True
     elif latest is None:
@@ -1969,10 +2220,14 @@ def classify_update_outcome(agent_key, *, old_version_raw, new_version_raw, exit
             "error": (stderr or "")[:200],
         }
 
+    if not new_v or not re.search(r"\d+\.\d+", new_v):
+        return {"status": "failed", "old": old_v, "new": None, "error": "Active executable no longer returns a version"}
+    if old_v and version_is_older(new_v, old_v):
+        return {"status": "failed", "old": old_v, "new": new_v, "error": f"Active version regressed from {old_v} to {new_v}"}
     if old_v and new_v and old_v != new_v:
         return {"status": "upgraded", "old": old_v, "new": new_v}
 
-    check = check_update_status(agent_key)
+    check = check_update_status(agent_key, current_raw=new_version_raw)
     latest = check.get("latest")
     if check.get("available") is True:
         return {
@@ -2006,24 +2261,82 @@ def should_skip_update(agent_key, *, force=False, config=None):
     return False, check
 
 
+def _update_failure_detail(agent_key, command, before, after, outcome, output, manager):
+    """Explain what was actually updated/resolved without guessing at ownership."""
+    detail = outcome.get("error") or "Updater completed without a verified update"
+    detail += f"; command: {command}; manager: {manager or 'native/installer'}; active executable: {after or 'missing'}"
+    if before != after:
+        detail += f" (previously {before})"
+    detail += f"; version: {outcome.get('new') or 'unavailable'}"
+    latest = outcome.get("latest")
+    if latest:
+        detail += f"; latest: {latest}"
+    # Enumerate PATH candidates and show their own versions, so a user can
+    # distinguish a stale shadow from an updater that simply did nothing.
+    alternatives = []
+    seen = set()
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        for name in _agent_bin_candidates(agent_key):
+            candidate = shutil.which(name, path=entry or os.curdir)
+            if not candidate or candidate in seen or candidate == str(after):
+                continue
+            seen.add(candidate)
+            if not bin_path_belongs_to_agent(agent_key, candidate):
+                continue
+            code, stdout, _ = run(_version_command(agent_key, candidate), shell=False, timeout=10, env=_maintenance_env())
+            version = extract_version(_parse_version_stdout(stdout)) if code == 0 else None
+            alternatives.append(f"{candidate} ({version or 'version unavailable'})")
+    if alternatives:
+        detail += "; other PATH copies: " + ", ".join(alternatives) + "; adjust PATH or remove the stale installation"
+    if manager in ("pacman", "aur"):
+        detail += "; repository metadata may lag upstream; refresh it through your normal system update workflow"
+    if output.strip():
+        detail += "; updater output: " + output.strip()[-500:]
+    return detail
+
+
 def execute_agent_update(agent_key):
-    """Run an agent's update command and classify the outcome."""
-    update_cmd = resolve_update_cmd(agent_key)
-    if not update_cmd:
-        return None, "", ""
+    """Update the active installation, retry its owner, and verify each attempt."""
+    INSTALL_MANAGER_CACHE.pop(agent_key, None)
+    plan = _update_plan(agent_key)
+    before = _installed_bin_path(agent_key)
+    if not plan["commands"]:
+        reason = plan["error"] or "Installation owner is unknown; refusing to install a second copy with a guessed manager"
+        return {"status": "failed", "exit_code": 1, "error": f"{reason}; active executable: {before}"}, "", ""
     old_version_raw = detect_agent_version(agent_key)
-    exit_code, stdout, stderr = run(update_cmd, timeout=300)
-    new_version_raw = detect_agent_version(agent_key)
-    UPDATE_CHECK_CACHE.pop(agent_key, None)
-    outcome = classify_update_outcome(
-        agent_key,
-        old_version_raw=old_version_raw,
-        new_version_raw=new_version_raw,
-        exit_code=exit_code,
-        stderr=stderr,
-    )
-    outcome["exit_code"] = exit_code
-    return outcome, stdout, stderr
+    outputs, errors, attempts = [], [], []
+    for command in plan["commands"]:
+        exit_code, stdout, stderr = run(command, shell=isinstance(command, str), timeout=300, env=plan["env"])
+        command = _quote_command(command) if isinstance(command, list) else command
+        outputs.append(stdout)
+        errors.append(stderr)
+        attempts.append(command)
+        # Both functions resolve afresh: self-updaters can replace the shim,
+        # change its target, or leave an older installation earlier on PATH.
+        after = _installed_bin_path(agent_key)
+        new_version_raw = detect_agent_version(agent_key)
+        UPDATE_CHECK_CACHE.pop(agent_key, None)
+        INSTALL_MANAGER_CACHE.pop(agent_key, None)
+        outcome = classify_update_outcome(
+            agent_key, old_version_raw=old_version_raw, new_version_raw=new_version_raw,
+            exit_code=exit_code, stderr=stderr or stdout,
+        )
+        if outcome["status"] == "upgraded":
+            check = check_update_status(agent_key, current_raw=new_version_raw)
+            if check.get("available") is True:
+                outcome.update(status="unchanged_outdated", latest=check.get("latest"), error="Updated executable is still behind upstream")
+        outcome.update(exit_code=exit_code, updater_exit_code=exit_code, command=command,
+                       manager=plan["manager"], path_before=str(before), path_after=str(after), attempts=list(attempts))
+        if outcome["status"] in ("upgraded", "up_to_date"):
+            return outcome, "\n".join(outputs), "\n".join(errors)
+        if outcome["status"] in ("failed", "unchanged_outdated"):
+            outcome["exit_code"] = exit_code or 1
+            outcome["error"] = _update_failure_detail(agent_key, command, before, after, outcome, stderr or stdout, plan["manager"])
+        # A timeout may have interrupted a partial mutation. Do not start a
+        # second updater after an uncertain termination.
+        if exit_code == -1:
+            break
+    return outcome, "\n".join(outputs), "\n".join(errors)
 
 
 def _persist_agent_after_update(config, agent_key, new_version_raw=None):
@@ -2555,7 +2868,7 @@ def do_install(agent_keys, yes=False):
 def do_update(agent_keys=None, *, force=False):
     """Update installed agents."""
     try:
-        _do_update_impl(agent_keys, force=force)
+        return _do_update_impl(agent_keys, force=force)
     except KeyboardInterrupt:
         console.print("\n[yellow]⏹ Update interrupted.[/yellow]")
         sys.exit(130)
@@ -2578,9 +2891,6 @@ def _do_update_impl(agent_keys, *, force=False):
         icon = agent["icon"]
         if not detect_agent_bin(key):
             print_info(f"{icon} {agent['name']} — not installed, skipping")
-            continue
-        if not resolve_update_cmd(key):
-            print_info(f"{icon} {agent['name']} — no update command available")
             continue
         candidates.append(key)
 
@@ -2646,16 +2956,12 @@ def _do_update_impl(agent_keys, *, force=False):
             _persist_agent_after_update(config, key)
             up_to_date.append(key)
         elif status == "unchanged_outdated":
-            latest = outcome.get("latest")
-            detail = f"still {new_v or old_v or 'unknown'}"
-            if latest and latest not in (new_v, old_v, "latest"):
-                detail += f", latest is {latest}"
-            print_warning(f"{icon} {name} — update ran but version unchanged ({detail})")
+            print_warning(f"{icon} {name} — still outdated: {outcome.get('error')}")
             _persist_agent_after_update(config, key)
             unchanged_outdated.append(key)
         elif status == "unchanged":
             ver = new_v or old_v or "—"
-            print_info(f"{icon} {name} — no version change detected [dim]({ver})[/dim]")
+            print_info(f"{icon} {name} — version unchanged; update check inconclusive [dim]({ver})[/dim]")
             _persist_agent_after_update(config, key)
             unchanged.append(key)
         else:
@@ -2681,6 +2987,7 @@ def _do_update_impl(agent_keys, *, force=False):
         )
     if failed:
         console.print(f"[bold red]❌ Failed ({len(failed)}):[/bold red] {_agent_names(failed)}")
+    return 1 if failed or unchanged_outdated else 0
 
 
 def do_uninstall(agent_keys, yes=False):
@@ -5628,8 +5935,6 @@ def create_flask_app():
     def api_update(agent_key):
         if agent_key not in AGENTS:
             return jsonify({"error": "Unknown agent"}), 404
-        if not resolve_update_cmd(agent_key):
-            return jsonify({"error": "No update command"}), 400
         if not detect_agent_bin(agent_key):
             return jsonify({"error": "Agent not installed"}), 400
 
@@ -5646,7 +5951,7 @@ def create_flask_app():
 
         outcome, stdout, stderr = execute_agent_update(agent_key)
         status = outcome["status"] if outcome else "failed"
-        success = status not in ("failed",)
+        success = status in ("upgraded", "up_to_date", "unchanged")
         if success:
             config = load_config()
             _persist_agent_after_update(config, agent_key)
@@ -5660,7 +5965,7 @@ def create_flask_app():
             "new_version": outcome.get("new") if outcome else None,
             "latest_version": outcome.get("latest") if outcome else None,
             "stdout": stdout[:500] if stdout else "",
-            "stderr": (outcome.get("error") or stderr)[:500] if (outcome or stderr) else "",
+            "stderr": ((outcome or {}).get("error") or stderr)[:500] if (outcome or stderr) else "",
         })
 
     @app.route("/api/doctor")
@@ -5819,8 +6124,11 @@ async function updateAgent(key) {{
     try {{
         const resp = await fetch(`/api/update/${{key}}`, {{ method: 'POST' }});
         const data = await resp.json();
-        if (data.success) {{
-            log(`✅ ${{key}} updated!`, 'success');
+        if (data.status === 'unchanged') {{
+            log(`ℹ️ ${{key}}: version unchanged; update check inconclusive.`);
+        }} else if (data.success) {{
+            const current = ['up_to_date', 'skipped_up_to_date'].includes(data.status);
+            log(current ? `✓ ${{key}} already up to date.` : `✅ ${{key}} updated!`, 'success');
             location.reload();
         }} else {{
             log(`❌ ${{key}} update failed: ${{data.stderr || data.stdout}}`, 'error');
@@ -7347,7 +7655,7 @@ def cmd_install(args):
 
 
 def cmd_update(args):
-    do_update(args.agents or None, force=args.force)
+    return do_update(args.agents or None, force=args.force)
 
 
 def cmd_uninstall(args):

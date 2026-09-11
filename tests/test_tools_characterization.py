@@ -380,6 +380,7 @@ def test_aikit_version_is_older(tool_loader):
 def test_aikit_resolve_update_cmd_cursor(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "cursor-agent")
+    monkeypatch.setattr(m, "_installed_bin_path", lambda _key: None)
     assert m.resolve_update_cmd("cursor") == "cursor-agent update"
 
 
@@ -479,6 +480,7 @@ def test_aikit_curl_installed_agent_uninstall_cmds(tool_loader):
 def test_aikit_resolve_update_cmd_kilo(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "kilo")
+    monkeypatch.setattr(m, "_installed_bin_path", lambda _key: None)
     cmd = m.resolve_update_cmd("kilo")
     assert cmd and "npm install -g @kilocode/cli@latest" in cmd
     assert "--prefix" in cmd and ".local" in cmd
@@ -487,24 +489,28 @@ def test_aikit_resolve_update_cmd_kilo(tool_loader, monkeypatch):
 def test_aikit_resolve_update_cmd_opencode(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "opencode")
+    monkeypatch.setattr(m, "_installed_bin_path", lambda _key: None)
     assert m.resolve_update_cmd("opencode") == "opencode upgrade"
 
 
 def test_aikit_resolve_update_cmd_pi(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "pi")
+    monkeypatch.setattr(m, "_installed_bin_path", lambda _key: None)
     assert m.resolve_update_cmd("pi") == "pi update --self"
 
 
 def test_aikit_resolve_update_cmd_qwen(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "qwen")
+    monkeypatch.setattr(m, "_installed_bin_path", lambda _key: None)
     assert m.resolve_update_cmd("qwen") == "qwen upgrade"
 
 
 def test_aikit_resolve_update_cmd_blackbox(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "blackbox")
+    monkeypatch.setattr(m, "_installed_bin_path", lambda _key: None)
     assert m.resolve_update_cmd("blackbox") == "blackbox update"
 
 
@@ -660,11 +666,12 @@ def test_aikit_droid_registry_entry(tool_loader):
 def test_aikit_resolve_update_cmd_amp(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "amp")
+    monkeypatch.setattr(m, "_installed_bin_path", lambda _key: None)
     assert m.resolve_update_cmd("amp") == "amp update"
 
 
 def test_aikit_detect_install_manager_mise(tool_loader, monkeypatch, tmp_path):
-    """A mise-installed binary upgrades via mise, not the registry's self-update."""
+    """A mise-owned CLI updates through mise without an untracked native write."""
     m = tool_loader("aikit")
     monkeypatch.setattr(m.Path, "home", lambda: tmp_path)
     shim = tmp_path / ".local/share/mise/shims/claude"
@@ -676,6 +683,7 @@ def test_aikit_detect_install_manager_mise(tool_loader, monkeypatch, tmp_path):
     assert manager == "mise"
     assert cmd == "mise upgrade claude"
     assert m.resolve_update_cmd("claude") == "mise upgrade claude"
+    assert m._update_plan("claude")["commands"] == [["mise", "upgrade", "claude"]]
 
 
 def test_aikit_detect_install_manager_brew(tool_loader, monkeypatch, tmp_path):
@@ -685,8 +693,8 @@ def test_aikit_detect_install_manager_brew(tool_loader, monkeypatch, tmp_path):
     bin_path.write_text("binary")
     monkeypatch.setattr(m.shutil, "which", lambda name: str(bin_path) if name == "goose" else None)
     manager, cmd = m.detect_install_manager("goose")
-    assert manager == "brew"
-    assert cmd == "brew upgrade goose"
+    assert manager is None  # A directory named homebrew is not ownership evidence.
+    assert cmd is None
 
 
 def test_aikit_detect_install_manager_pipx(tool_loader, monkeypatch, tmp_path):
@@ -756,8 +764,8 @@ def test_aikit_detect_install_manager_npm_under_homebrew(tool_loader, monkeypatc
     shim.parent.mkdir(parents=True)
     shim.symlink_to(real)
     monkeypatch.setattr(m.shutil, "which", lambda name: str(shim) if name == "claude" else None)
-    assert m.detect_install_manager("claude") == (None, None)
-    assert m.resolve_update_cmd("claude") == "claude update"
+    assert m.detect_install_manager("claude")[0] == "npm"
+    assert m.resolve_update_cmd("claude") == f"{shim} update"
 
 
 def test_aikit_detect_install_manager_mise_xdg_relocation(tool_loader, monkeypatch, tmp_path):
@@ -781,7 +789,7 @@ def test_aikit_detect_install_manager_none_for_curl_install(tool_loader, monkeyp
     bin_path.write_text("binary")
     monkeypatch.setattr(m.shutil, "which", lambda name: str(bin_path) if name == "claude" else None)
     assert m.detect_install_manager("claude") == (None, None)
-    assert m.resolve_update_cmd("claude") == "claude update"
+    assert m.resolve_update_cmd("claude") == f"{bin_path} update"
 
 
 def test_aikit_gateway_cli_registry_entries(tool_loader):
@@ -816,6 +824,7 @@ def test_aikit_gateway_cli_registry_entries(tool_loader):
 def test_aikit_resolve_update_cmd_gemini(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "gemini")
+    monkeypatch.setattr(m, "_installed_bin_path", lambda _key: None)
     cmd = m.resolve_update_cmd("gemini")
     assert cmd and "@google/gemini-cli@latest" in cmd
 
@@ -823,6 +832,7 @@ def test_aikit_resolve_update_cmd_gemini(tool_loader, monkeypatch):
 def test_aikit_resolve_update_cmd_continue(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "cn")
+    monkeypatch.setattr(m, "_installed_bin_path", lambda _key: None)
     cmd = m.resolve_update_cmd("continue")
     assert cmd and "@continuedev/cli@latest" in cmd
 
@@ -1068,6 +1078,7 @@ def test_aikit_resolve_update_cmd_openhands_reinstall(tool_loader):
 def test_aikit_resolve_update_cmd_cline(tool_loader, monkeypatch):
     m = tool_loader("aikit")
     monkeypatch.setattr(m, "resolve_agent_bin", lambda _key: "cline")
+    monkeypatch.setattr(m, "_installed_bin_path", lambda _key: None)
     assert m.resolve_update_cmd("cline") == "cline update"
 
 

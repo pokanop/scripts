@@ -90,6 +90,49 @@ aikit setup
 | `aikit gateway on/off/status/coverage/models` | Route AI tools through a LiteLLM gateway — see **[gateway docs](aikit-gateway.md)** |
 | `aikit usage [providers...] [--json] [--all]` | Unified plan / credits / spend / rate-limit snapshot across providers — see below |
 
+### Updating existing installations
+
+`aikit update` inspects the executable you actually run. Standalone/npm/Bun
+installations prefer the registered native updater, with npm/Bun fallback when
+needed. Other managed installations use their owning manager exclusively, so a
+native updater cannot overwrite tracked files or desynchronize package receipts.
+It preserves npm/Bun install locations, pip interpreter ownership, and relocated
+pipx/uv roots. Homebrew, mise, Cargo, and pacman/AUR ownership comes from paths or
+installation metadata, not the OS name. Codex uses its manager or official installer;
+`codex update` is not a Codex subcommand.
+Bun updates use `bun install -g <package>@latest` with the detected package and
+executable directories passed through `BUN_INSTALL_GLOBAL_DIR` and `BUN_INSTALL_BIN`.
+
+Maintenance commands clear inherited Python/Node injection, shell startup hooks,
+Git repository overrides, and package destination overrides while retaining HOME,
+PATH, manager roots, proxy settings, and certificates. Native and manager commands
+use argument lists so executable paths are not interpreted as shell syntax.
+
+Every update re-resolves the executable and checks its version. A failed updater,
+missing/regressed version, or executable confirmed to be outdated exits **1** and
+reports the command, manager, active path, and other copies on PATH. An explicit
+“already up to date” check is successful. An ambiguous or failed check is unknown
+and does not skip the update; if the updater succeeds and the version stays the
+same, the result is **unchanged / check inconclusive**, with exit **0**. This does
+not claim that the installed version is current.
+`--force` bypasses the initial current-version check, but still verifies the result.
+
+For pacman/AUR packages, aikit reports the owning package and requires your full
+system update workflow (`omarchy update`, `sudo pacman -Syu`, or the appropriate
+`paru -Syu` / `yay -Syu` workflow), then a retry. It never runs an elevated partial
+package upgrade. If package repositories lag upstream, that difference remains
+visible in the update result.
+Unknown npm/pip ownership and custom Cargo sources produce an actionable failure
+instead of guessing another installation destination.
+
+Ownership probes are cached for up to 60 seconds while the executable and
+discovery environment remain unchanged. Every update refreshes ownership before
+it runs and invalidates the cache afterward. npm discovery retains configured
+prefixes; mutation still uses the detected destination under sanitized overrides.
+
+See [the mixed-installation regression dry run](aikit-update-reproduction.md) for
+the Omarchy reproduction and verification limits.
+
 ### Usage snapshot (`aikit usage`)
 
 `aikit usage` reads the credentials the CLIs already store on disk (OAuth tokens,
