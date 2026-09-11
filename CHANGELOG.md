@@ -99,6 +99,9 @@ Newest entries on top, within each tool.
   failures (manager retry) from timeouts (stop).
 - Report pacman/AUR owners with full-system update instructions; never run
   elevated partial package upgrades. Bound dashboard error output to 500 characters.
+- Fix Bun updates to use supported `BUN_INSTALL_GLOBAL_DIR`/`BUN_INSTALL_BIN`
+  overrides with `bun install -g`, preserving default and relocated destinations
+  without unsupported CLI flags; verified with Bun 1.3.14 and Oh My Pi.
 
 ### 1.19.0 — 2026-09-09
 - **New `aikit usage [providers...] [--json] [--all]`** — a unified snapshot of

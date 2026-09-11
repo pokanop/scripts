@@ -100,6 +100,8 @@ It preserves npm/Bun install locations, pip interpreter ownership, and relocated
 pipx/uv roots. Homebrew, mise, Cargo, and pacman/AUR ownership comes from paths or
 installation metadata, not the OS name. Codex uses its manager or official installer;
 `codex update` is not a Codex subcommand.
+Bun updates use `bun install -g <package>@latest` with the detected package and
+executable directories passed through `BUN_INSTALL_GLOBAL_DIR` and `BUN_INSTALL_BIN`.
 
 Maintenance commands clear inherited Python/Node injection, shell startup hooks,
 Git repository overrides, and package destination overrides while retaining HOME,

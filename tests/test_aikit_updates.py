@@ -57,8 +57,39 @@ def test_omp_bun_install_is_updated_in_place(aikit, monkeypatch, tmp_path):
     manager, command = aikit.detect_install_manager("omp")
     assert manager == "bun"
     assert "@oh-my-pi/pi-coding-agent@latest" in shlex.split(command)
-    assert str(root / "install/global") in shlex.split(command)
+    assert aikit._update_plan("omp")["env"]["BUN_INSTALL_GLOBAL_DIR"] == str(root / "install/global")
     assert aikit.resolve_update_cmd("omp") == command
+
+
+@pytest.mark.parametrize("relocated", [False, True])
+def test_bun_update_accepts_only_supported_flags_and_preserves_destinations(aikit, monkeypatch, tmp_path, relocated):
+    root = tmp_path / "custom packages" if relocated else tmp_path / ".bun/install/global"
+    bin_dir = tmp_path / "custom binaries" if relocated else tmp_path / ".bun/bin"
+    package = root / "node_modules/@oh-my-pi/pi-coding-agent"
+    version = package / "version"
+    binary = executable(package / "cli.js", f"/bin/cat {shlex.quote(str(version))}\n")
+    version.write_text("18.1.15")
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "omp").symlink_to(binary)
+    if relocated:
+        monkeypatch.setenv("BUN_INSTALL_GLOBAL_DIR", str(root))
+    else:
+        # A conflicting inherited destination must not redirect the update.
+        monkeypatch.setenv("BUN_INSTALL_GLOBAL_DIR", str(tmp_path / "wrong packages"))
+    monkeypatch.setenv("BUN_INSTALL_BIN", str(tmp_path / "wrong bin"))
+    executable(bin_dir / "bun", f'''if [ "$#" -ne 3 ] || [ "$1" != install ] || [ "$2" != -g ] || [ "$3" != @oh-my-pi/pi-coding-agent@latest ]; then
+  echo 'Unsupported bun install arguments' >&2; exit 64
+fi
+[ "$BUN_INSTALL_GLOBAL_DIR" = {shlex.quote(str(root))} ] || exit 65
+[ "$BUN_INSTALL_BIN" = {shlex.quote(str(bin_dir))} ] || exit 66
+echo 18.1.17 > "$BUN_INSTALL_GLOBAL_DIR/node_modules/@oh-my-pi/pi-coding-agent/version"
+''')
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setattr(aikit, "fetch_latest_version", lambda _: "18.1.17")
+    assert aikit.do_update(["omp"], force=True) == 0
+    assert aikit.detect_agent_version("omp") == "18.1.17"
+    assert not (tmp_path / "wrong packages").exists()
+    assert not (tmp_path / "wrong bin").exists()
 
 
 def test_hermes_unrecognized_check_is_unknown_not_current(aikit, monkeypatch, tmp_path):
@@ -346,7 +377,7 @@ def test_bun_isolated_linker_uses_global_root_and_package(aikit, monkeypatch, tm
     manager, command = aikit.detect_install_manager("omp")
     assert manager == "bun"
     assert "@oh-my-pi/pi-coding-agent@latest" in shlex.split(command)
-    assert str(root) in shlex.split(command)
+    assert aikit._update_plan("omp")["env"]["BUN_INSTALL_GLOBAL_DIR"] == str(root)
 
 
 def test_paths_with_shell_metacharacters_are_passed_as_argv(aikit, monkeypatch, tmp_path):

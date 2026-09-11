@@ -1731,18 +1731,20 @@ def _node_installation(bin_path):
                 continue
             global_dir = tree.parent
             if bun_root:
-                return "bun", [
-                    "bun", "install", "-g", package + "@latest",
-                    "--global-dir", bun_root, "--global-bin-dir", bin_path.parent,
-                ]
+                # Bun exposes these destinations through environment variables,
+                # not install flags. Pin both to the active installation.
+                return "bun", ["bun", "install", "-g", package + "@latest"], {
+                    "BUN_INSTALL_GLOBAL_DIR": str(bun_root),
+                    "BUN_INSTALL_BIN": str(bin_path.parent),
+                }
             if global_dir.name == "lib":
                 prefix = global_dir.parent
             elif bin_path.parent == global_dir:  # npm on Windows
                 prefix = global_dir
             else:
                 continue  # local project dependency, not a global install
-            return "npm", ["npm", "install", "-g", package + "@latest", "--prefix", str(prefix)]
-    return None, None
+            return "npm", ["npm", "install", "-g", package + "@latest", "--prefix", str(prefix)], {}
+    return None, None, {}
 
 
 def _python_installation(bin_path):
@@ -1847,9 +1849,9 @@ def _probe_manager_installation(bin_path):
                 continue  # mise owns the runtime, not packages installed in it
             return "mise", ["mise", "upgrade", tool], {}, ""
 
-    manager, command = _node_installation(bin_path)
+    manager, command, env = _node_installation(bin_path)
     if manager:
-        return manager, command, {}, ""
+        return manager, command, env, ""
 
     # Include relocated manager homes and pin them for the update subprocess.
     for manager, variable, marker, subdir in (

@@ -71,12 +71,32 @@ regressions failed at `41073fa` before the fixes. pacman/AUR fixtures now assert
 read-only ownership queries and a full-system update instruction instead of
 simulating partial package upgrades.
 
+## Bun 1.3.14 invocation correction
+
+Live QA at `c69a106` found that `--global-dir` and `--global-bin-dir` are not
+`bun install` flags. The earlier permissive manager stubs accepted those invalid
+arguments, so fixture upgrades passed while actual Bun updates failed.
+
+Updates now run `bun install -g <package>@latest` and pass the detected directories
+through `BUN_INSTALL_GLOBAL_DIR` and `BUN_INSTALL_BIN`, as documented in
+[Bun 1.3.14's configuration reference](https://github.com/oven-sh/bun/blob/bun-v1.3.14/docs/runtime/bunfig.mdx).
+The strict regression rejects unknown arguments, checks both destination variables,
+and updates the executable's version for default and relocated installations.
+Both cases failed before this correction.
+
+Separate live runs with real Bun 1.3.14 installed Oh My Pi 18.1.15 into disposable
+default and relocated layouts (including directory names with spaces), then
+invoked aikit's update path: both upgraded to 18.1.17, exited 0, and re-resolved
+the same executable path. No shared user installation was changed.
+
 ## Limits
 
-The dry run was executed on Linux. Windows shim/argument construction and macOS
-Homebrew layouts have fixture coverage, but native Windows/macOS execution and a
-live Omarchy upgrade were not performed. Package repositories may publish later
-than upstream releases; aikit reports that discrepancy instead of claiming success.
+Tests and live checks were executed on Linux. Independent QA at `c69a106` also
+verified real Arch pacman/AUR ownership without package mutation, npm Codex
+0.153.4 → 0.154.0, standalone Grok updates, mise ownership, Linuxbrew Cask routing,
+and dashboard outcomes. Native Windows/macOS execution and true Omarchy hardware
+remain unverified. Package repositories may publish later than upstream releases;
+aikit reports that discrepancy instead of claiming success.
 Custom Cargo sources and installations whose owner cannot be proved need their
 original installation workflow; aikit does not silently migrate them.
 pacman/AUR-owned agents also require the full system update workflow outside
