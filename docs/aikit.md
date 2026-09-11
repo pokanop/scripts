@@ -81,7 +81,7 @@ aikit setup
 | `aikit setup` | Interactive first-run wizard |
 | `aikit install [agents...]` | Install agents (multi-select picker if none) |
 | `aikit update [agents...]` | Update agents (all installed if none) |
-| `aikit uninstall [agent...]` | Remove agents |
+| `aikit uninstall [agent...] [--dry-run]` | Remove agents (`--dry-run` prints the commands without running them; no keys = preview all installed) |
 | `aikit list` | Status table of all 38 agents |
 | `aikit auth [agent] [--force]` | Guided authentication setup; `--force` replaces cached auth status and signs in again |
 | `aikit doctor` | Diagnose environment and agent health |
