@@ -79,6 +79,12 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 2.0.1 — 2026-09-11
+- Stop rendering the Cursor/Grok bare-`agent` collision warning in `aikit list`
+  (and bare `aikit`, which defaults to `list`) where it read as noisy output
+  (POK-392). The heads-up stays where it's actionable: `aikit install` results
+  and the `aikit doctor` tips section. Commands, flags, and exit codes are unchanged.
+
 ### 2.0.0 — 2026-09-10
 - ⚠ `aikit update` now exits 1 for updater errors or a confirmed outdated
   executable; the dashboard also returns `success: false`.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v2.0.0
+aikit — AI Coding Agent CLI Installer & Manager  v2.0.1
 Install, update, authenticate, and manage 38 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -57,7 +57,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "2.0.0"
+__version__ = "2.0.1"
 
 import scriptkit as sk
 
@@ -2741,8 +2741,6 @@ def print_agent_table(agent_keys=None):
     console.print(table)
     if upgrades:
         sk.info(f"{upgrades} upgrade(s) available — run [bold]aikit update[/bold]")
-    for warning in agent_bin_collision_warnings():
-        sk.warning(warning)
 
 
 # =============================================================================
