@@ -630,10 +630,13 @@ def test_aikit_openclaw_registry_entry(tool_loader):
     # POK-317: openclaw must have a version_check — install.sh wraps
     # `npm install -g openclaw`, so the npm registry is the version source.
     assert openclaw["version_check"] == {"type": "npm", "package": "openclaw"}
-    # Curl-installed npm-published agent: explicit uninstall stays non-npm-derived.
+    # POK-314: install.sh wraps `npm install -g`, so the explicit uninstall
+    # must run npm uninstall (what aikit actually installed) AND clean the
+    # shim + vendor dirs the previous shim-only uninstall left behind.
     cmd = m.resolve_uninstall_cmd(openclaw)
-    assert cmd and "npm uninstall -g openclaw" not in cmd
+    assert cmd and "npm uninstall -g openclaw" in cmd
     assert ".openclaw" in cmd
+    assert ".local/bin/openclaw" in cmd
 
 
 def test_aikit_every_agent_has_version_check(tool_loader):
@@ -1009,19 +1012,18 @@ def test_aikit_goose_uninstall_uses_brew_only_for_homebrew_install(tool_loader, 
 
 def test_aikit_npm_agent_uninstall_derived_from_version_check(tool_loader):
     # POK-87: npm agents omit explicit uninstall_cmd; npm uninstall is derived.
+    # POK-314: qwen/blackbox/amp/continue moved to the explicit-uninstall
+    # contract test — their installs are curl-based (or npm-wrapping), so the
+    # derived form was wrong or incomplete.
     m = tool_loader("aikit")
     npm_agents = [
         ("kilo", "@kilocode/cli"),
         ("opencode", "opencode-ai"),
-        ("qwen", "@qwen-code/qwen-code"),
         ("qodo", "@qodo/command"),
         ("pi", "@earendil-works/pi-coding-agent"),
-        ("blackbox", "@blackboxai/cli"),
         ("cline", "cline"),
         ("crush", "@charmland/crush"),
-        ("amp", "@ampcode/cli"),
         ("gemini", "@google/gemini-cli"),
-        ("continue", "@continuedev/cli"),
         ("auggie", "@augmentcode/auggie"),
     ]
     for key, package in npm_agents:
@@ -1031,18 +1033,45 @@ def test_aikit_npm_agent_uninstall_derived_from_version_check(tool_loader):
         assert cmd and f"npm uninstall -g {package}" in cmd, key
 
 
-def test_aikit_curl_installed_npm_version_check_agents_have_explicit_uninstall(tool_loader):
-    # POK-313 review: curl-installed agents that ALSO publish to npm (and so use
-    # the npm version_check) must NOT rely on the derived `npm uninstall -g` —
-    # the curl installer didn't install via npm, so the derived uninstall would
-    # be a no-op against aikit's own install. Each such agent sets an explicit
-    # `uninstall_cmd` that removes the real install footprint (vendor dir + binary).
+def test_aikit_curl_installed_npm_version_check_agents_have_explicit_uninstall(tool_loader, monkeypatch):
+    # POK-313 review / POK-314 audit: curl-installed agents that ALSO publish
+    # to npm (and so use the npm version_check) must NOT rely on the derived
+    # `npm uninstall -g` — the curl installer didn't install via npm, so the
+    # derived uninstall would be a no-op against aikit's own install. Each
+    # such agent sets an explicit `uninstall_cmd` that removes the real
+    # install footprint (binary + vendor dirs). POK-314 enumerated the family
+    # from the installers themselves; every member is pinned here.
     m = tool_loader("aikit")
+    # Deterministic npm state: pretend no global prefix holds these packages,
+    # so the qwen/qoder alternate-channel npm cleanup is absent and the "no
+    # derived npm uninstall" assertion cannot flake on a machine that happens
+    # to have one of them npm-installed.
+    monkeypatch.setattr(m, "_npm_global_prefixes", lambda: [])
     cases = [
-        # (key,        expected_in_cmd,                       vendor_dir_in_cmd)
-        ("mimo", ".mimocode/bin/mimo", ".mimocode"),
-        ("omp",  ".local/bin/omp",      ".omp"),
+        # (key,       expected_in_cmd,        vendor_dir_in_cmd)
+        ("mimo",     ".mimocode/bin/mimo",    ".mimocode"),
+        ("omp",      ".local/bin/omp",        ".omp"),
+        ("roo",      ".local/bin/roo",        ".roo"),
+        ("qoder",    ".local/bin/qoder",      ".qoder"),
+        ("qwen",     ".local/lib/qwen-code",  ".qwen"),
+        ("blackbox", ".blackbox-cli-v2",      ".blackbox"),
+        ("amp",      ".local/bin/amp",        ".amp"),
     ]
+    # Drift protection (review follow-up): recompute the family from the live
+    # registry so the next curl-installed agent with an npm version_check
+    # fails here until it is classified — the exact gap that let roo/qoder
+    # drift past the POK-313 version of this test.
+    def _install_cmds(agent):
+        ic = agent.get("install", {})
+        return [str(c) for c in ic.values()] if isinstance(ic, dict) else [str(ic)]
+
+    enumerated = {
+        key for key, agent in m.AGENTS.items()
+        if any(c.startswith("curl") for c in _install_cmds(agent))
+        and agent.get("version_check", {}).get("type") == "npm"
+    }
+    assert enumerated == {c[0] for c in cases} | {"continue", "openclaw"}, sorted(enumerated)
+
     for key, expected_path_bit, vendor_dir in cases:
         agent = m.AGENTS[key]
         # 1. Explicit uninstall_cmd is set (not derived from the npm version_check).
@@ -1053,10 +1082,27 @@ def test_aikit_curl_installed_npm_version_check_agents_have_explicit_uninstall(t
         cmd = m.resolve_uninstall_cmd(agent)
         assert cmd and expected_path_bit in cmd, f"{key}: {cmd!r} missing {expected_path_bit}"
         assert vendor_dir in cmd, f"{key}: {cmd!r} missing vendor dir {vendor_dir}"
+        assert m.uninstall_removes_vendor_data(cmd), f"{key}: vendor data survives uninstall"
         # 4. Critically: the derived `npm uninstall -g …` is NOT what we run.
         npm_pkg = agent["version_check"]["package"]
         assert f"npm uninstall -g {npm_pkg}" not in cmd, (
             f"{key}: curl install wasn't npm-based; derived npm uninstall would no-op")
+
+    # Sub-family: curl installers that wrap `npm install -g` (verified from
+    # their install.sh — continue, openclaw). npm uninstall IS the removal of
+    # what aikit installed; the explicit cmd exists to add the vendor-dir
+    # cleanup the derived form lacked.
+    for key, npm_pkg, vendor_dir in [
+        ("continue", "@continuedev/cli", ".continue"),
+        ("openclaw", "openclaw", ".openclaw"),
+    ]:
+        agent = m.AGENTS[key]
+        assert "uninstall_cmd" in agent, f"{key} must set explicit uninstall_cmd"
+        assert agent["version_check"]["type"] == "npm", key
+        cmd = m.resolve_uninstall_cmd(agent)
+        assert cmd and f"npm uninstall -g {npm_pkg}" in cmd, f"{key}: {cmd!r} missing npm removal"
+        assert vendor_dir in cmd, f"{key}: {cmd!r} missing vendor dir {vendor_dir}"
+        assert m.uninstall_removes_vendor_data(cmd), f"{key}: vendor data survives uninstall"
 
 
 def test_aikit_explicit_uninstall_cmd_none_blocks_npm_derivation(tool_loader):
@@ -1067,6 +1113,55 @@ def test_aikit_explicit_uninstall_cmd_none_blocks_npm_derivation(tool_loader):
         "uninstall_cmd": None,
     }
     assert m.resolve_uninstall_cmd(agent) is None
+
+
+def test_aikit_uninstall_dry_run_previews_without_executing(tool_loader, monkeypatch, capsys):
+    # POK-314: `aikit uninstall --dry-run` previews the resolved uninstall
+    # commands and must not execute anything (no prompts, no config writes).
+    m = tool_loader("aikit")
+    executed = []
+    monkeypatch.setattr(m, "_npm_global_prefixes", lambda: [])
+    monkeypatch.setattr(m, "run", lambda cmd, **kw: executed.append(cmd) or (0, "", ""))
+    monkeypatch.setattr(m, "save_config", lambda cfg: None)
+    monkeypatch.setattr(m, "discover_and_persist", lambda: None)
+    rc = m.do_uninstall(["qwen", "blackbox", "amp", "continue"], yes=False, dry_run=True)
+    assert rc == 0
+    assert executed == []
+    out = capsys.readouterr().out
+    assert ".local/lib/qwen-code" in out
+    assert ".blackbox-cli-v2" in out
+    assert "$HOME/.amp" in out
+    assert "$HOME/.continue" in out
+    assert "removes vendor config/data" in out
+
+
+def test_aikit_uninstall_dry_run_without_keys_previews_installed(tool_loader, monkeypatch, capsys):
+    # Review follow-up: `aikit uninstall --dry-run` with no agent keys must
+    # preview every installed agent non-interactively — no picker, and nothing
+    # for agents that aren't installed.
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "_npm_global_prefixes", lambda: [])
+    monkeypatch.setattr(m, "detect_agent_bin", lambda key: key in ("qwen", "amp"))
+    monkeypatch.setattr(
+        m, "interactive_agent_picker",
+        lambda *a, **kw: pytest.fail("dry-run without keys must not open the picker"),
+    )
+    rc = m.do_uninstall([], yes=False, dry_run=True)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Qwen Code" in out and "Amp" in out
+    assert "Blackbox" not in out
+
+
+def test_aikit_uninstall_dry_run_without_keys_none_installed(tool_loader, monkeypatch, capsys):
+    m = tool_loader("aikit")
+    monkeypatch.setattr(m, "detect_agent_bin", lambda _key: False)
+    monkeypatch.setattr(
+        m, "interactive_agent_picker",
+        lambda *a, **kw: pytest.fail("dry-run without keys must not open the picker"),
+    )
+    assert m.do_uninstall([], yes=False, dry_run=True) is None
+    assert "No agents installed." in capsys.readouterr().out
 
 
 def test_aikit_resolve_update_cmd_openhands_reinstall(tool_loader):

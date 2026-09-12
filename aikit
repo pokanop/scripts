@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-aikit — AI Coding Agent CLI Installer & Manager  v2.0.1
+aikit — AI Coding Agent CLI Installer & Manager  v2.1.0
 Install, update, authenticate, and manage 38 AI coding agent CLIs from one tool.
 
 Architecture:
@@ -57,7 +57,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "2.0.1"
+__version__ = "2.1.0"
 
 import scriptkit as sk
 
@@ -264,15 +264,82 @@ def roo_uninstall_cmd():
     return binary_uninstall_cmd("roo", vendor_dirs=["$HOME/.roo"])
 
 
+def _npm_channel_cleanup_cmds(package):
+    """npm uninstall commands for an alternate npm install channel — emitted
+    only for global prefixes where the package is actually present, so a
+    curl-installed primary footprint is never treated as an npm install."""
+    cmds = []
+    for prefix in _npm_global_prefixes():
+        if _npm_package_dir(prefix, package).exists():
+            cmds.append(f"npm uninstall -g {package} --prefix {shlex.quote(str(prefix))}")
+    return cmds
+
+
 def qoder_uninstall_cmd():
     """Qoder CLI: the curl installer drops a self-contained binary (npm is only an
     alternate channel), so remove the binary plus ~/.qoder; fall back to npm
     uninstall when the package is present in a global prefix."""
-    parts = [binary_uninstall_cmd("qoder", vendor_dirs=["$HOME/.qoder"])]
-    for prefix in _npm_global_prefixes():
-        if _npm_package_dir(prefix, "@qoder-ai/qodercli").exists():
-            parts.insert(0, f"npm uninstall -g @qoder-ai/qodercli --prefix {shlex.quote(str(prefix))}")
+    parts = _npm_channel_cleanup_cmds("@qoder-ai/qodercli")
+    parts.append(binary_uninstall_cmd("qoder", vendor_dirs=["$HOME/.qoder"]))
     return " ; ".join(parts)
+
+
+def qwen_uninstall_cmd():
+    """Qwen Code: the standalone curl installer unpacks a self-contained tree
+    (bin/qwen + a bundled node runtime) to ~/.local/lib/qwen-code and a wrapper
+    at ~/.local/bin/qwen — not an npm global install despite the npm
+    version_check (npm is only the installer's fallback channel), so derive
+    nothing. Remove the tree, the wrapper and the ~/.qwen / XDG state dirs the
+    agent and aikit's discover_auth reference; fall back to npm uninstall only
+    when the package is present in a global prefix."""
+    parts = _npm_channel_cleanup_cmds("@qwen-code/qwen-code")
+    parts.append(
+        binary_uninstall_cmd(
+            "qwen",
+            vendor_dirs=["$HOME/.local/lib/qwen-code", "$HOME/.qwen", "$HOME/.config/qwen"],
+        ),
+    )
+    return " ; ".join(parts)
+
+
+def blackbox_uninstall_cmd():
+    """Blackbox CLI v2: the curl installer unzips a self-contained tree to
+    ~/.blackbox-cli-v2 (its npm dependency installs run *inside* that tree —
+    never a global npm install, despite the npm version_check) and writes
+    wrapper scripts to ~/.local/bin, so derive nothing. Remove the install
+    tree, both wrappers and the config dirs aikit's discover_auth reads."""
+    return binary_uninstall_cmd(
+        "blackbox",
+        extra_paths=["$HOME/.local/bin/blackbox.mjs"],
+        vendor_dirs=["$HOME/.blackbox-cli-v2", "$HOME/.blackbox", "$HOME/.blackboxai", "$HOME/.blackboxcli"],
+    )
+
+
+def amp_uninstall_cmd():
+    """Amp: the curl installer drops a self-contained binary at ~/.amp/bin/amp
+    and symlinks it into PATH (~/.local/bin preferred; ~/bin and ~/.bin are
+    alternates) — not an npm install despite the npm version_check, so derive
+    nothing. Remove the binary, the symlinks and the ~/.amp / ~/.config/amp
+    trees the installer and aikit's discover_auth reference."""
+    return binary_uninstall_cmd(
+        "amp",
+        extra_paths=["$HOME/bin/amp", "$HOME/.bin/amp"],
+        vendor_dirs=["$HOME/.amp", "$HOME/.config/amp"],
+    )
+
+
+def openclaw_uninstall_cmd():
+    """OpenClaw: install.sh wraps `npm install -g openclaw` (its --version flag
+    takes an npm dist-tag/spec, hence the npm version_check), so npm uninstall
+    IS the removal for what aikit installed. Also remove the PATH shims and
+    the state dirs the agent and aikit's discover_auth reference."""
+    return " ; ".join([
+        npm_uninstall_cmd("openclaw"),
+        binary_uninstall_cmd(
+            "openclaw",
+            vendor_dirs=["$HOME/.openclaw", "$HOME/.claw", "$HOME/.config/openclaw"],
+        ),
+    ])
 
 
 def grok_uninstall_cmd():
@@ -513,6 +580,10 @@ AGENTS = {
         "update_cmd": "qwen upgrade",
         "path_markers": ["/.qwen/", "qwen-code"],
         "version_check": {"type": "npm", "package": "@qwen-code/qwen-code"},
+        # Explicit uninstall: the curl install is the standalone tree under
+        # ~/.local/lib/qwen-code, not an npm global, so the npm-derived
+        # uninstall would no-op against aikit's own install (POK-314).
+        "uninstall_cmd": qwen_uninstall_cmd,
         "auth_type": "account_or_byok",
         "auth_env_vars": ["DASHSCOPE_API_KEY", "BAILIAN_CODING_PLAN_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
         "auth_note": "Run 'qwen' and use '/auth' for Qwen OAuth, Coding Plan, or API keys. Or configure ~/.qwen/settings.json / env vars.",
@@ -821,10 +892,9 @@ AGENTS = {
         # install.sh wraps `npm install -g openclaw` (its --version flag takes an
         # npm dist-tag/spec), so the npm registry is the canonical version source.
         "version_check": {"type": "npm", "package": "openclaw"},
-        "uninstall_cmd": binary_uninstall_cmd(
-            "openclaw",
-            vendor_dirs=["$HOME/.openclaw", "$HOME/.claw", "$HOME/.config/openclaw"],
-        ),
+        # POK-314: the installer's npm global tree survived the shim-only
+        # uninstall — run npm uninstall first, then the shim/vendor cleanup.
+        "uninstall_cmd": openclaw_uninstall_cmd,
         "auth_type": "oauth_onboard",
         "auth_env_vars": ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
         "auth_note": "Run 'openclaw onboard' for guided setup and auth.",
@@ -846,6 +916,10 @@ AGENTS = {
         "update_cmd": "blackbox update",
         "path_markers": ["blackbox", "/.blackbox"],
         "version_check": {"type": "npm", "package": "@blackboxai/cli"},
+        # Explicit uninstall: the curl install unzips ~/.blackbox-cli-v2 with
+        # its deps vendored inside — nothing lands in an npm global, so the
+        # npm-derived uninstall would no-op (POK-314).
+        "uninstall_cmd": blackbox_uninstall_cmd,
         "auth_type": "api_key",
         "auth_env_vars": ["BLACKBOX_API_KEY"],
         "auth_note": "Get API key from https://app.blackbox.ai/dashboard then run 'blackbox configure'.",
@@ -956,6 +1030,9 @@ AGENTS = {
         "update_cmd": "amp update",
         "path_markers": ["/.config/amp", "@ampcode/cli"],
         "version_check": {"type": "npm", "package": "@ampcode/cli"},
+        # Explicit uninstall: the curl install drops ~/.amp/bin/amp, not an
+        # npm global, so the npm-derived uninstall would no-op (POK-314).
+        "uninstall_cmd": amp_uninstall_cmd,
         "auth_type": "oauth_browser",
         "auth_env_vars": ["AMP_API_KEY"],
         "auth_cmd": "amp login",
@@ -1021,6 +1098,10 @@ AGENTS = {
         "update_cmd": npm_install_cmd("@continuedev/cli@latest"),
         "path_markers": ["@continuedev/cli", "/.continue/"],
         "version_check": {"type": "npm", "package": "@continuedev/cli"},
+        # install.sh wraps `npm install -g @continuedev/cli`, so npm uninstall
+        # removes what aikit installed; the explicit cmd exists to also clean
+        # the ~/.continue config tree the derived form left behind (POK-314).
+        "uninstall_cmd": lambda: npm_uninstall_cmd("@continuedev/cli") + " ; rm -rf $HOME/.continue",
         "auth_type": "oauth_browser",
         "auth_env_vars": ["ANTHROPIC_API_KEY"],
         "auth_cmd": "cn login",
@@ -2988,35 +3069,52 @@ def _do_update_impl(agent_keys, *, force=False):
     return 1 if failed or unchanged_outdated else 0
 
 
-def do_uninstall(agent_keys, yes=False):
-    """Uninstall agents.
+def do_uninstall(agent_keys, yes=False, dry_run=False):
+    """Uninstall agents (or preview the uninstall commands with ``dry_run``).
 
     Returns the count of installed agents that had no automated uninstall
     command (i.e. were not removed). Callers should exit non-zero when > 0.
     """
     try:
-        return _do_uninstall_impl(agent_keys, yes)
+        return _do_uninstall_impl(agent_keys, yes, dry_run)
     except KeyboardInterrupt:
         console.print("\n[yellow]⏹ Uninstall interrupted.[/yellow]")
         sys.exit(130)
 
 
-def _do_uninstall_impl(agent_keys, yes):
+def _do_uninstall_impl(agent_keys, yes, dry_run=False):
     if not agent_keys:
         installed = [k for k in AGENTS if detect_agent_bin(k)]
         if not installed:
             print_warning("No agents installed.")
             return
-        try:
-            agent_keys = interactive_agent_picker("Select agents to uninstall", preselect_installed=True)
-        except KeyboardInterrupt:
-            console.print("\n[yellow]⏹ Cancelled.[/yellow]")
-            return
+        if dry_run:
+            # No keys + --dry-run: preview every installed agent non-interactively
+            # instead of opening the picker (nothing destructive is pending).
+            agent_keys = installed
+        else:
+            try:
+                agent_keys = interactive_agent_picker("Select agents to uninstall", preselect_installed=True)
+            except KeyboardInterrupt:
+                console.print("\n[yellow]⏹ Cancelled.[/yellow]")
+                return
 
     if not agent_keys:
         return
 
     validate_agent_keys(agent_keys)
+
+    if dry_run:
+        for i, key in enumerate(agent_keys, 1):
+            agent = AGENTS[key]
+            uninstall_cmd = resolve_uninstall_cmd(agent)
+            if not uninstall_cmd:
+                print_warning(f"{agent['icon']} {agent['name']} has no automated uninstall — remove manually")
+                continue
+            note = " (removes vendor config/data)" if uninstall_removes_vendor_data(uninstall_cmd) else ""
+            print_step(i, len(agent_keys), f"Would uninstall {agent['icon']} {agent['name']}{note}")
+            console.print(f"  [dim]{uninstall_cmd}[/dim]")
+        return 0
 
     vendor_cleanup_keys = [
         key for key in agent_keys
@@ -7566,6 +7664,9 @@ def build_parser():
     uninstall_p.add_argument("agents", nargs="*", help="Agent keys to uninstall (none = interactive picker)")
     uninstall_p.add_argument("-y", "--yes", action="store_true",
                              help="Skip confirmations (including vendor config/data removal)")
+    uninstall_p.add_argument("--dry-run", action="store_true",
+                             help="Print the uninstall commands instead of running them "
+                                  "(no agent keys = preview all installed agents)")
 
     # list
     sub.add_parser("list", help="Show all agents and installation status")
@@ -7657,7 +7758,7 @@ def cmd_update(args):
 
 
 def cmd_uninstall(args):
-    no_uninstall_cmd = do_uninstall(args.agents, yes=args.yes)
+    no_uninstall_cmd = do_uninstall(args.agents, yes=args.yes, dry_run=args.dry_run)
     return 1 if no_uninstall_cmd else None
 
 

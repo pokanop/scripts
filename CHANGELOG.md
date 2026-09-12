@@ -79,6 +79,38 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 2.1.0 — 2026-09-10
+- **New `aikit uninstall --dry-run`** — prints each agent's resolved uninstall
+  command (with a vendor-config/data note) without executing anything or
+  prompting. Built for auditing registry changes like the ones below. With no
+  agent keys it previews every installed agent instead of opening the picker.
+- **Fix: curl-installed agents with an npm `version_check` now uninstall what
+  aikit actually installed (POK-314).** The whole family was audited against
+  each vendor's install script; `qwen`, `blackbox` and `amp` install a
+  standalone footprint (never an npm global), so the npm-derived
+  `npm uninstall -g` was a no-op against aikit's own install:
+  - **qwen** — removes `~/.local/lib/qwen-code` (standalone tree with a
+    bundled node runtime), the `~/.local/bin/qwen` wrapper, and the
+    `~/.qwen` / `~/.config/qwen` state dirs; npm uninstall only when the
+    installer's npm-fallback channel actually left a global copy.
+  - **blackbox** — removes `~/.blackbox-cli-v2` (the curl installer vendors
+    its npm deps *inside* that tree) plus both `~/.local/bin/blackbox{,.mjs}`
+    wrappers and the `~/.blackbox` / `~/.blackboxai` / `~/.blackboxcli`
+    config dirs discover_auth reads.
+  - **amp** — removes `~/.amp` (binary at `~/.amp/bin/amp`), its PATH symlinks
+    (`~/.local/bin`, `~/bin`, `~/.bin`) and `~/.config/amp`.
+  - **continue** — install.sh wraps `npm install -g @continuedev/cli`, so the
+    npm uninstall stays and now also cleans `~/.continue`.
+  - **openclaw** — install.sh wraps `npm install -g openclaw`; the previous
+    shim-only uninstall left the npm tree behind, so npm uninstall now runs
+    first, followed by the shim + vendor-dir cleanup.
+  All nine family members (including POK-313's `mimo`/`omp` and the later
+  `roo`/`qoder`) are pinned in
+  `test_aikit_curl_installed_npm_version_check_agents_have_explicit_uninstall`,
+  which also recomputes the family from the live registry so the next
+  curl+npm agent can't silently escape the contract; qoder's conditional
+  npm-channel cleanup was factored into a shared helper reused by qwen.
+
 ### 2.0.1 — 2026-09-11
 - Stop rendering the Cursor/Grok bare-`agent` collision warning in `aikit list`
   (and bare `aikit`, which defaults to `list`) where it read as noisy output
