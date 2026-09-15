@@ -154,8 +154,15 @@ jobs:
 
       - name: Check whether this commit is still the branch tip
         id: tip
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          tip="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" "refs/heads/${GITHUB_REF_NAME}" | cut -f1)"
+          # Anonymous git ls-remote returns nothing for PRIVATE repos from
+          # GitHub-hosted runners — it silently forced is_tip=false and froze
+          # the :latest tag (doctopus incident 2026-09-15). Use the GitHub API
+          # with the job token instead: works for private repos, no creds on
+          # the command line.
+          tip="$(gh api "repos/${GITHUB_REPOSITORY}/branches/${GITHUB_REF_NAME}" --jq .commit.sha)"
           if [ "${tip}" = "${GITHUB_SHA}" ]; then
             echo "is_tip=true" >> "${GITHUB_OUTPUT}"
           else
