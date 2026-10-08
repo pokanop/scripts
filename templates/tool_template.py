@@ -22,14 +22,7 @@ import os
 import sys
 from pathlib import Path
 
-# Make `scriptkit` importable regardless of where this file is invoked from:
-# walk up from the file's real location to the toolkit root that holds it.
-_here = Path(__file__).resolve().parent
-for _base in (_here, *_here.parents):
-    if (_base / "scriptkit" / "__init__.py").exists():
-        sys.path.insert(0, str(_base))
-        break
-
+# Installed external runtime; no source-tree or working-directory bootstrap.
 import scriptkit as sk
 
 __version__ = "0.1.0"

@@ -816,6 +816,10 @@ Newest entries on top, within each tool.
 
 ## scripts
 
+### 1.2.2 — 2026-10-08
+- Install the verified external ScriptKit 1.3.0 release; preserve bare-Python repair and remove legacy wheel ownership before reinstalling runtime files.
+- Consumer package 1.1.0 is dependency-only: no bundled `scriptkit` modules or template ancestor search. Existing tool CLI/config/wrapper behavior is unchanged.
+
 ### 1.2.1 — 2026-06-27
 - `doctor` Bitwarden CLI hint now recommends the native binary (GitHub releases,
   Homebrew, Chocolatey, snap) instead of npm.

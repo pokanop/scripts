@@ -1,2 +1,4 @@
+-c runtime-constraints.txt
+pokanop-scriptkit>=1.3.0,<1.4
 rich>=13.9.4,<14
 requests

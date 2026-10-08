@@ -4,12 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pokanop-scripts"
-version = "1.0.0"
+version = "1.1.0"
 description = "Daily-use CLI utilities — medcat, keyferry, voxtract, netsy, pluck, aikit"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = [
+    "pokanop-scriptkit @ https://github.com/pokanop/scriptkit/releases/download/runtime-1.3.0-7c17061/pokanop_scriptkit-1.3.0-py3-none-any.whl#sha256=9943818c01ac5f0017c389a2c1baba08843bc59aee5374ababb992dff7aa8e7a",
+    "pokanop-scriptkit>=1.3.0,<1.4",
     "rich>=13.9.4,<14",
     "requests",
 ]
@@ -28,7 +30,7 @@ dev = ["pytest>=7", "ruamel.yaml"]
 
 [tool.setuptools]
 py-modules = []
-packages = ["scriptkit"]
+packages = []
 
 [project.urls]
 Homepage = "https://github.com/pokanop/scripts"

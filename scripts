@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts — Toolkit installer & lifecycle manager  v1.2.1
+scripts — Toolkit installer & lifecycle manager  v1.2.2
 Install, update, and diagnose the pokanop/scripts CLI toolkit.
 
 Usage:
@@ -29,10 +29,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
-# scriptkit is the shared toolkit library (lives alongside this file). It is
-# import-safe without third-party deps, but this installer must survive even a
+# scriptkit is an externally installed runtime. This installer must survive even a
 # broken/absent library — so the import is guarded and everything degrades to
 # plain stdlib behavior when it is unavailable.
 try:
@@ -220,7 +219,7 @@ def validate_tools(names: list[str]) -> list[str]:
 
 
 def pip_install_requirements(install_dir: Path, tools: list[str], upgrade: bool = False) -> None:
-    ensure_venv(install_dir)
+    pip_install_base(install_dir, upgrade=upgrade)
     pip = venv_pip(install_dir)
     seen: set[str] = set()
     req_files: list[Path] = []
@@ -243,13 +242,40 @@ def pip_install_requirements(install_dir: Path, tools: list[str], upgrade: bool 
         subprocess.run(cmd, cwd=install_dir, check=True)
 
 
+def remove_legacy_runtime_owner(install_dir: Path) -> bool:
+    """Remove the old distribution before installing files it used to own.
+
+    Run in the target venv, not the bare Python executing the repair command.
+    If interrupted, rerunning install repairs the runtime without touching configs.
+    """
+    probe = subprocess.run(
+        [str(venv_python(install_dir)), "-I", "-c",
+         "from importlib.metadata import distribution, PackageNotFoundError\n"
+         "try:\n"
+         " d = distribution('pokanop-scripts')\n"
+         "except PackageNotFoundError:\n"
+         " print('absent')\n"
+         "else:\n"
+         " print('legacy' if any(str(p).startswith('scriptkit/') for p in (d.files or [])) "
+         "or d.version == '1.0.0' else 'external')\n"],
+        check=True, capture_output=True, text=True,
+    )
+    if probe.stdout.strip() != "legacy":
+        return False
+    subprocess.run(venv_pip(install_dir) + ["uninstall", "-y", "pokanop-scripts"], check=True)
+    return True
+
+
 def pip_install_base(install_dir: Path, upgrade: bool = False) -> None:
     base = install_dir / "requirements" / "base.txt"
     if not base.exists():
         return
     ensure_venv(install_dir)
     pip = venv_pip(install_dir)
-    cmd = pip + ["install"]
+    remove_legacy_runtime_owner(install_dir)
+    # Also repairs interruption after a legacy uninstall removed shared files,
+    # even when surviving framework metadata incorrectly says it is installed.
+    cmd = pip + ["install", "--force-reinstall"]
     if upgrade:
         cmd.append("--upgrade")
     cmd += ["-r", str(base)]

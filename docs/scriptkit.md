@@ -38,20 +38,16 @@ Python.
 
 ## How it's wired in
 
-Tools are extension-less scripts that run as `venv/bin/python <repo>/<tool>`, so the
-repo root (which holds the `scriptkit/` package) is automatically on `sys.path`.
-Each tool simply does `import scriptkit as sk`. No install step, no vendoring.
+Tools run as `venv/bin/python <repo>/<tool>` and import the externally installed
+`pokanop-scriptkit` wheel with `import scriptkit as sk`. The runtime is owned by
+[pokanop/scriptkit](https://github.com/pokanop/scriptkit), not this repository.
+Base requirements and package metadata select a hash-pinned 1.3.0 release within
+the supported `>=1.3.0,<1.4` compatibility range. Templates use the same ordinary
+import from any working directory; no ancestor search or source vendoring.
 
-The new-tool template adds an upward-search bootstrap so a tool works even when run
-from a symlink or another directory:
-
-```python
-_here = Path(__file__).resolve().parent
-for _base in (_here, *_here.parents):
-    if (_base / "scriptkit" / "__init__.py").exists():
-        sys.path.insert(0, str(_base)); break
-import scriptkit as sk
-```
+See [runtime migration](runtime-migration.md) for provenance, install/repair,
+legacy wheel ownership cleanup and rollback. The API below remains the compatible
+1.3.0 surface; no optional new framework UX defaults are enabled.
 
 ---
 
