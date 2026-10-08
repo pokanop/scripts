@@ -1,0 +1,2 @@
+# Verified compatibility release; see docs/runtime-migration.md.
+pokanop-scriptkit @ https://github.com/pokanop/scriptkit/releases/download/runtime-1.3.0-7c17061/pokanop_scriptkit-1.3.0-py3-none-any.whl#sha256=9943818c01ac5f0017c389a2c1baba08843bc59aee5374ababb992dff7aa8e7a

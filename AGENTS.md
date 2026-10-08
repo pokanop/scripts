@@ -16,9 +16,11 @@ the source of truth for conventions; `CLAUDE.md` is a symlink to it.
   add tests. Full steps below.
 - **Editing a tool?** Reuse `scriptkit` for all output/config/subprocess. Run the
   test suite before and after. Don't add a dependency you don't list.
-- **Always run:** `venv/bin/python -m pytest` (140+ tests must stay green).
+- **Always run:** `venv/bin/python -m pytest` (622 tests must stay green).
 - **Tools are extension-less Python files at the repo root** (`medcat`, `pluck`, …),
-  run by a venv Python. The repo root holds `scriptkit/`, so `import scriptkit` just works.
+  run by a venv Python with the external `pokanop-scriptkit` runtime installed.
+- Runtime ownership, exact release pin, upgrade/repair and rollback:
+  **[docs/runtime-migration.md](docs/runtime-migration.md)**. Never vendor `scriptkit/`.
 
 ---
 
@@ -28,9 +30,6 @@ the source of truth for conventions; `CLAUDE.md` is a symlink to it.
 scripts                      # the installer/lifecycle host (also a tool)
 medcat keyferry voxtract     # the tools — extension-less Python scripts at repo root
 netsy pluck aikit
-scriptkit/                   # shared library every tool imports
-  style.py console.py progress.py tables.py
-  config.py proc.py text.py cli.py __init__.py
 templates/tool_template.py   # the scaffold for a new tool
 tests/                       # pytest suite (unit + characterization + template)
   conftest.py                # load_tool() imports extension-less scripts as modules
@@ -54,18 +53,18 @@ installs per-tool requirements, and writes thin **wrapper** scripts to a **bin d
 exec "<install_dir>/venv/bin/python" "<install_dir>/<tool>" "$@"
 ```
 
-Because the tool file lives at the install-dir root, `sys.path[0]` is that root —
-which contains `scriptkit/`. So **`import scriptkit as sk` resolves with no install
-step or vendoring.** The template additionally walks parent dirs to find
-`scriptkit/`, making new tools location-independent.
+**`import scriptkit as sk` resolves from the venv's installed runtime wheel**,
+not this repository or an ancestor directory. Base requirements install the
+hash-pinned release and enforce the `>=1.3.0,<1.4` compatibility range.
 
-`scriptkit` is **import-safe without `rich`** (it degrades to plain ANSI/text), so
-even the bootstrap `scripts` installer can use it under a bare system Python.
+`scriptkit` is **import-safe without `rich`**. Under bare Python without the
+runtime, the bootstrap `scripts` installer uses its stdlib fallback to repair
+or create the venv. No runtime import is required to install it.
 
 > **Updating an install:** the install dir is its own git clone, separate from your
 > dev repo. `scripts install` (and `install.sh`) now **`git pull --ff-only` first**
 > when that dir is a git checkout — so "install" gets the latest code. `scripts
-> update` does the same; pass `--no-pull` to skip. (Historically only `update`
+> update` does the same; for `scripts install`, pass `--no-pull` to skip. (Historically only `update`
 > pulled, which made `install` look like it was "caching" old code.)
 
 ---
@@ -149,8 +148,8 @@ these so styling stays consistent.
    subcommands as `cmd_*` functions, and register them in the `HANDLERS` dict and
    `build_parser()`. Set `DEFAULT_COMMAND` if a bare invocation should run a command
    (else leave it `None`). Rename the `ToolnameError` subclass. Fill in the `doctor`
-   sections with the real binaries/packages your tool needs. Keep the upward-search
-   `scriptkit` bootstrap at the top, and keep `__main__` as `sk.run_cli(main)`.
+   sections with the real binaries/packages your tool needs. Keep the normal
+   `scriptkit` import and keep `__main__` as `sk.run_cli(main)`.
 
 3. **Register it in the `scripts` installer** so it can be installed/updated. In the
    `scripts` file add an entry to `TOOLS` and append the name to `TOOL_NAMES`:
@@ -162,8 +161,8 @@ these so styling stays consistent.
    },
    ```
 
-4. **Add `requirements/mytool.txt`** listing only this tool's pip deps (don't repeat
-   `base.txt`, which already provides `rich` + `requests`). Mirror it under
+4. **Add `requirements/mytool.txt`** starting with `-r base.txt`, then list this
+   tool's extra pip deps (base provides the pinned runtime + `rich` + `requests`). Mirror it under
    `pyproject.toml`'s `[project.optional-dependencies]` if you want `pip install
    pokanop-scripts[mytool]` to work.
 
@@ -182,7 +181,8 @@ these so styling stays consistent.
 
 - **Reuse `scriptkit`.** If you need output/config/subprocess, import it — don't add
   a local helper that duplicates one. If `scriptkit` is missing something broadly
-  useful, add it to the library (with a test) rather than to one tool.
+  useful, change it in `pokanop/scriptkit` (with a test and reviewed release),
+  then update this consumer's pin rather than adding a local runtime package.
 - **Preserve behavior.** Run `venv/bin/python -m pytest` before and after. The
   characterization tests in `tests/test_tools_characterization.py` pin each tool's
   pure helpers and `--help`; keep them passing. If you intentionally change behavior,
@@ -196,7 +196,7 @@ these so styling stays consistent.
 
 ## Versioning & changelog
 
-Every tool (and `scriptkit`) is versioned **independently** with
+Every tool is versioned **independently** with
 [Semantic Versioning](https://semver.org). The "public API" of a tool is its CLI:
 its commands, flags, output format, exit codes, and config schema.
 
@@ -331,9 +331,9 @@ import torch/yt-dlp at top level if you can defer it) so smoke tests stay fast.
 
 ## Gotchas
 
-- **`scriptkit` resolves via `sys.path[0]`** (the tool's directory). When you run a
-  tool from elsewhere it still works because Python puts the *script's* dir on the
-  path, not the cwd. Tests insert the repo root explicitly (see `conftest.py`).
+- **`scriptkit` resolves from site-packages**, including outside-CWD invocations.
+  Do not insert repository/ancestor paths. Compatibility tests exercise the
+  external release, not a local runtime copy.
 - **`bool` is an `int`.** Handlers/`main` should return `None` or a real int exit
   code, not a bool. `scriptkit.dispatch`/`run_cli` guard against this, but don't rely
   on it.
@@ -356,7 +356,7 @@ import torch/yt-dlp at top level if you can defer it) so smoke tests stay fast.
 ## Checklists
 
 **New tool**
-- [ ] `cp templates/tool_template.py <name>`, edit, keep the `scriptkit` bootstrap
+- [ ] `cp templates/tool_template.py <name>`, edit, keep the installed `scriptkit` import
 - [ ] `ICON` + `TAGLINE` set; parser via `sk.make_parser`; `__version__ = "0.1.0"`
 - [ ] Subcommands wired into `build_parser()` + `HANDLERS`; `DEFAULT_COMMAND` chosen
 - [ ] Tool error type subclasses `sk.CliError`; `__main__` is `sk.run_cli(main)`

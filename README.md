@@ -72,6 +72,7 @@ export PATH="$HOME/.local/bin:$PATH"
 Or install deps via `pyproject.toml` extras from a clone:
 
 ```bash
+# First migrate an existing 1.0.0 environment with `python scripts install --no-pull`.
 pip install -e ".[medcat,pluck]"
 pip install -e ".[all]"
 ```
@@ -162,6 +163,11 @@ Install, update, authenticate, and manage 38 AI coding agent CLIs from one tool 
 ---
 
 ## Shared library: [scriptkit](docs/scriptkit.md)
+
+The runtime now comes from the external `pokanop-scriptkit` 1.3.0 wheel, pinned
+by release URL and SHA-256; this repo no longer owns a `scriptkit/` package.
+See [migration, repair and rollback](docs/runtime-migration.md) before upgrading
+an environment that installed the old `pokanop-scripts` wheel.
 
 Every tool is built on **[`scriptkit`](docs/scriptkit.md)** — one tested home for
 color, icons, semantic messages, prompts, progress bars, tables, three-tier config,

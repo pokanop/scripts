@@ -74,3 +74,6 @@ if ($Tools) { $InstallArgs += ($Tools -split ",") }
 
 Write-Host "==> Running scripts install"
 & $Python $ScriptsMeta @InstallArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "scripts install failed (exit $LASTEXITCODE); rerun with the same paths to repair."
+}
