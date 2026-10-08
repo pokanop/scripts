@@ -21,7 +21,9 @@ agreement between them. All per-tool requirement files include base requirements
 
 This is the reviewed compatibility release artifact, **not a PyPI publication**.
 Naming/trusted-publisher setup remains separate. GitHub release assets are durable
-rather than Actions-retention downloads. Content identity is immutable through the
+rather than Actions-retention downloads. Every install/update needs access to
+github.com because pip re-fetches the direct-URL runtime wheel, even if already
+installed. Content identity is immutable through the
 SHA-256 pin: replacement bytes fail pip installation. This does not claim that an
 administrator cannot delete a GitHub release; availability still depends on GitHub.
 Never replace these assets; publish a new version/tag/hash for a new release.
@@ -74,10 +76,15 @@ python3 scripts install --no-pull --no-path --dir /path/to/install --bin-dir /pa
 
 Use your existing install and bin directories (or omit overrides to use recorded
 ones). The installer queries **the target venv's** distribution metadata, removes
-legacy `pokanop-scripts` ownership, then force-reinstalls base dependencies. That
-also repairs a previously overlapping or interrupted install whose runtime metadata
+legacy `pokanop-scripts` ownership, installs base requirements normally, then
+force-reinstalls only the pinned runtime with `--no-deps`. A plain install preserves
+already-satisfied base dependency versions; only `--upgrade`/update upgrades them.
+This also repairs a previously overlapping or interrupted install whose runtime metadata
 survived but files did not. Modern dependency-only consumer metadata is retained.
-It never deletes user configs. Wrappers and the marker are only rewritten after
+Used git clones can retain ignored `scriptkit/__pycache__` after the source update.
+The bootstrap treats that empty namespace package as unavailable and removes the
+orphaned directory after repair only if it contains bytecode alone (no sources,
+symlinks or user files). It never deletes user configs. Wrappers and the marker are only rewritten after
 successful dependency installation; repair does not change their target paths.
 
 A network failure or interruption can leave that venv temporarily unable to run
@@ -111,7 +118,9 @@ Restore the migration revision and run bare-Python `scripts install` to roll for
 - `python tests/rehearse_runtime_migration.py`: disposable clean venv, real old and
   new wheels, fresh/harness install, platform shell bootstrap, per-tool install,
   update, metadata-only wheel, overlapping ownership migration, interrupted-uninstall
-  repair and rollback; configs, marker and wrapper preservation asserted.
+  repair and rollback; configs, marker and wrapper preservation asserted. Also
+  upgrades a used legacy git clone (real ignored bytecode) through bare-Python and
+  platform shell installers, and checks non-upgrade base-version preservation.
 - CI runs that rehearsal and external-runtime tests on Linux/macOS/Windows,
   Python 3.11 and 3.14. The existing complete Linux suite remains mandatory;
   `required-quality` rejects any failed/cancelled/skipped prerequisite job.

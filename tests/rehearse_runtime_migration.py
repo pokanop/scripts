@@ -29,6 +29,36 @@ def python(venv: Path) -> Path:
     return venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
+def rehearse_used_clone(work: Path, env: dict[str, str]) -> None:
+    """Exercise real ignored bytecode left behind by a git source upgrade."""
+    clone = work / "used-clone"
+    bare = work / "bare-python"
+    run(sys.executable, "-m", "venv", bare, cwd=work, env=env)
+    bare_py = python(bare)
+    run("git", "clone", "--no-hardlinks", ROOT, clone, cwd=work, env=env)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    for entry in ("direct", "shell"):
+        run("git", "checkout", "--detach", LEGACY, cwd=clone, env=env)
+        run(sys.executable, clone / "pluck", "--help", cwd=work, env=env)
+        assert (clone / "scriptkit" / "__pycache__").is_dir()
+        run("git", "checkout", "--detach", head, cwd=clone, env=env)
+        assert not (clone / "scriptkit" / "__init__.py").exists()
+        assert (clone / "scriptkit" / "__pycache__").is_dir()
+        bindir = work / "clone-bin"
+        if entry == "direct":
+            run(bare_py, clone / "scripts", "install", "--dir", clone,
+                "--bin-dir", bindir, "--no-pull", "--no-path", cwd=work, env=env)
+        elif os.name == "nt":
+            run("pwsh", "-NoProfile", "-File", clone / "install.ps1", "-InPlace",
+                "-BinDir", bindir, "-NoPath", cwd=work,
+                env={**env, "SCRIPTS_PYTHON": str(bare_py)})
+        else:
+            run("bash", clone / "install.sh", "--in-place", "--bin-dir", bindir,
+                "--no-path", cwd=work, env={**env, "SCRIPTS_PYTHON": str(bare_py)})
+        assert not (clone / "scriptkit").exists(), "orphaned bytecode was not pruned"
+        run(python(clone / "venv"), "-I", "-c", "import scriptkit; assert scriptkit.__file__", cwd=work, env=env)
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="scripts-migration-") as directory:
         work = Path(directory)
@@ -54,7 +84,7 @@ def main() -> None:
         install = work / "install"
         shutil.copytree(ROOT, install, ignore=shutil.ignore_patterns(
             ".git", "venv", ".venv", "__pycache__", ".pytest_cache", "*.egg-info", "build", "dist"))
-        assert not (install / "scriptkit").exists()
+        assert not (install / "scriptkit" / "__init__.py").exists()
         bindir = work / "bin"
         config = Path(env["HOME"]) / ".pluck" / "config.json"
         config.parent.mkdir()
@@ -84,6 +114,11 @@ def main() -> None:
         failed = subprocess.run(command, cwd=work, env=bootstrap_env, capture_output=True, text=True)
         assert failed.returncode != 0, "bootstrap swallowed installer failure"
         run(py, "-I", "-c", "import scriptkit; assert scriptkit.__version__ == '1.3.0'", cwd=work, env=env)
+        # A non-upgrade install must preserve already-satisfied base versions.
+        run(py, "-m", "pip", "install", "requests==2.31.0", "urllib3==2.0.7", cwd=work, env=env)
+        run(sys.executable, "-S", install / "scripts", "install", *common, cwd=work, env=env)
+        run(py, "-I", "-c", "from importlib.metadata import version; "
+            "assert version('requests') == '2.31.0'; assert version('urllib3') == '2.0.7'", cwd=work, env=env)
         # Per-tool, update and published consumer-wheel install paths.
         run(sys.executable, "-S", install / "scripts", "install", "pluck", *common, cwd=work, env=env)
         wrapper = bindir / ("pluck.cmd" if os.name == "nt" else "pluck")
@@ -137,7 +172,8 @@ def main() -> None:
         assert config.read_bytes() == initial_config
         assert wrapper.read_bytes() == original_wrapper
         assert (install / ".scripts-install.json").exists()
-        print("PASS: fresh/harness/per-tool/update/wheel/legacy/interruption/rollback; configs and wrappers preserved")
+        rehearse_used_clone(work, env)
+        print("PASS: fresh/harness/per-tool/update/wheel/legacy/interruption/rollback/used-clone; configs and wrappers preserved")
 
 
 if __name__ == "__main__":

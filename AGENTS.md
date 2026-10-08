@@ -16,7 +16,7 @@ the source of truth for conventions; `CLAUDE.md` is a symlink to it.
   add tests. Full steps below.
 - **Editing a tool?** Reuse `scriptkit` for all output/config/subprocess. Run the
   test suite before and after. Don't add a dependency you don't list.
-- **Always run:** `venv/bin/python -m pytest` (603 baseline tests must stay green).
+- **Always run:** `venv/bin/python -m pytest` (622 tests must stay green).
 - **Tools are extension-less Python files at the repo root** (`medcat`, `pluck`, …),
   run by a venv Python with the external `pokanop-scriptkit` runtime installed.
 - Runtime ownership, exact release pin, upgrade/repair and rollback:

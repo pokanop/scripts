@@ -36,6 +36,10 @@ __version__ = "1.2.2"
 # plain stdlib behavior when it is unavailable.
 try:
     import scriptkit as _sk
+    # Upgraded clones can retain ignored scriptkit/__pycache__, which imports
+    # as an empty namespace package when no installed runtime is available.
+    if getattr(_sk, "__file__", None) is None:
+        _sk = None
 except Exception:  # pragma: no cover - bootstrap safety net
     _sk = None
 
@@ -266,6 +270,23 @@ def remove_legacy_runtime_owner(install_dir: Path) -> bool:
     return True
 
 
+def prune_legacy_runtime_cache(install_dir: Path) -> None:
+    """Remove only the orphaned bytecode directory, never sources or user files."""
+    runtime = install_dir / "scriptkit"
+    cache = runtime / "__pycache__"
+    if runtime.is_symlink() or not runtime.is_dir():
+        return
+    if set(runtime.iterdir()) != {cache} or cache.is_symlink() or not cache.is_dir():
+        return
+    entries = list(cache.iterdir())
+    if any(p.is_symlink() or not p.is_file() or p.suffix != ".pyc" for p in entries):
+        return
+    for path in entries:
+        path.unlink()
+    cache.rmdir()
+    runtime.rmdir()
+
+
 def pip_install_base(install_dir: Path, upgrade: bool = False) -> None:
     base = install_dir / "requirements" / "base.txt"
     if not base.exists():
@@ -273,14 +294,18 @@ def pip_install_base(install_dir: Path, upgrade: bool = False) -> None:
     ensure_venv(install_dir)
     pip = venv_pip(install_dir)
     remove_legacy_runtime_owner(install_dir)
-    # Also repairs interruption after a legacy uninstall removed shared files,
-    # even when surviving framework metadata incorrectly says it is installed.
-    cmd = pip + ["install", "--force-reinstall"]
+    cmd = pip + ["install"]
     if upgrade:
         cmd.append("--upgrade")
     cmd += ["-r", str(base)]
     print(f"→ pip install -r {base.relative_to(install_dir)}")
     subprocess.run(cmd, cwd=install_dir, check=True)
+    # Repair stale framework metadata/files without upgrading unrelated base
+    # dependencies unless the caller explicitly requested --upgrade.
+    runtime = install_dir / "requirements" / "runtime-constraints.txt"
+    subprocess.run(pip + ["install", "--force-reinstall", "--no-deps", "-r", str(runtime)],
+                   cwd=install_dir, check=True)
+    prune_legacy_runtime_cache(install_dir)
 
 
 def wrapper_content(tool: str, install_dir: Path, bin_dir: Path) -> str:
