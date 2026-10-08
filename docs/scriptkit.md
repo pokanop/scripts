@@ -23,6 +23,13 @@ sys.exit(sk.run_cli(main))               # CliError → exit 1, Ctrl-C → exit 
 
 ---
 
+## Extraction proposal
+
+See the [ScriptKit extraction architecture and delivery plan](scriptkit-extraction-plan.md)
+for the proposed standalone framework, installer/catalog, deterministic generators,
+optional BYOK AI assistance, and migration back into this repository. This is a
+proposal; the reference below describes the current implementation.
+
 ## Why
 
 Every tool had grown its own copy of the same helpers — ANSI codes, `print_success`,
