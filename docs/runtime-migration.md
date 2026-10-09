@@ -40,6 +40,9 @@ files, then force-reinstalls only the exact runtime without gratuitously upgradi
 other base requirements. Interrupted repair is rerunnable. Only known orphaned
 `scriptkit/__pycache__/*.pyc` files are pruned; unknown files/sources are retained.
 Tool configuration and existing wrappers are preserved if dependency repair fails.
+Repair failures return a controlled `scripts:` error. Legacy (non-v2) uninstall
+never bootstraps the manager or accesses the network, even with a missing/old
+runtime. Full uninstall also removes any harness left by an earlier repair.
 
 Selected-tool installation, update and explicit v1 migration now use isolated
 immutable generations. See [manager migration](manager-migration.md) for the atomic

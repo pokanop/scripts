@@ -88,6 +88,62 @@ def test_invalid_overlay_is_cli_error_not_traceback(tmp_path, overlay):
     assert "Traceback" not in result.stderr
 
 
+@pytest.mark.parametrize("runtime", ["missing", "old"])
+@pytest.mark.parametrize("version", [None, 1])
+def test_legacy_full_uninstall_never_repairs(installation, tool_loader, monkeypatch, runtime, version):
+    root, bin_dir = installation
+    host = tool_loader("scripts")
+    if runtime == "missing":
+        monkeypatch.setattr(host, "_sk", None)
+    else:
+        monkeypatch.setattr(host._sk, "__version__", "1.3.0")
+    if version:
+        (root / life.MARKER).write_text(json.dumps({"version": version, "tools": ["pluck"]}))
+    for name in ("pluck", "scripts"):
+        life.destination(bin_dir, name).write_text("legacy wrapper")
+    harness = root / ".scripts-harness"
+    harness.mkdir()
+    (harness / "old-repair").write_text("left by previous repair")
+    def offline(*args, **kwargs):
+        pytest.fail("legacy uninstall must not spawn a repair or access the network")
+    monkeypatch.setattr(host.subprocess, "run", offline)
+    monkeypatch.setattr(sys, "argv", ["scripts", "uninstall", "-y", "--keep-path",
+                                     "--dir", str(root), "--bin-dir", str(bin_dir)])
+    assert host.main() == 0
+    assert not harness.exists()
+    assert not (root / life.MARKER).exists()
+    assert not life.destination(bin_dir, "scripts").exists()
+    assert not life.destination(bin_dir, "pluck").exists()
+    assert root.exists()  # Custom source directory is retained.
+
+
+@pytest.mark.parametrize("command", ["install", "uninstall"])
+def test_repair_failure_is_controlled(installation, tool_loader, monkeypatch, capsys, command):
+    root, bin_dir = installation
+    host = tool_loader("scripts")
+    (root / life.MARKER).write_text(json.dumps({"version": 2, "tools": []}))
+    monkeypatch.setattr(host, "_sk", None)
+    monkeypatch.delenv("SCRIPTS_MANAGER_REEXEC", raising=False)
+    def offline(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, ["python", "-m", "venv"])
+    monkeypatch.setattr(host.subprocess, "run", offline)
+    monkeypatch.setattr(sys, "argv", ["scripts", command, "--dir", str(root),
+                                     "--bin-dir", str(bin_dir)])
+    assert host.main() == 1
+    stderr = capsys.readouterr().err
+    assert "scripts:" in stderr
+    assert "Traceback" not in stderr
+    assert (root / life.MARKER).exists()
+
+
+def test_install_state_is_git_ignored():
+    root = Path(__file__).resolve().parents[1]
+    paths = [".scripts-state/transactions/blob", ".scripts-harness/bin/python", ".scripts-catalog.json"]
+    result = subprocess.run(["git", "check-ignore", "--no-index", *paths], cwd=root,
+                            capture_output=True, text=True, check=True)
+    assert result.stdout.splitlines() == paths
+
+
 def test_uninstall_invalidates_stale_rollback(installation):
     root, bin_dir = installation
     setup_root(root)

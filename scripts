@@ -847,6 +847,7 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     print(f"  Venv:        {install_dir / 'venv'}")
     if managed:
         print(f"  Generations: {install_dir / '.scripts-state'}")
+    if (install_dir / '.scripts-harness').exists():
         print(f"  Harness:     {install_dir / '.scripts-harness'}")
     print(f"  Marker:      {marker_path(install_dir)}")
     if remove_install_dir:
@@ -892,7 +893,7 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     remove_data(install_dir / "venv")
     if managed:
         remove_data(install_dir / ".scripts-state")
-        remove_data(install_dir / ".scripts-harness")
+    remove_data(install_dir / ".scripts-harness")
     if remove_install_dir:
         remove_data(install_dir)
     elif install_dir.exists():
@@ -984,6 +985,10 @@ DEFAULT_COMMAND = "list"
 def ensure_manager(args) -> int | None:
     if args.command not in {"install", "update", "migrate", "rollback", "register", "unregister", "uninstall"} or getattr(args, "dry_run", False):
         return None
+    if args.command == "uninstall":
+        marker = read_marker(resolve_install_dir(args.dir))
+        if not marker or marker.get("version") != 2:
+            return None  # Legacy removal is stdlib-only, including when offline.
     try:
         from scriptkit.contracts.artifacts import ArtifactPolicy
         if _sk is not None and _sk.__version__ == "1.5.0":
@@ -991,7 +996,7 @@ def ensure_manager(args) -> int | None:
     except ImportError:
         pass
     if os.environ.get("SCRIPTS_MANAGER_REEXEC"):
-        raise SystemExit("Manager repair failed; expected ScriptKit 1.5.0")
+        raise ValueError("Manager repair failed; expected ScriptKit 1.5.0")
     root = resolve_install_dir(args.dir)
     host = root / ".scripts-harness"
     py = host / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -1023,7 +1028,11 @@ def main() -> int:
         print(f"scripts: {exc}", file=sys.stderr)
         return 1
     TOOL_NAMES = tuple(TOOLS)
-    repaired = ensure_manager(args)
+    try:
+        repaired = ensure_manager(args)
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        print(f"scripts: {exc}", file=sys.stderr)
+        return 1
     if repaired is not None:
         return repaired
     func = getattr(args, "func", None)

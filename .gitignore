@@ -7,3 +7,6 @@ dist/
 build/
 venv/
 .scripts-install.json
+.scripts-state/
+.scripts-harness/
+.scripts-catalog.json
