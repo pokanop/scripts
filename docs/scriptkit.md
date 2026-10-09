@@ -41,8 +41,8 @@ Python.
 Tools run as `venv/bin/python <repo>/<tool>` and import the externally installed
 `pokanop-scriptkit` wheel with `import scriptkit as sk`. The runtime is owned by
 [pokanop/scriptkit](https://github.com/pokanop/scriptkit), not this repository.
-Base requirements and package metadata select a hash-pinned 1.3.0 release within
-the supported `>=1.3.0,<1.4` compatibility range. Templates use the same ordinary
+Base requirements and package metadata select a hash-pinned 1.5.0 release within
+the supported `>=1.5.0,<1.6` compatibility range. Templates use the same ordinary
 import from any working directory; no ancestor search or source vendoring.
 
 See [runtime migration](runtime-migration.md) for provenance, install/repair,

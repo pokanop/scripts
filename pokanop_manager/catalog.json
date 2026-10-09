@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "tools": {
+    "medcat": {"description": "Media stack ingest tool", "requirements": "requirements/medcat.txt", "system": [["ffmpeg", false, "audio/video metadata and transcoding"], ["yt-dlp", false, "YouTube search and download (also installed via pip)"]]},
+    "keyferry": {"description": "1Password ⇄ Bitwarden credential ferry", "requirements": "requirements/keyferry.txt", "system": [["op", true, "1Password CLI — https://1password.com/downloads/command-line"], ["bw", true, "Bitwarden CLI — native binary; see bitwarden.com/help/cli/"]]},
+    "voxtract": {"description": "Voice extract tool (YouTube, Spotify, Demucs isolation)", "requirements": "requirements/voxtract.txt", "system": [["ffmpeg", true, "audio format conversion"], ["yt-dlp", false, "YouTube/podcast download (also installed via pip)"]]},
+    "netsy": {"description": "LAN discovery tool", "requirements": "requirements/netsy.txt", "system": [["nmap", true, "network scan — brew/apt/winget install nmap"]]},
+    "pluck": {"description": "Config key-path tool (YAML, JSON, TOML, .env)", "requirements": "requirements/pluck.txt", "system": []},
+    "aikit": {"description": "AI coding agent CLI installer & manager", "requirements": "requirements/aikit.txt", "system": []}
+  }
+}
