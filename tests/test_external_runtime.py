@@ -17,17 +17,17 @@ def test_external_ownership_and_pin():
 
     assert not (ROOT / "scriptkit" / "__init__.py").exists()
     assert not Path(scriptkit.__file__).resolve().is_relative_to(ROOT / "scriptkit")
-    assert version("pokanop-scriptkit") == "1.3.0"
+    assert version("pokanop-scriptkit") == "1.5.0"
     metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
     requirements = [Requirement(r) for r in metadata["project"]["dependencies"]]
     runtime = [r for r in requirements if r.name == "pokanop-scriptkit"]
     pin = next(r.url for r in runtime if r.url)
     assert pin in (ROOT / "requirements/runtime-constraints.txt").read_text()
     bounds = next(r.specifier for r in runtime if not r.url)
-    assert "1.3.0" in bounds and "1.4.0" not in bounds and "1.2.9" not in bounds
-    assert "pokanop-scriptkit>=1.3.0,<1.4" in (ROOT / "requirements/base.txt").read_text()
+    assert "1.5.0" in bounds and "1.6.0" not in bounds and "1.4.9" not in bounds
+    assert "pokanop-scriptkit>=1.5.0,<1.6" in (ROOT / "requirements/base.txt").read_text()
     assert "#sha256=" in pin and "/main/" not in pin
-    assert metadata["tool"]["setuptools"]["packages"] == []
+    assert metadata["tool"]["setuptools"]["packages"] == ["pokanop_manager"]
     files = distribution("pokanop-scriptkit").files
     assert any(str(f) == "scriptkit/__init__.py" for f in files)
 
@@ -94,6 +94,7 @@ def test_install_failure_does_not_rewrite_wrappers_or_marker(tool_loader, monkey
 def test_namespace_cache_uses_bare_python_fallback(tmp_path):
     import shutil
     shutil.copyfile(ROOT / "scripts", tmp_path / "scripts")
+    shutil.copytree(ROOT / "pokanop_manager", tmp_path / "pokanop_manager")
     (tmp_path / "scriptkit" / "__pycache__").mkdir(parents=True)
     result = subprocess.run([sys.executable, "-S", "-X", "utf8", str(tmp_path / "scripts"), "--help"],
                             cwd=tmp_path, capture_output=True, text=True, encoding="utf-8")

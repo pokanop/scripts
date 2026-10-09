@@ -77,7 +77,7 @@ def main() -> None:
         for source in (old, ROOT):
             run(sys.executable, "-m", "pip", "wheel", "--no-deps", "-w", wheels, source, cwd=work, env=env)
         legacy_wheel = next(wheels.glob("pokanop_scripts-1.0.0-*.whl"))
-        new_wheel = next(wheels.glob("pokanop_scripts-1.1.0-*.whl"))
+        new_wheel = next(wheels.glob("pokanop_scripts-1.2.0-*.whl"))
         with zipfile.ZipFile(new_wheel) as zipped:
             assert not any(n.startswith("scriptkit/") for n in zipped.namelist())
 
@@ -113,7 +113,7 @@ def main() -> None:
                        "--bin-dir", str(bindir), "--no-path"]
         failed = subprocess.run(command, cwd=work, env=bootstrap_env, capture_output=True, text=True)
         assert failed.returncode != 0, "bootstrap swallowed installer failure"
-        run(py, "-I", "-c", "import scriptkit; assert scriptkit.__version__ == '1.3.0'", cwd=work, env=env)
+        run(py, "-I", "-c", "import scriptkit; assert scriptkit.__version__ == '1.5.0'", cwd=work, env=env)
         # A non-upgrade install must preserve already-satisfied base versions.
         run(py, "-m", "pip", "install", "requests==2.31.0", "urllib3==2.0.7", cwd=work, env=env)
         run(sys.executable, "-S", install / "scripts", "install", *common, cwd=work, env=env)
@@ -132,7 +132,7 @@ def main() -> None:
         pin = next(r for r in metadata["project"]["dependencies"] if " @ " in r)
         bad_hash = pin.split("#sha256=")[0] + "#sha256=" + "0" * 64
         for requirements, expected in [([bad_hash], "HASHES"),
-                                       ([pin, "pokanop-scriptkit>=1.4,<2"], "ResolutionImpossible")]:
+                                       ([pin, "pokanop-scriptkit>=1.6,<2"], "ResolutionImpossible")]:
             rejected = subprocess.run([str(py), "-m", "pip", "install", "--dry-run",
                                        "--ignore-installed", "--no-deps", *requirements],
                                       cwd=work, env=env, capture_output=True, text=True)
@@ -145,7 +145,7 @@ def main() -> None:
         run(sys.executable, "-S", install / "scripts", "install", *common, cwd=work, env=env)
         run(py, "-I", "-c", "from importlib.metadata import distributions; "
             "assert 'pokanop-scripts' not in [d.metadata['Name'] for d in distributions()]; "
-            "import scriptkit; assert scriptkit.__version__ == '1.3.0'", cwd=work, env=env)
+            "import scriptkit; assert scriptkit.__version__ == '1.5.0'", cwd=work, env=env)
 
         # Interruption after uninstall: the runtime metadata survives, its files do
         # not. A second bare-Python repair must not trust that stale metadata.

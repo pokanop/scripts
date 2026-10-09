@@ -816,6 +816,15 @@ Newest entries on top, within each tool.
 
 ## scripts
 
+### 1.3.0 — 2026-10-09
+- Consume verified ScriptKit 1.5.0; discover tools from one validated Pokanop catalog.
+- Install selected tools into independently locked manager generations; stage complete migration batches before one atomic routing commit.
+- Add migration dry-run/rollback and generated repo-layout registration/removal; preserve old venvs, unrelated tools and user state.
+- Per-tool uninstall retains generations; full uninstall removes the toolkit/PATH/environments under the existing directory-retention rules and reports any locked paths with cleanup commands.
+- Validate registrations before publication, report malformed catalogs cleanly, and invalidate stale rollback pointers after per-tool removal.
+- Keep legacy uninstall offline, clean up prior repair harnesses on full removal, and report manager repair errors without tracebacks.
+- Ignore local manager state, harness environments and catalog registrations in Git.
+
 ### 1.2.2 — 2026-10-08
 - Install the verified external ScriptKit 1.3.0 release; preserve bare-Python repair and remove legacy wheel ownership before reinstalling runtime files.
 - Consumer package 1.1.0 is dependency-only: no bundled `scriptkit` modules or template ancestor search. Existing tool CLI/config/wrapper behavior is unchanged.

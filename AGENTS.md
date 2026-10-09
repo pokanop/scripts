@@ -1,379 +1,128 @@
-# AGENTS.md — guide for building & editing tools in this repo
+# Pokanop scripts — contributor and agent guide
 
-This file orients coding agents (and humans) working in `pokanop/scripts`. It is
-the source of truth for conventions; `CLAUDE.md` is a symlink to it.
+## Boundaries
 
-> **Golden rule:** every tool is built on the shared **[`scriptkit`](docs/scriptkit.md)**
-> library. Don't re-roll colors, messages, progress, tables, config, or subprocess
-> handling — import them. Change the house style in one place, not seven.
+This repository is a **consumer** of external `pokanop-scriptkit`, not a second
+framework or package manager. Never vendor a `scriptkit/` package. Runtime,
+registry, archive validation, wheel-lock verification, environment creation and
+per-tool receipts belong in the external framework. The exact release URL and
+SHA-256 live in `requirements/runtime-constraints.txt`; the supported range is
+`>=1.5.0,<1.6`. Update both with independent release evidence.
 
----
+`pokanop_manager/` contains only this collection's catalog, a pip wheel-preparation
+adapter, and coordination of the legacy marker/public-wrapper transition. Do not
+copy framework resolvers or installers into it. Pip resolves/builds wheels;
+ScriptKit installs the complete verified lock offline.
 
-## TL;DR for an agent
+## Layout and lifecycle
 
-- **New tool?** `cp templates/tool_template.py <name>` → edit → register in `scripts`
-  (`TOOLS` + `TOOL_NAMES`) → add `requirements/<name>.txt` → add `docs/<name>.md` →
-  add tests. Full steps below.
-- **Editing a tool?** Reuse `scriptkit` for all output/config/subprocess. Run the
-  test suite before and after. Don't add a dependency you don't list.
-- **Always run:** `venv/bin/python -m pytest` (622 tests must stay green).
-- **Tools are extension-less Python files at the repo root** (`medcat`, `pluck`, …),
-  run by a venv Python with the external `pokanop-scriptkit` runtime installed.
-- Runtime ownership, exact release pin, upgrade/repair and rollback:
-  **[docs/runtime-migration.md](docs/runtime-migration.md)**. Never vendor `scriptkit/`.
+- Six existing tools are extension-less Python files at the repository root.
+- `pokanop_manager/catalog.json` is the single discovery catalog. `TOOLS` and
+  `TOOL_NAMES` in the host are compatibility views derived from it, never lists
+  to edit independently.
+- `requirements/<tool>.txt` declares each built-in tool's dependencies.
+- `scripts` is the CLI/bootstrap host; shell and PowerShell installers delegate
+  to it. Keep bare-Python repair and dependency-free discovery/help functional.
+- `venv/` is the legacy shared environment/harness. Migration never deletes it.
+  Missing framework services can be bootstrapped in `.scripts-harness/` without
+  mutating the old shared environment.
+- `.scripts-state/transactions/` retains immutable tool bundles, wheel locks,
+  private ScriptKit generations, receipts and previous routing snapshots.
+- `.scripts-install.json` is the single atomic routing commit for a migration
+  batch. Stage and smoke **all** selected tools before switching this marker.
+- Public wrappers handle both v1 and v2 routing. Never overwrite foreign/edited
+  tool wrappers. Per-tool uninstall retains environments; full uninstall removes
+  toolkit environments and honors PATH/source-retention flags. User config is
+  always retained. Garbage collection between installs is not automatic.
 
----
+See [manager migration](docs/manager-migration.md) for dry-run, rollback, source
+trust, lock preparation, platform limits and interruption semantics.
 
-## Repository layout
+## New tools: use the external repository-layout scaffold
 
-```
-scripts                      # the installer/lifecycle host (also a tool)
-medcat keyferry voxtract     # the tools — extension-less Python scripts at repo root
-netsy pluck aikit
-templates/tool_template.py   # the scaffold for a new tool
-tests/                       # pytest suite (unit + characterization + template)
-  conftest.py                # load_tool() imports extension-less scripts as modules
-requirements/<tool>.txt      # per-tool pip deps (base.txt is shared)
-docs/<tool>.md               # one user-facing doc per tool
-docs/scriptkit.md            # the shared-library reference
-install.sh install.ps1       # bootstrap installers
-pyproject.toml               # packaging + pytest config
-```
+1. Install the pinned framework release in your authoring environment. Create a
+   validated `ToolSpec` JSON (the framework ships an example resource).
+2. Generate into a **new disposable project directory**, not this repository root:
 
----
-
-## How tools run (the runtime model)
-
-Install (`install.sh` / `scripts install`) clones the repo to an **install dir**
-(`~/.local/share/scripts` by default, or in-place for a git clone), creates a venv,
-installs per-tool requirements, and writes thin **wrapper** scripts to a **bin dir**
-(`~/.local/bin`). Each wrapper does:
-
-```bash
-exec "<install_dir>/venv/bin/python" "<install_dir>/<tool>" "$@"
-```
-
-**`import scriptkit as sk` resolves from the venv's installed runtime wheel**,
-not this repository or an ancestor directory. Base requirements install the
-hash-pinned release and enforce the `>=1.3.0,<1.4` compatibility range.
-
-`scriptkit` is **import-safe without `rich`**. Under bare Python without the
-runtime, the bootstrap `scripts` installer uses its stdlib fallback to repair
-or create the venv. No runtime import is required to install it.
-
-> **Updating an install:** the install dir is its own git clone, separate from your
-> dev repo. `scripts install` (and `install.sh`) now **`git pull --ff-only` first**
-> when that dir is a git checkout — so "install" gets the latest code. `scripts
-> update` does the same; for `scripts install`, pass `--no-pull` to skip. (Historically only `update`
-> pulled, which made `install` look like it was "caching" old code.)
-
----
-
-## The scriptkit library
-
-Full reference: **[docs/scriptkit.md](docs/scriptkit.md)**. The surface you'll use most:
-
-```python
-import scriptkit as sk
-
-# messages (success/warning/info/step to stdout; error to stderr)
-sk.success("done"); sk.error("nope"); sk.warning("careful"); sk.info("fyi")
-sk.step(2, 5, "building"); sk.header("Section"); sk.kv("Host", "router")
-sk.elapsed("build", 4.2)                      # ⏱️  build: 4.2s
-
-# prompts
-name = sk.ask("Name", default="world"); ok = sk.confirm("Proceed?", default=True)
-
-# progress
-for item in sk.track(items, "Processing"): ...
-with sk.status("Reading…") as s: s.update("…")
-results = sk.parallel_map(fn, items, "Working", max_workers=8)
-
-# tables (rich when available, plain grid otherwise)
-sk.table([{"name": "#", "justify": "right"}, "Host"], [[1, "router"]], title="Hosts")
-
-# config: defaults < ~/.tool/config.json < TOOL_* env
-cfg = sk.Config(path, defaults={...}, env_prefix="MYTOOL", coerce_env=True).load()
-sk.get_nested(cfg, "web.port"); sk.set_nested(cfg, "web.host", "0.0.0.0")
-
-# subprocess: Result(code, out, err); never raises unless check=True
-res = sk.run(["git", "status"]); res.ok; bool(res)
-sk.which("ffmpeg"); sk.require("ffmpeg", hint="brew install ffmpeg")
-
-# text
-sk.human_size(1536); sk.human_duration(185); sk.truncate(s, 40)
-
-# CLI lifecycle — one shape for every tool (parse → dispatch → clean exit)
-class MytoolError(sk.CliError): ...               # tool error subclasses CliError
-raise MytoolError("clean user-facing message")    # → ❌ printed, exit 1
-args = sk.parse_args(parser, default=DEFAULT_COMMAND)  # bare run → default cmd (or help)
-return sk.dispatch(args, HANDLERS, parser, default=DEFAULT_COMMAND,
-                   banner=sk.banner("mytool", __version__, TAGLINE, ICON))  # banner→stderr
-sys.exit(sk.run_cli(main))                         # CliError→1, Ctrl-C→130
-sys.exit(sk.run_cli(main, on_interrupt=cleanup))   # …with cleanup on Ctrl-C
-
-# doctor — one diagnostic look for every tool (System section auto-added)
-return sk.doctor("mytool", __version__, TAGLINE, ICON,
-    sections={"Prerequisites": [sk.check_binary("ffmpeg", hint="brew install ffmpeg")],
-              "Python packages": [sk.check_python("rich", required=False)],
-              "Config": [sk.Check.ok("Config", str(CONFIG.path))]},
-    tips=["a dim line of guidance"])               # returns 1 iff a required check FAILs
-
-# identity & framing — same first impression for every tool
-ICON, TAGLINE = "🚀", "does the thing"
-parser = sk.make_parser("mytool", __version__, TAGLINE, icon=ICON,
-                        examples=[("mytool go", "run it")])   # banner + -v/--version + epilog
-print(sk.banner("mytool", __version__, TAGLINE, ICON))        # runtime banner
-sk.header("Section")                                          # ━━━ Section ━━━━━
-```
-
-Need rich directly (Panel, Syntax, Tree, custom markup)? Use the **shared console**:
-`sk.rich_console` / `sk.err_console`. Don't construct your own `Console()` — share
-these so styling stays consistent.
-
----
-
-## Building a new tool
-
-1. **Copy the scaffold** (extension-less name, house style):
-   ```bash
-   cp templates/tool_template.py mytool
-   chmod +x mytool
-   ```
-   The scaffold is a working CLI demonstrating the full lifecycle (`parse_args` →
-   `dispatch` → `run_cli`), messages, a tracked loop, config, subprocess, a
-   `CliError` subclass, and a `sk.doctor` report.
-
-2. **Edit `mytool`:** replace `toolname`/`TOOLNAME`, set `__version__`, write your
-   subcommands as `cmd_*` functions, and register them in the `HANDLERS` dict and
-   `build_parser()`. Set `DEFAULT_COMMAND` if a bare invocation should run a command
-   (else leave it `None`). Rename the `ToolnameError` subclass. Fill in the `doctor`
-   sections with the real binaries/packages your tool needs. Keep the normal
-   `scriptkit` import and keep `__main__` as `sk.run_cli(main)`.
-
-3. **Register it in the `scripts` installer** so it can be installed/updated. In the
-   `scripts` file add an entry to `TOOLS` and append the name to `TOOL_NAMES`:
-   ```python
-   "mytool": {
-       "description": "One-line description",
-       "requirements": "requirements/mytool.txt",
-       "system": [("ffmpeg", False, "audio decode — brew install ffmpeg")],  # (binary, required, hint)
-   },
+   ```sh
+   mkdir /path/to/new-project
+   python -m scriptkit new-tool /path/to/new-project --spec /path/to/tool.json --layout repository --apply
    ```
 
-4. **Add `requirements/mytool.txt`** starting with `-r base.txt`, then list this
-   tool's extra pip deps (base provides the pinned runtime + `rich` + `requests`). Mirror it under
-   `pyproject.toml`'s `[project.optional-dependencies]` if you want `pip install
-   pokanop-scripts[mytool]` to work.
+   Consult `python -m scriptkit new-tool --help` for the installed release's CLI.
+   This generates an extension-less `bin/<name>` launcher, importable `src/`
+   modules, tests, docs, requirements and a tool spec. Implement user-owned
+   `_handlers.py`; preserve generated ownership markers and manifests.
+3. Register and install explicitly (registration trusts local executable code):
 
-5. **Add `docs/mytool.md`** following the existing tool docs (quick start, commands,
-   config, the "Related tools" + scriptkit footer), and add a card in `README.md`.
+   ```sh
+   python scripts register /path/to/new-project
+   python scripts install mytool --no-pull --no-path
+   ```
 
-6. **Add tests** (see Testing). At minimum: a `--help` smoke test and unit tests for
-   your pure functions. Characterization tests live in
-   `tests/test_tools_characterization.py`.
+   Framework requirements in the generated project are pinned to its generating
+   version. The collection constrains that version to its verified GitHub wheel,
+   so public PyPI availability is not needed.
+4. Verify `mytool --help`, `mytool doctor`, and a real implemented command.
+   Unimplemented scaffold handlers must fail clearly; bare invocation must not
+   mutate state. Add tests for pure functions and installed wrappers.
+5. Remove without touching unrelated tools or project sources:
 
-7. **Verify:** `./mytool --help`, exercise a command, then `venv/bin/python -m pytest`.
+   ```sh
+   python scripts uninstall mytool --keep-path
+   python scripts unregister mytool
+   ```
 
----
+For a new **built-in legacy tool**, add one catalog entry, its root script,
+`requirements/<name>.txt`, optional packaging extra, docs and tests. Do not edit
+host code or a separate list. `templates/tool_template.py` remains a compatibility
+example for existing single-file tools, not the recommended new-project generator.
 
-## Editing an existing tool
+## Editing existing tools
 
-- **Reuse `scriptkit`.** If you need output/config/subprocess, import it — don't add
-  a local helper that duplicates one. If `scriptkit` is missing something broadly
-  useful, change it in `pokanop/scriptkit` (with a test and reviewed release),
-  then update this consumer's pin rather than adding a local runtime package.
-- **Preserve behavior.** Run `venv/bin/python -m pytest` before and after. The
-  characterization tests in `tests/test_tools_characterization.py` pin each tool's
-  pure helpers and `--help`; keep them passing. If you intentionally change behavior,
-  update the test and say so.
-- **Match the surrounding code.** These are single-file tools; follow the existing
-  structure, naming, and comment density in the file you're editing.
-- **Don't introduce undeclared dependencies.** New import → add it to the tool's
-  `requirements/<tool>.txt` (and `pyproject.toml`).
+- Import `scriptkit as sk` normally; no ancestor-search or sys.path runtime hacks.
+- Reuse `sk.Config`, output/style, tables, progress and subprocess helpers.
+  Don't create another Rich Console or hand-code ANSI. Honor NO_COLOR/FORCE_COLOR.
+- Keep heavyweight imports lazy so help/discovery do not load Torch or other tools.
+- Use `sk.make_parser`, `sk.parse_args`, `sk.dispatch` and `sk.run_cli`.
+  Banner goes to stderr; normal/machine data stays on stdout. `-v` is version,
+  never verbose. Every tool has help, version and `sk.doctor`.
+- Tool errors subclass `sk.CliError`; expected failures return 1 and interrupts
+  return 130. Use `run_cli(on_interrupt=...)` for cleanup, not ad-hoc handlers.
+- Choose a read-only default or help for potentially destructive tools.
+- Config/state lives in `~/.<tool>/`, honors `<TOOL>_CONFIG`, never in the repo.
+  Use the framework's layered config and secret-safe file modes. Preserve state
+  during migration, rollback and uninstall.
+- Declare every imported dependency in the per-tool requirements and appropriate
+  packaging extra. Never silently install all tools' heavy dependencies.
+- Keep functions small and typed; isolate platform and provider adapters. Test
+  success, failure, interruption and backward compatibility for lifecycle changes.
 
----
+## Versions and changelog
 
-## Versioning & changelog
+Tools version independently. Every changed tool gets one bump per PR: MAJOR for
+breaking CLI/config changes; MINOR for additive commands/flags/UX; PATCH for an
+invisible fix/refactor. Keep `__version__`, docstring version, versioned docs H1 and
+`CHANGELOG.md` synchronized. Extend an existing unmerged PR bump rather than bumping
+again for each fix. Preserve user Git identity. Rebase feature branches; never
+merge main into them.
 
-Every tool is versioned **independently** with
-[Semantic Versioning](https://semver.org). The "public API" of a tool is its CLI:
-its commands, flags, output format, exit codes, and config schema.
+## Verification
 
-**When you change a tool, bump it** — pick the level by the *largest* change:
-
-| Level | Bump | When |
-|-------|------|------|
-| **MAJOR** `X.0.0` | breaking | Remove/rename a command or flag, **change a flag's meaning**, change output/exit-code/config-schema in a way that could break existing scripts. |
-| **MINOR** `x.Y.0` | additive | New command, flag, source, or format; new optional config; a notable backwards-compatible UX addition (e.g. adding `--version` where it was missing). |
-| **PATCH** `x.y.Z` | invisible | Bug fix, internal refactor (e.g. moving onto `scriptkit`), dependency bump, help/doc wording, cosmetic styling — **no interface change**. |
-
-Rules of thumb:
-- **No interface change ⇒ PATCH.** Refactoring a tool onto `scriptkit` with identical
-  observable behavior is a PATCH, even if a lot of code moved.
-- A `scriptkit` change that alters a tool's *observable* behavior bumps **that tool too**
-  (at the matching level), plus `scriptkit` itself.
-- New tools start at **`0.1.0`** (the scaffold default).
-- When unsure between two levels, prefer the higher one and say why in the changelog.
-
-**Every bump touches the same places (keep them in sync):**
-1. The `__version__ = "X.Y.Z"` constant.
-2. The version in the module docstring header (`name — desc  vX.Y.Z`).
-3. The docs H1 *if* it pins a version (e.g. `docs/medcat.md`, `docs/netsy.md`).
-4. A `CHANGELOG.md` entry under that tool's section (newest on top), dated `YYYY-MM-DD`,
-   with a one-line-per-change summary. Flag breaking changes with a leading `⚠`.
-
-**Coalesce bumps — one version per commit/PR, not per agent session:**
-- Before bumping, check whether the tool (or `scriptkit`) **already has an uncommitted
-  version bump** (`git diff` on the tool file / `CHANGELOG.md`, or `git log -1` vs
-  `origin/main`). If yes, **do not bump again** — keep that version and **append** to
-  its existing `CHANGELOG.md` entry (or extend the entry you added earlier in the same
-  branch).
-- Bump **once** when the work is ready to land. Follow-up tasks in the same uncommitted
-  batch (even across separate chat sessions) are changelog bullets under the same
-  version, not a new `x.y.Z`.
-- Only open a **new** changelog section (and increment the version) after the previous
-  bump has been **committed and pushed** — i.e. at the next release boundary — unless
-  the user explicitly asks for a separate release.
-
-> Don't bump for changes that don't touch the tool file (pure test/doc edits elsewhere).
-
----
-
-## Conventions
-
-**The lifecycle (do this the same way in every tool)**
-- **One `main`.** `build_parser()` → `sk.parse_args(parser, default=DEFAULT_COMMAND)`
-  → `sk.dispatch(args, HANDLERS, parser, default=DEFAULT_COMMAND, banner=sk.banner(...))`.
-  Entry point is always `sys.exit(sk.run_cli(main))`. Don't hand-roll arg parsing,
-  command if/elif chains, or `__main__` logic — copy the template.
-- **Graceful exit lives in `scriptkit`, nowhere else.** `sk.run_cli` is the *only*
-  place `KeyboardInterrupt` is handled (→ `⏹ Interrupted.`, exit 130). **Never write
-  a `try/except KeyboardInterrupt` in a tool.** Need cleanup on Ctrl-C? Pass
-  `on_interrupt=<fn>` to `run_cli` (e.g. voxtract removes temp files that way).
-- **Errors:** give the tool its own type by **subclassing `sk.CliError`**
-  (`class MytoolError(sk.CliError): ...`) and `raise` it for expected failures.
-  `run_cli` catches the whole family → `❌ msg`, exit 1. Don't catch your own error
-  type in `main`; don't `sys.exit()` with ad-hoc codes for user errors.
-- **The banner shows for every command** — `dispatch` prints it to **stderr** (always
-  visible, never pollutes piped stdout). `--help`/`--version` carry it via
-  `make_parser`. Don't `print(banner)` yourself in a handler.
-- **Default action:** set `DEFAULT_COMMAND` to run a command on a bare invocation
-  (netsy → `scan`, aikit/scripts → `list`). Leave it `None` for tools that mutate
-  state — a bare run then shows banner-led help, never an implicit destructive action.
-- **Every tool has a `doctor`** built with `sk.doctor(...)` + `sk.check_binary` /
-  `sk.check_python` / `sk.Check.*`. Don't hand-roll a diagnostic with Panels/Tables —
-  the shared renderer is the house look (System section auto-added; returns exit 1 iff
-  a required check fails).
-
-**Output & UX**
-- Use the `scriptkit` message helpers; don't hand-roll ANSI or `print("✅ …")`.
-- Errors go to **stderr** (`sk.error` already does this); normal output to stdout.
-- Honor `NO_COLOR` / `FORCE_COLOR` — automatic via `scriptkit`. Never hardcode color
-  on; never assume a TTY.
-- Exit codes: success `0`, expected failure `1` (raise a `CliError` subclass),
-  interrupt `130` (automatic via `sk.run_cli`).
-- **Identity:** build the parser with `sk.make_parser(...)` and define module-level
-  `ICON` + `TAGLINE`, so every tool shows the same `{icon} name vX.Y.Z — tagline`
-  banner. Pick a distinct brand emoji (current set: 🛠️ scripts · 🤖 aikit ·
-  🛳️ keyferry · 📚 medcat · 📡 netsy · 🪶 pluck · 🌊 voxtract).
-- **`-v`/`--version` is universal** (added by `make_parser`). Never repurpose `-v`
-  for `--verbose` — use `--verbose`. Use `sk.header()` for section rules.
-- Every tool has a `--help` and a one-line module docstring header (`name — desc  vX.Y.Z`).
-
-**Configuration**
-- Per-tool state lives in `~/.<tool>/` (e.g. `~/.medcat/config.json`), **never** in
-  the repo. Honor a `<TOOL>_CONFIG` env override for the dir.
-- Use `sk.Config` for three-tier loading (defaults < file < `TOOL_*` env). Use
-  `coerce_env=True` so env scalars (`"9000"`, `"true"`) become natural types.
-- Save with `0600` (`sk.Config.save` does this) for anything that may hold secrets.
-
-**Code**
-- Tools are extension-less Python at the repo root, `#!/usr/bin/env python3`,
-  `from __future__ import annotations`.
-- Prefer one file per tool unless it genuinely needs a package.
-
----
-
-## Testing
-
-Run everything:
-
-```bash
-venv/bin/python -m pytest          # or: -p no:cacheprovider for a clean run
+```sh
+python -m pip install -e '.[dev,keyferry,aikit,pluck]'
+python -m pytest
+python tests/rehearse_runtime_migration.py
+python tests/rehearse_generated_tool.py
+# Optional heavyweight Linux rehearsal; downloads PyPI CUDA Torch dependencies:
+python tests/rehearse_manager.py /path/to/new-empty-install
 ```
 
-The suite has three layers:
-- **`tests/test_*.py`** — `scriptkit` unit tests (mockable; no network, no real
-  subprocess beyond a local `echo`/`python -c`).
-- **`tests/test_tools_characterization.py`** — pins each tool's pure helpers and
-  `--help`. This is what makes refactors provably non-breaking. Add cases here for
-  new pure functions.
-- **`tests/test_template.py`** — keeps the new-tool scaffold healthy.
+Unit/characterization tests use `tests/conftest.py`'s `tool_loader` for root tools.
+Keep existing characterization behavior unless an intentional change is documented.
+The required CI migration matrix runs on Linux/macOS/Windows and Python 3.11/3.14.
+The existing Voxtract implementation is POSIX-only (`fcntl`); do not claim Windows
+support or end-to-end media processing based solely on help/install smoke evidence.
 
-**Importing an extension-less tool in a test:** use the `tool_loader` fixture
-(`tests/conftest.py`), which loads the script via `SourceFileLoader` and registers
-it in `sys.modules` (required so `@dataclass` forward-refs resolve):
-
-```python
-def test_my_pure_fn(tool_loader):
-    m = tool_loader("mytool")
-    assert m.parse_thing("a.b") == ["a", "b"]
-```
-
-For end-to-end CLI behavior, prefer a subprocess smoke test:
-`subprocess.run([sys.executable, str(REPO_ROOT / "mytool"), "--help"])`.
-
-If your tool imports heavy/optional deps at module load, keep `--help` cheap (don't
-import torch/yt-dlp at top level if you can defer it) so smoke tests stay fast.
-
----
-
-## Gotchas
-
-- **`scriptkit` resolves from site-packages**, including outside-CWD invocations.
-  Do not insert repository/ancestor paths. Compatibility tests exercise the
-  external release, not a local runtime copy.
-- **`bool` is an `int`.** Handlers/`main` should return `None` or a real int exit
-  code, not a bool. `scriptkit.dispatch`/`run_cli` guard against this, but don't rely
-  on it.
-- **Config coercion** turns `"3.5"`→`3.5` and `"true"`→`True`. If a config value must
-  stay a string that looks numeric/boolean, don't pass `coerce=True` for that path.
-- **The `scripts` installer must stay robust.** Its `scriptkit` import is guarded
-  (`try/except`) so a broken library can't brick installs — keep it that way.
-- **Don't construct a new `rich.Console()`** in a tool — use `sk.rich_console` /
-  `sk.err_console`.
-- **`sk.doctor` is the function; `scriptkit.doctor` (the submodule) is shadowed by
-  it** at the package level (by design). Tools only ever call `sk.doctor(...)` —
-  don't `import scriptkit.doctor` (you'll get the function). Tests that need the
-  module's constants reach it via `sys.modules["scriptkit.doctor"]`.
-- **The banner goes to stderr** (via `dispatch`), so a command's stdout stays a
-  clean data stream (`pluck get x | jq` works). Keep machine output on stdout;
-  don't print chrome there.
-
----
-
-## Checklists
-
-**New tool**
-- [ ] `cp templates/tool_template.py <name>`, edit, keep the installed `scriptkit` import
-- [ ] `ICON` + `TAGLINE` set; parser via `sk.make_parser`; `__version__ = "0.1.0"`
-- [ ] Subcommands wired into `build_parser()` + `HANDLERS`; `DEFAULT_COMMAND` chosen
-- [ ] Tool error type subclasses `sk.CliError`; `__main__` is `sk.run_cli(main)`
-- [ ] `doctor` built with `sk.doctor` + `check_binary`/`check_python` (real deps)
-- [ ] Registered in `scripts` (`TOOLS` + `TOOL_NAMES`)
-- [ ] `requirements/<name>.txt` (+ `pyproject.toml` extra)
-- [ ] `docs/<name>.md` + README card + `CHANGELOG.md` section
-- [ ] Tests: `--help` smoke + pure-function unit tests
-- [ ] `venv/bin/python -m pytest` green
-
-**Editing a tool**
-- [ ] Output/config/subprocess go through `scriptkit`
-- [ ] New deps declared in `requirements/<tool>.txt`
-- [ ] **Version bumped once per landing** (MAJOR/MINOR/PATCH) in `__version__` **and**
-      the docstring header (and docs H1 if pinned) — see [Versioning](#versioning--changelog);
-      if an uncommitted bump already exists for this tool, **coalesce** (same version,
-      extend the changelog entry) instead of incrementing again
-- [ ] `CHANGELOG.md` entry added or extended under the tool's section
-- [ ] Characterization tests still pass (or updated intentionally)
-- [ ] `venv/bin/python -m pytest` green
+`CLAUDE.md` is a symlink to this guide. The external framework's authoring and
+conformance rules apply to generated projects; do not duplicate its implementation.

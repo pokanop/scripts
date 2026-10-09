@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts — Toolkit installer & lifecycle manager  v1.2.2
+scripts — Toolkit installer & lifecycle manager  v1.3.0
 Install, update, and diagnose the pokanop/scripts CLI toolkit.
 
 Usage:
@@ -19,6 +19,7 @@ Environment:
 from __future__ import annotations
 
 import argparse
+import shlex
 import json
 import os
 import platform
@@ -29,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-__version__ = "1.2.2"
+__version__ = "1.3.0"
 
 # scriptkit is an externally installed runtime. This installer must survive even a
 # broken/absent library — so the import is guarded and everything degrades to
@@ -48,52 +49,11 @@ MARKER_NAME = ".scripts-install.json"
 PATH_BEGIN = "# >>> scripts >>>"
 PATH_END = "# <<< scripts <<<"
 
-# Meta tool is always installed; other tools are optional CLI utilities.
-TOOL_NAMES = ("medcat", "keyferry", "voxtract", "netsy", "pluck", "aikit")
+from pokanop_manager.catalog import load as load_catalog
 
-TOOLS: dict[str, dict] = {
-    "medcat": {
-        "description": "Media stack ingest tool",
-        "requirements": "requirements/medcat.txt",
-        "system": [
-            ("ffmpeg", False, "audio/video metadata and transcoding"),
-            ("yt-dlp", False, "YouTube search and download (also installed via pip)"),
-        ],
-    },
-    "keyferry": {
-        "description": "1Password ⇄ Bitwarden credential ferry",
-        "requirements": "requirements/keyferry.txt",
-        "system": [
-            ("op", True, "1Password CLI — https://1password.com/downloads/command-line"),
-            ("bw", True, "Bitwarden CLI — native binary; see bitwarden.com/help/cli/"),
-        ],
-    },
-    "voxtract": {
-        "description": "Voice extract tool (YouTube, Spotify, Demucs isolation)",
-        "requirements": "requirements/voxtract.txt",
-        "system": [
-            ("ffmpeg", True, "audio format conversion"),
-            ("yt-dlp", False, "YouTube/podcast download (also installed via pip)"),
-        ],
-    },
-    "netsy": {
-        "description": "LAN discovery tool",
-        "requirements": "requirements/netsy.txt",
-        "system": [
-            ("nmap", True, "network scan — brew/apt/winget install nmap"),
-        ],
-    },
-    "pluck": {
-        "description": "Config key-path tool (YAML, JSON, TOML, .env)",
-        "requirements": "requirements/pluck.txt",
-        "system": [],
-    },
-    "aikit": {
-        "description": "AI coding agent CLI installer & manager",
-        "requirements": "requirements/aikit.txt",
-        "system": [],
-    },
-}
+# Compatibility aliases derived from the single validated catalog (no tool imports).
+TOOLS = load_catalog()
+TOOL_NAMES = tuple(TOOLS)
 
 
 BW_CLI_RELEASES = "https://github.com/bitwarden/clients/releases"
@@ -220,30 +180,6 @@ def validate_tools(names: list[str]) -> list[str]:
     if unknown:
         raise SystemExit(f"Unknown tool(s): {', '.join(unknown)}. Run: scripts list")
     return names
-
-
-def pip_install_requirements(install_dir: Path, tools: list[str], upgrade: bool = False) -> None:
-    pip_install_base(install_dir, upgrade=upgrade)
-    pip = venv_pip(install_dir)
-    seen: set[str] = set()
-    req_files: list[Path] = []
-    for tool in tools:
-        rel = TOOLS[tool]["requirements"]
-        path = install_dir / rel
-        if not path.exists():
-            raise SystemExit(f"Missing requirements file: {path}")
-        key = str(path.resolve())
-        if key not in seen:
-            seen.add(key)
-            req_files.append(path)
-
-    for req in req_files:
-        cmd = pip + ["install"]
-        if upgrade:
-            cmd.append("--upgrade")
-        cmd += ["-r", str(req)]
-        print(f"→ pip install -r {req.relative_to(install_dir)}")
-        subprocess.run(cmd, cwd=install_dir, check=True)
 
 
 def remove_legacy_runtime_owner(install_dir: Path) -> bool:
@@ -544,6 +480,81 @@ def git_pull(install_dir: Path) -> bool:
     return False
 
 
+def managed_install(root: Path, bin_dir: Path, names: list[str]) -> None:
+    from pokanop_manager.lifecycle import install
+    install(root, bin_dir, names, legacy_wrapper=lambda name: wrapper_content(name, root, bin_dir))
+    # The host CLI is separate from tool generations. Existing bootstrap wrappers
+    # remain usable, including the legacy repair fallback.
+    dest = wrapper_dest(bin_dir, "scripts")
+    if not dest.exists():
+        import shlex
+        if os.name == "nt":
+            from scriptkit.bootstrap import cmd_launcher
+            # The repo host (unlike isolated generation runners) needs its own
+            # sibling adapter package. Retain the framework's UTF-8/codepage and
+            # exit-code handling, but use ordinary script-directory imports.
+            content = cmd_launcher(sys.executable, root / "scripts", utf8=True).replace(" -I -X utf8 ", " -X utf8 ")
+        else:
+            content = '#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' ' + shlex.quote(str(root / "scripts")) + ' "$@"\n'
+        with dest.open("x", encoding="utf-8") as f:
+            f.write(content)
+        dest.chmod(0o755)
+
+
+def cmd_migrate(args: argparse.Namespace) -> None:
+    root = resolve_install_dir(args.dir)
+    bin_dir = resolve_bin_dir(args.bin_dir, root)
+    names = args.tools or (read_marker(root) or {}).get("tools", [])
+    names = list(TOOL_NAMES) if names == ["all"] else validate_tools(names)
+    from pokanop_manager.lifecycle import preview
+    if args.dry_run:
+        print(json.dumps(preview(root, bin_dir, names), indent=2))
+        return
+    managed_install(root, bin_dir, names)
+    print("✅ Migration complete; old environments retained. Undo: scripts rollback")
+
+
+def cmd_rollback(args: argparse.Namespace) -> None:
+    from pokanop_manager.lifecycle import rollback
+    root = resolve_install_dir(args.dir)
+    rollback(root, resolve_bin_dir(args.bin_dir, root))
+    print("✅ Previous migration restored.")
+
+
+def cmd_unregister(args: argparse.Namespace) -> None:
+    from scriptkit.manager import storage
+    from pokanop_manager.catalog import read_json
+    root = resolve_install_dir(args.dir)
+    path = root / ".scripts-catalog.json"
+    with storage.locked(root / ".scripts-state"):
+        if args.name in (read_marker(root) or {}).get("tools", []):
+            raise ValueError("uninstall the tool before unregistering it")
+        current = read_json(path) if path.exists() else {}
+        if args.name not in current:
+            raise ValueError("not a local catalog registration")
+        del current[args.name]
+        storage.publish(path, current)
+    print(f"Unregistered {args.name}")
+
+
+def cmd_register(args: argparse.Namespace) -> None:
+    from scriptkit.contracts import ToolSpec
+    from scriptkit.manager import storage
+    from pokanop_manager.catalog import read_json
+    root = resolve_install_dir(args.dir)
+    project = Path(args.project).resolve()
+    spec = ToolSpec.from_json((project / "tool.json").read_text(encoding="utf-8"))
+    path = root / ".scripts-catalog.json"
+    with storage.locked(root / ".scripts-state"):
+        if spec.name in load_catalog(root):
+            raise ValueError("Tool name already registered")
+        current = read_json(path) if path.exists() else {}
+        current[spec.name] = {"description": spec.description, "requirements": "requirements.txt", "system": [], "project": str(project)}
+        load_catalog(overlay=current)  # Validate the entire candidate before publication.
+        storage.publish(path, current)
+    print(f"Registered {spec.name}; install with: scripts install {spec.name}")
+
+
 def cmd_install(args: argparse.Namespace) -> None:
     install_dir = resolve_install_dir(args.dir)
     bin_dir = resolve_bin_dir(args.bin_dir, install_dir)
@@ -579,16 +590,21 @@ def cmd_install(args: argparse.Namespace) -> None:
 
     # Pull the latest source first so `install` means "install the latest"
     # (a git checkout only). `--no-pull` skips it; non-git installs are a no-op.
-    if not args.no_pull and is_git_clone(install_dir):
+    if not getattr(args, "dry_run", False) and not args.no_pull and is_git_clone(install_dir):
         git_pull(install_dir)
 
-    ensure_venv(install_dir)
+    if getattr(args, "dry_run", False):
+        from pokanop_manager.lifecycle import preview
+        print(json.dumps(preview(install_dir, bin_dir, pip_tools), indent=2))
+        return
     if pip_tools:
-        pip_install_requirements(install_dir, pip_tools, upgrade=args.upgrade)
+        managed_install(install_dir, bin_dir, pip_tools)
     else:
+        ensure_venv(install_dir)
         pip_install_base(install_dir, upgrade=args.upgrade)
-    install_wrappers(install_dir, bin_dir, all_tools)
-    write_marker(install_dir, bin_dir, all_tools)
+        install_wrappers(install_dir, bin_dir, [])
+        if not marker:
+            write_marker(install_dir, bin_dir, [])
 
     if not args.no_path:
         ensure_path_in_shell(bin_dir)
@@ -614,18 +630,21 @@ def cmd_update(args: argparse.Namespace) -> None:
 
     print(f"Updating {install_dir} ...")
     print()
-    if is_git_clone(install_dir):
+    if not getattr(args, "dry_run", False) and is_git_clone(install_dir):
         git_pull(install_dir)
     else:
-        print("ℹ Not a git checkout — skipping git pull")
+        print("ℹ Skipping git pull")
 
-    ensure_venv(install_dir)
+    if getattr(args, "dry_run", False):
+        from pokanop_manager.lifecycle import preview
+        print(json.dumps(preview(install_dir, bin_dir, tools), indent=2))
+        return
     if tools:
-        pip_install_requirements(install_dir, tools, upgrade=True)
+        managed_install(install_dir, bin_dir, tools)
     else:
+        ensure_venv(install_dir)
         pip_install_base(install_dir, upgrade=True)
-    install_wrappers(install_dir, bin_dir, tools)
-    write_marker(install_dir, bin_dir, tools)
+        install_wrappers(install_dir, bin_dir, [])
     print()
     print("✅ Update complete.")
 
@@ -657,7 +676,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     installed_tools = marker.get("tools", []) if marker else []
     for name in TOOL_NAMES:
-        script = install_dir / name
+        runner = (marker or {}).get("runners", {}).get(name)
+        script = Path(runner[0]) if runner else install_dir / name
         wrapper = bin_dir / name
         if platform.system() == "Windows":
             wrapper = bin_dir / f"{name}.cmd"
@@ -702,7 +722,8 @@ def _doctor_rich(install_dir: Path, bin_dir: Path, marker: Optional[dict]) -> in
     installed_tools = marker.get("tools", []) if marker else []
     tools, available = [], []
     for name in TOOL_NAMES:
-        script = install_dir / name
+        runner = (marker or {}).get("runners", {}).get(name)
+        script = Path(runner[0]) if runner else install_dir / name
         wrapper = bin_dir / (f"{name}.cmd" if platform.system() == "Windows" else name)
         if wrapper.exists() and script.exists():
             tools.append(_sk.Check.ok(name, TOOLS[name]["description"]))
@@ -778,6 +799,14 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     marker = read_marker(install_dir)
     registered = list(marker.get("tools", [])) if marker else []
 
+    managed = bool(marker and marker.get("version") == 2)
+    if managed and args.tools:
+        from pokanop_manager.lifecycle import uninstall
+        names = validate_tools(args.tools)
+        uninstall(install_dir, bin_dir, names, legacy_wrapper=lambda name: wrapper_content(name, install_dir, bin_dir))
+        print("✅ Uninstalled selected tools. Generations, harness and user state retained.")
+        return
+
     if args.tools:
         tools = validate_tools(args.tools)
         remaining = sorted(set(registered) - set(tools))
@@ -816,6 +845,10 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     if not args.keep_path:
         print("  PATH block:  shell rc / Windows user PATH")
     print(f"  Venv:        {install_dir / 'venv'}")
+    if managed:
+        print(f"  Generations: {install_dir / '.scripts-state'}")
+    if (install_dir / '.scripts-harness').exists():
+        print(f"  Harness:     {install_dir / '.scripts-harness'}")
     print(f"  Marker:      {marker_path(install_dir)}")
     if remove_install_dir:
         print(f"  Install dir: {install_dir} (entire directory)")
@@ -830,20 +863,41 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
         return
 
     print()
+    if managed:
+        from pokanop_manager.lifecycle import uninstall
+        uninstall(install_dir, bin_dir, registered,
+                  legacy_wrapper=lambda name: wrapper_content(name, install_dir, bin_dir))
+        # Tool wrappers have been ownership-checked and removed by the manager.
+        targets = []
     remove_wrappers(bin_dir, targets, include_scripts=True)
     if not args.keep_path:
         remove_path_from_shell(bin_dir)
 
-    venv_dir = install_dir / "venv"
-    if venv_dir.exists():
-        shutil.rmtree(venv_dir)
-        print(f"→ Removed {venv_dir}")
-
     delete_marker(install_dir)
 
-    if remove_install_dir and install_dir.exists():
-        shutil.rmtree(install_dir)
-        print(f"→ Removed {install_dir}")
+    def remove_data(path: Path) -> None:
+        if not path.exists():
+            return
+        try:
+            shutil.rmtree(path)
+            print(f"→ Removed {path}")
+        except OSError:
+            # In particular, Windows cannot delete a running harness interpreter.
+            print(f"Retained (close running tools, then delete): {path}")
+            if os.name == "nt":
+                quoted = str(path).replace("'", "''")
+                print(f"  Remove-Item -LiteralPath '{quoted}' -Recurse -Force")
+            else:
+                print(f"  rm -rf -- {shlex.quote(str(path))}")
+
+    remove_data(install_dir / "venv")
+    if managed:
+        remove_data(install_dir / ".scripts-state")
+    remove_data(install_dir / ".scripts-harness")
+    if remove_install_dir:
+        remove_data(install_dir)
+    elif install_dir.exists():
+        print(f"Install sources retained: {install_dir}")
 
     print()
     print("✅ Uninstall complete.")
@@ -886,6 +940,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     install_p = sub.add_parser("install", parents=[common], help="Install tools and dependencies")
     install_p.add_argument("tools", nargs="*", help="Tools to add (default: harness only; use 'all' for every tool)")
+    install_p.add_argument("--dry-run", action="store_true", help="Explain migration without writes or downloads")
     install_p.add_argument("--upgrade", action="store_true", help="Upgrade existing packages")
     install_p.add_argument("--no-path", action="store_true", help="Do not modify shell PATH")
     install_p.add_argument("--no-pull", action="store_true", help="Do not git pull latest source first")
@@ -893,9 +948,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     update_p = sub.add_parser("update", parents=[common], help="Update install from git + refresh deps")
     update_p.add_argument("tools", nargs="*", help="Tools to update (default: installed set)")
+    update_p.add_argument("--dry-run", action="store_true", help="Explain update without writes or downloads")
     update_p.set_defaults(func=cmd_update)
 
-    uninstall_p = sub.add_parser("uninstall", parents=[common], help="Remove wrappers, venv, and install data")
+    migrate_p = sub.add_parser("migrate", parents=[common], help="Stage legacy tools and atomically migrate routing")
+    migrate_p.add_argument("tools", nargs="*")
+    migrate_p.add_argument("--dry-run", action="store_true")
+    migrate_p.set_defaults(func=cmd_migrate)
+    sub.add_parser("rollback", parents=[common], help="Restore previous migration routing").set_defaults(func=cmd_rollback)
+    register_p = sub.add_parser("register", parents=[common], help="Register a generated repository-layout tool")
+    register_p.add_argument("project")
+    register_p.set_defaults(func=cmd_register)
+    unregister_p = sub.add_parser("unregister", parents=[common], help="Remove an uninstalled local catalog registration")
+    unregister_p.add_argument("name")
+    unregister_p.set_defaults(func=cmd_unregister)
+
+    uninstall_p = sub.add_parser("uninstall", parents=[common], help="Remove selected wrappers, or fully remove toolkit/PATH/environments (user config retained)")
     uninstall_p.add_argument("tools", nargs="*", help="Tools to remove (default: full uninstall)")
     uninstall_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     uninstall_p.add_argument("--keep-path", action="store_true", help="Do not remove shell PATH changes")
@@ -914,26 +982,70 @@ def build_parser() -> argparse.ArgumentParser:
 DEFAULT_COMMAND = "list"
 
 
+def ensure_manager(args) -> int | None:
+    if args.command not in {"install", "update", "migrate", "rollback", "register", "unregister", "uninstall"} or getattr(args, "dry_run", False):
+        return None
+    if args.command == "uninstall":
+        marker = read_marker(resolve_install_dir(args.dir))
+        if not marker or marker.get("version") != 2:
+            return None  # Legacy removal is stdlib-only, including when offline.
+    try:
+        from scriptkit.contracts.artifacts import ArtifactPolicy
+        if _sk is not None and _sk.__version__ == "1.5.0":
+            return None
+    except ImportError:
+        pass
+    if os.environ.get("SCRIPTS_MANAGER_REEXEC"):
+        raise ValueError("Manager repair failed; expected ScriptKit 1.5.0")
+    root = resolve_install_dir(args.dir)
+    host = root / ".scripts-harness"
+    py = host / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    if not py.exists():
+        subprocess.run([sys.executable, "-m", "venv", str(host)], check=True)
+    subprocess.run([str(py), "-m", "pip", "install", "-r", str(root / "requirements/base.txt")], check=True)
+    return subprocess.run([str(py), str(Path(__file__).resolve()), *sys.argv[1:]],
+                          env={**os.environ, "SCRIPTS_MANAGER_REEXEC": "1"}).returncode
+
+
 def main() -> int:
+    global TOOLS, TOOL_NAMES
     parser = build_parser()
     if _sk is not None:
         args = _sk.parse_args(parser, default=DEFAULT_COMMAND)
     else:  # bootstrap fallback: inject the default command by hand
         argv = sys.argv[1:]
-        commands = {"install", "update", "uninstall", "doctor", "list", "path"}
+        commands = {"install", "update", "uninstall", "doctor", "list", "path", "migrate", "rollback", "register", "unregister"}
         if argv and argv[0] not in commands and not argv[0].startswith("-"):
             argv = [DEFAULT_COMMAND, *argv]
         elif not argv:
             argv = [DEFAULT_COMMAND]
         args = parser.parse_args(argv)
 
+    root = resolve_install_dir(getattr(args, "dir", None))
+    try:
+        TOOLS = load_catalog(root)
+    except (ValueError, OSError) as exc:
+        print(f"scripts: {exc}", file=sys.stderr)
+        return 1
+    TOOL_NAMES = tuple(TOOLS)
+    try:
+        repaired = ensure_manager(args)
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        print(f"scripts: {exc}", file=sys.stderr)
+        return 1
+    if repaired is not None:
+        return repaired
     func = getattr(args, "func", None)
     if func is None:
         parser.print_help()
         return 0
     if _sk is not None:  # identity to stderr — visible, never pollutes stdout
         print(_sk.banner("scripts", __version__, TAGLINE, ICON), file=sys.stderr)
-    rc = func(args)
+    try:
+        rc = func(args)
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        print(f"scripts: {exc}", file=sys.stderr)
+        return 1
     return rc if isinstance(rc, int) and not isinstance(rc, bool) else 0
 
 

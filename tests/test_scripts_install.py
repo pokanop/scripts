@@ -17,7 +17,7 @@ def _patch_heavy(m, monkeypatch, calls):
     monkeypatch.setattr(m, "git_pull", lambda p: calls.append(p))
     monkeypatch.setattr(m, "ensure_venv", lambda p: None)
     monkeypatch.setattr(m, "pip_install_base", lambda p, upgrade=False: None)
-    monkeypatch.setattr(m, "pip_install_requirements", lambda p, t, upgrade=False: None)
+    monkeypatch.setattr(m, "managed_install", lambda p, b, t: None)
     monkeypatch.setattr(m, "install_wrappers", lambda *a, **k: None)
     monkeypatch.setattr(m, "write_marker", lambda *a, **k: None)
     monkeypatch.setattr(m, "read_marker", lambda p=None: None)

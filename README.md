@@ -164,10 +164,16 @@ Install, update, authenticate, and manage 38 AI coding agent CLIs from one tool 
 
 ## Shared library: [scriptkit](docs/scriptkit.md)
 
-The runtime now comes from the external `pokanop-scriptkit` 1.3.0 wheel, pinned
+The runtime and manager come from the external `pokanop-scriptkit` 1.5.0 wheel, pinned
 by release URL and SHA-256; this repo no longer owns a `scriptkit/` package.
 See [migration, repair and rollback](docs/runtime-migration.md) before upgrading
 an environment that installed the old `pokanop-scripts` wheel.
+
+Tools now install into separate verified generations, not a shared dependency
+venv. Preview an existing install with `scripts migrate --dry-run`, apply with
+`scripts migrate`, and undo with `scripts rollback`. See the
+[isolated manager guide](docs/manager-migration.md) for locks, generated-tool
+registration, per-tool retention and full toolkit removal.
 
 Every tool is built on **[`scriptkit`](docs/scriptkit.md)** — one tested home for
 color, icons, semantic messages, prompts, progress bars, tables, three-tier config,
