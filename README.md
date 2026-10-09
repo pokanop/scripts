@@ -173,7 +173,7 @@ Tools now install into separate verified generations, not a shared dependency
 venv. Preview an existing install with `scripts migrate --dry-run`, apply with
 `scripts migrate`, and undo with `scripts rollback`. See the
 [isolated manager guide](docs/manager-migration.md) for locks, generated-tool
-registration and non-destructive uninstall.
+registration, per-tool retention and full toolkit removal.
 
 Every tool is built on **[`scriptkit`](docs/scriptkit.md)** — one tested home for
 color, icons, semantic messages, prompts, progress bars, tables, three-tier config,

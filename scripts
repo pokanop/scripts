@@ -19,6 +19,7 @@ Environment:
 from __future__ import annotations
 
 import argparse
+import shlex
 import json
 import os
 import platform
@@ -51,7 +52,7 @@ PATH_END = "# <<< scripts <<<"
 from pokanop_manager.catalog import load as load_catalog
 
 # Compatibility aliases derived from the single validated catalog (no tool imports).
-TOOLS = load_catalog(Path(__file__).resolve().parent)
+TOOLS = load_catalog()
 TOOL_NAMES = tuple(TOOLS)
 
 
@@ -543,12 +544,13 @@ def cmd_register(args: argparse.Namespace) -> None:
     root = resolve_install_dir(args.dir)
     project = Path(args.project).resolve()
     spec = ToolSpec.from_json((project / "tool.json").read_text(encoding="utf-8"))
-    if spec.name in load_catalog(root):
-        raise SystemExit("Tool name already registered")
     path = root / ".scripts-catalog.json"
     with storage.locked(root / ".scripts-state"):
+        if spec.name in load_catalog(root):
+            raise ValueError("Tool name already registered")
         current = read_json(path) if path.exists() else {}
         current[spec.name] = {"description": spec.description, "requirements": "requirements.txt", "system": [], "project": str(project)}
+        load_catalog(overlay=current)  # Validate the entire candidate before publication.
         storage.publish(path, current)
     print(f"Registered {spec.name}; install with: scripts install {spec.name}")
 
@@ -797,11 +799,10 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     marker = read_marker(install_dir)
     registered = list(marker.get("tools", [])) if marker else []
 
-    if marker and marker.get("version") == 2:
+    managed = bool(marker and marker.get("version") == 2)
+    if managed and args.tools:
         from pokanop_manager.lifecycle import uninstall
-        names = validate_tools(args.tools) if args.tools else registered
-        if not args.tools and not args.yes and not confirm("Uninstall scripts toolkit?"):
-            return
+        names = validate_tools(args.tools)
         uninstall(install_dir, bin_dir, names, legacy_wrapper=lambda name: wrapper_content(name, install_dir, bin_dir))
         print("✅ Uninstalled selected tools. Generations, harness and user state retained.")
         return
@@ -844,6 +845,9 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
     if not args.keep_path:
         print("  PATH block:  shell rc / Windows user PATH")
     print(f"  Venv:        {install_dir / 'venv'}")
+    if managed:
+        print(f"  Generations: {install_dir / '.scripts-state'}")
+        print(f"  Harness:     {install_dir / '.scripts-harness'}")
     print(f"  Marker:      {marker_path(install_dir)}")
     if remove_install_dir:
         print(f"  Install dir: {install_dir} (entire directory)")
@@ -858,20 +862,41 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
         return
 
     print()
+    if managed:
+        from pokanop_manager.lifecycle import uninstall
+        uninstall(install_dir, bin_dir, registered,
+                  legacy_wrapper=lambda name: wrapper_content(name, install_dir, bin_dir))
+        # Tool wrappers have been ownership-checked and removed by the manager.
+        targets = []
     remove_wrappers(bin_dir, targets, include_scripts=True)
     if not args.keep_path:
         remove_path_from_shell(bin_dir)
 
-    venv_dir = install_dir / "venv"
-    if venv_dir.exists():
-        shutil.rmtree(venv_dir)
-        print(f"→ Removed {venv_dir}")
-
     delete_marker(install_dir)
 
-    if remove_install_dir and install_dir.exists():
-        shutil.rmtree(install_dir)
-        print(f"→ Removed {install_dir}")
+    def remove_data(path: Path) -> None:
+        if not path.exists():
+            return
+        try:
+            shutil.rmtree(path)
+            print(f"→ Removed {path}")
+        except OSError:
+            # In particular, Windows cannot delete a running harness interpreter.
+            print(f"Retained (close running tools, then delete): {path}")
+            if os.name == "nt":
+                quoted = str(path).replace("'", "''")
+                print(f"  Remove-Item -LiteralPath '{quoted}' -Recurse -Force")
+            else:
+                print(f"  rm -rf -- {shlex.quote(str(path))}")
+
+    remove_data(install_dir / "venv")
+    if managed:
+        remove_data(install_dir / ".scripts-state")
+        remove_data(install_dir / ".scripts-harness")
+    if remove_install_dir:
+        remove_data(install_dir)
+    elif install_dir.exists():
+        print(f"Install sources retained: {install_dir}")
 
     print()
     print("✅ Uninstall complete.")
@@ -937,7 +962,7 @@ def build_parser() -> argparse.ArgumentParser:
     unregister_p.add_argument("name")
     unregister_p.set_defaults(func=cmd_unregister)
 
-    uninstall_p = sub.add_parser("uninstall", parents=[common], help="Remove wrappers, venv, and install data")
+    uninstall_p = sub.add_parser("uninstall", parents=[common], help="Remove selected wrappers, or fully remove toolkit/PATH/environments (user config retained)")
     uninstall_p.add_argument("tools", nargs="*", help="Tools to remove (default: full uninstall)")
     uninstall_p.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt")
     uninstall_p.add_argument("--keep-path", action="store_true", help="Do not remove shell PATH changes")
@@ -992,7 +1017,11 @@ def main() -> int:
         args = parser.parse_args(argv)
 
     root = resolve_install_dir(getattr(args, "dir", None))
-    TOOLS = load_catalog(root)
+    try:
+        TOOLS = load_catalog(root)
+    except (ValueError, OSError) as exc:
+        print(f"scripts: {exc}", file=sys.stderr)
+        return 1
     TOOL_NAMES = tuple(TOOLS)
     repaired = ensure_manager(args)
     if repaired is not None:

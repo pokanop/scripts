@@ -90,11 +90,16 @@ generation inventories before restoring routing. It does not redownload dependen
 Legacy venvs and user configuration are never deleted. A v1 snapshot relies on the
 preserved legacy environment, which was never managed as an immutable generation.
 
-For v2 installs, uninstall removes only owned selected tool wrappers/routing and
-retains the harness, snapshots, generation environments and configuration. Full v2
-uninstall deactivates all registered tools; it is intentionally non-destructive.
-`--keep-dir`/`--keep-path` remain accepted for compatibility. No automatic pruning
-is provided. Private state directories/ACLs and the base Python must remain stable.
+For v2 installs, per-tool uninstall removes only owned selected tool wrappers/routing
+and retains the harness, snapshots, generation environments and configuration.
+It invalidates the prior install's rollback pointer rather than restoring a snapshot
+whose wrappers have since been removed. Reinstall a removed tool to activate it again.
+Full `scripts uninstall -y` additionally removes the host wrapper, marker, PATH block
+(unless `--keep-path`), legacy venv, managed generations and harness. The default
+non-clone install directory is also removed unless `--keep-dir`; custom directories
+and Git clones retain their sources. User configuration is never removed. If a
+running interpreter or permissions prevent deletion, retained paths and explicit
+shell cleanup commands are printed. No automatic pruning between installs is provided. Private state directories/ACLs and the base Python must remain stable.
 Windows `.cmd` launchers are interactive shims, not safe transports for untrusted
 shell metacharacters; programmatic callers should invoke the recorded interpreter
 and runner as an argument list with `shell=False`.

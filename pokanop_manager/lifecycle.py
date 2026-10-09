@@ -241,6 +241,11 @@ def uninstall(root: Path, bin_dir: Path, names: list[str], *, legacy_wrapper=Non
         value = {**old, "tools": sorted(set(old["tools"]) - set(names)),
                  "runners": {k: v for k, v in old.get("runners", {}).items() if k not in names},
                  "receipts": {k: v for k, v in old.get("receipts", {}).items() if k not in names}}
+        if set(names) & set(old["tools"]):
+            # A pre-install snapshot may refer to wrappers removed by uninstall.
+            # Do not advertise rollback to a routing table we can no longer serve.
+            value.pop("previous_marker", None)
+            value.pop("previous_marker_sha256", None)
         storage.publish(root / MARKER, value)
         for name in names:
             destination(bin_dir, name).unlink(missing_ok=True)

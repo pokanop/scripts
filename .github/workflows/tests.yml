@@ -44,7 +44,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m pip install ".[dev,keyferry,aikit,pluck]"
-      - run: python -m pytest tests/test_external_runtime.py tests/test_manager_migration.py tests/test_manager_recovery.py tests/test_manager_legacy.py
+      - run: python -m pytest tests/test_external_runtime.py tests/test_manager_migration.py tests/test_manager_recovery.py tests/test_manager_legacy.py tests/test_manager_review.py
       - run: python tests/rehearse_runtime_migration.py
       - run: python tests/rehearse_generated_tool.py
 

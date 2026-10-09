@@ -19,19 +19,27 @@ def read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
 
 
-def load(root: Path | None = None) -> dict:
+def load(root: Path | None = None, *, overlay: dict | None = None) -> dict:
     value = read_json(Path(__file__).with_name("catalog.json"))
     if set(value) != {"schema_version", "tools"} or value["schema_version"] != 1:
         raise ValueError("unsupported Pokanop catalog")
     tools = value["tools"]
-    if root and (root / ".scripts-catalog.json").exists():
-        extra = read_json(root / ".scripts-catalog.json")
+    if overlay is None and root and (root / ".scripts-catalog.json").exists():
+        overlay = read_json(root / ".scripts-catalog.json")
+    if overlay is not None:
+        if not isinstance(overlay, dict):
+            raise ValueError("catalog overlay must be an object")
+        extra = overlay
         if set(extra) & set(tools):
             raise ValueError("registered tool collides with built-in catalog")
         tools.update(extra)
     for name, tool in tools.items():
-        if not re.fullmatch(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*", name) or name == "scripts":
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*", name) or name == "scripts":
             raise ValueError("invalid catalog tool name")
+        if not isinstance(tool, dict):
+            raise ValueError(f"invalid catalog entry: {name}")
+        if "project" in tool and not isinstance(tool["project"], str):
+            raise ValueError("invalid project path")
         if set(tool) not in ({"description", "requirements", "system"},
                              {"description", "requirements", "system", "project"}):
             raise ValueError(f"unknown catalog fields: {name}")

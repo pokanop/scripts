@@ -31,8 +31,9 @@ ScriptKit installs the complete verified lock offline.
 - `.scripts-install.json` is the single atomic routing commit for a migration
   batch. Stage and smoke **all** selected tools before switching this marker.
 - Public wrappers handle both v1 and v2 routing. Never overwrite foreign/edited
-  tool wrappers. Uninstall retains environments and user data; garbage collection
-  is deliberately not automatic.
+  tool wrappers. Per-tool uninstall retains environments; full uninstall removes
+  toolkit environments and honors PATH/source-retention flags. User config is
+  always retained. Garbage collection between installs is not automatic.
 
 See [manager migration](docs/manager-migration.md) for dry-run, rollback, source
 trust, lock preparation, platform limits and interruption semantics.

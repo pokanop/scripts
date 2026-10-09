@@ -43,7 +43,7 @@ Tool configuration and existing wrappers are preserved if dependency repair fail
 
 Selected-tool installation, update and explicit v1 migration now use isolated
 immutable generations. See [manager migration](manager-migration.md) for the atomic
-multi-tool handoff, failure recovery, non-destructive uninstall and rollback.
+multi-tool handoff, failure recovery, per-tool/full uninstall and rollback.
 
 ## Rehearsals
 
