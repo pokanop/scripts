@@ -272,7 +272,7 @@ def install_wrappers(install_dir: Path, bin_dir: Path, tools: list[str]) -> None
             print(f"⚠ Skipping wrapper for missing script: {tool}", file=sys.stderr)
             continue
         dest = wrapper_dest(bin_dir, tool)
-        dest.write_text(wrapper_content(tool, install_dir, bin_dir))
+        dest.write_bytes(wrapper_content(tool, install_dir, bin_dir).encode())
         if platform.system() != "Windows":
             dest.chmod(dest.stat().st_mode | 0o111)
         print(f"→ {dest}")

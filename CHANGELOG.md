@@ -8,6 +8,13 @@ Newest entries on top, within each tool.
 
 ---
 
+## scripts
+
+### 1.3.1 — 2026-10-10
+- Accept exact historical Windows CRCRLF legacy wrappers during migration and
+  per-tool uninstall, without accepting edited wrappers. Write new legacy wrappers
+  as exact UTF-8 bytes to avoid text-mode newline translation. (POK-649)
+
 ## scriptkit
 
 ### 1.3.0 — 2026-07-16
