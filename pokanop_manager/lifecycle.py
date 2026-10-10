@@ -59,6 +59,15 @@ def wrapper(root: Path, name: str) -> bytes:
     return f'#!/bin/sh\nexec {args} "$@"\n'.encode()
 
 
+def legacy_wrapper_bytes(content: str) -> list[bytes]:
+    """Recognize exact legacy output, including Windows text-mode translation."""
+    allowed = [content.encode()]
+    if os.name == "nt":
+        # V1 wrote already-CRLF text through write_text's newline translation.
+        allowed.append(content.replace("\r\n", "\r\r\n").encode())
+    return allowed
+
+
 def destination(bin_dir: Path, name: str) -> Path:
     return bin_dir / (name + (".cmd" if os.name == "nt" else ""))
 
@@ -122,7 +131,7 @@ def install(root: Path, bin_dir: Path, names: list[str], *, legacy_wrapper,
             path = destination(bin_dir, name)
             allowed = [wrapper(root, name)]
             if name in old["tools"]:
-                allowed.append(legacy_wrapper(name).encode())
+                allowed.extend(legacy_wrapper_bytes(legacy_wrapper(name)))
             if path.is_symlink() or (path.exists() and path.read_bytes() not in allowed):
                 raise ValueError(f"refusing foreign or edited wrapper: {path}")
         windows_loaders = {}
@@ -169,7 +178,7 @@ def install(root: Path, bin_dir: Path, names: list[str], *, legacy_wrapper,
                 path = destination(bin_dir, name)
                 allowed = [wrapper(root, name)]
                 if name in old["tools"]:
-                    allowed.append(legacy_wrapper(name).encode())
+                    allowed.extend(legacy_wrapper_bytes(legacy_wrapper(name)))
                 if path.is_symlink() or (path.exists() and path.read_bytes() not in allowed):
                     raise ValueError(f"wrapper changed while staging: {path}")
                 backups[path] = path.read_bytes() if path.exists() else None
@@ -235,7 +244,7 @@ def uninstall(root: Path, bin_dir: Path, names: list[str], *, legacy_wrapper=Non
             dest = destination(bin_dir, name)
             allowed = [wrapper(root, name)]
             if legacy_wrapper and name in old["tools"] and name not in old.get("runners", {}):
-                allowed.append(legacy_wrapper(name).encode())
+                allowed.extend(legacy_wrapper_bytes(legacy_wrapper(name)))
             if dest.is_symlink() or (dest.exists() and dest.read_bytes() not in allowed):
                 raise ValueError(f"refusing foreign wrapper: {dest}")
         value = {**old, "tools": sorted(set(old["tools"]) - set(names)),
