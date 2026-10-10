@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts — Toolkit installer & lifecycle manager  v1.3.0
+scripts — Toolkit installer & lifecycle manager  v1.3.1
 Install, update, and diagnose the pokanop/scripts CLI toolkit.
 
 Usage:
@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 # scriptkit is an externally installed runtime. This installer must survive even a
 # broken/absent library — so the import is guarded and everything degrades to
@@ -818,7 +818,11 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
 
         remove_wrappers(bin_dir, tools)
         if not remaining:
-            remove_wrappers(bin_dir, [], include_scripts=True)
+            if os.name == "nt":
+                from pokanop_manager.windows_cleanup import defer_cleanup
+                defer_cleanup([wrapper_dest(bin_dir, "scripts")], marker_path(install_dir))
+            else:
+                remove_wrappers(bin_dir, [], include_scripts=True)
             if not args.keep_path:
                 remove_path_from_shell(bin_dir)
             delete_marker(install_dir)
@@ -869,7 +873,17 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
                   legacy_wrapper=lambda name: wrapper_content(name, install_dir, bin_dir))
         # Tool wrappers have been ownership-checked and removed by the manager.
         targets = []
-    remove_wrappers(bin_dir, targets, include_scripts=True)
+    deferred = os.name == "nt"
+    if deferred:
+        from pokanop_manager.windows_cleanup import defer_cleanup
+        cleanup = [wrapper_dest(bin_dir, "scripts"), install_dir / "venv",
+                   install_dir / ".scripts-harness"]
+        if managed:
+            cleanup.append(install_dir / ".scripts-state")
+        if remove_install_dir:
+            cleanup.append(install_dir)
+        defer_cleanup(cleanup, marker_path(install_dir))
+    remove_wrappers(bin_dir, targets, include_scripts=not deferred)
     if not args.keep_path:
         remove_path_from_shell(bin_dir)
 
@@ -890,13 +904,14 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
             else:
                 print(f"  rm -rf -- {shlex.quote(str(path))}")
 
-    remove_data(install_dir / "venv")
-    if managed:
-        remove_data(install_dir / ".scripts-state")
-    remove_data(install_dir / ".scripts-harness")
-    if remove_install_dir:
-        remove_data(install_dir)
-    elif install_dir.exists():
+    if not deferred:
+        remove_data(install_dir / "venv")
+        if managed:
+            remove_data(install_dir / ".scripts-state")
+        remove_data(install_dir / ".scripts-harness")
+        if remove_install_dir:
+            remove_data(install_dir)
+    if not remove_install_dir and install_dir.exists():
         print(f"Install sources retained: {install_dir}")
 
     print()

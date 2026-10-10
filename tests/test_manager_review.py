@@ -1,6 +1,8 @@
 """Review regressions: full managed uninstall and transactional registration."""
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -12,8 +14,22 @@ from pokanop_manager.catalog import load
 from test_manager_migration import installation, snapshot, setup_root
 
 
+@pytest.fixture
+def synchronous_cleanup(monkeypatch):
+    # Unit tests inspect effects in-process; native wrapper tests exercise the
+    # real process-handle handoff and wait for the detached worker to finish.
+    from pokanop_manager import windows_cleanup
+    def remove(paths, marker):
+        for path in paths:
+            if path.is_file():
+                path.unlink()
+            elif path.exists():
+                shutil.rmtree(path)
+    monkeypatch.setattr(windows_cleanup, "defer_cleanup", remove)
+
+
 @pytest.mark.parametrize("keep_dir,keep_path,clone", [(False, False, False), (True, True, False), (False, False, True)])
-def test_full_v2_uninstall(installation, tool_loader, monkeypatch, keep_dir, keep_path, clone):
+def test_full_v2_uninstall(installation, tool_loader, monkeypatch, keep_dir, keep_path, clone, synchronous_cleanup):
     root, bin_dir = installation
     setup_root(root)
     life.install(root, bin_dir, ["pluck"], legacy_wrapper=lambda _: "", prepare_tool=snapshot)
@@ -43,6 +59,7 @@ def test_full_v2_uninstall(installation, tool_loader, monkeypatch, keep_dir, kee
     assert user_config.read_text() == "keep"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows cleanup is deferred; covered by native wrapper tests")
 def test_locked_uninstall_data_prints_cleanup(installation, tool_loader, monkeypatch, capsys):
     root, bin_dir = installation
     setup_root(root)
@@ -90,7 +107,7 @@ def test_invalid_overlay_is_cli_error_not_traceback(tmp_path, overlay):
 
 @pytest.mark.parametrize("runtime", ["missing", "old"])
 @pytest.mark.parametrize("version", [None, 1])
-def test_legacy_full_uninstall_never_repairs(installation, tool_loader, monkeypatch, runtime, version):
+def test_legacy_full_uninstall_never_repairs(installation, tool_loader, monkeypatch, runtime, version, synchronous_cleanup):
     root, bin_dir = installation
     host = tool_loader("scripts")
     if runtime == "missing":
