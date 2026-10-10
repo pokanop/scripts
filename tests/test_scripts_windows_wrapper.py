@@ -21,7 +21,7 @@ def wait_cleanup(output):
         if "Cleanup finished" in text:
             assert "Retained:" not in text, text
             log.unlink()
-            return
+            return text
         time.sleep(0.1)
     pytest.fail(f"cleanup did not finish: {log.read_text()}")
 
@@ -41,13 +41,20 @@ def installed_host(tool_loader, tmp_path):
 
 
 @pytest.mark.parametrize("status", [0, 7])
-def test_deferred_self_deletion_preserves_status(installed_host, status):
+@pytest.mark.parametrize("restore_marker", [False, True])
+def test_deferred_self_deletion_preserves_status(installed_host, status, restore_marker):
     host, root, bindir = installed_host
     wrapper = bindir / "scripts.cmd"
+    state = root / ".scripts-state"
+    state.mkdir()
+    (state / "sentinel").write_text("keep")
     (root / "scripts").write_text(
         "from pathlib import Path\nimport sys\n"
         "from pokanop_manager.windows_cleanup import defer_cleanup\n"
-        "defer_cleanup([Path(sys.argv[1]), Path(sys.prefix)])\n"
+        "root = Path(sys.prefix).parent\n"
+        "marker = root / '.scripts-install.json'\n"
+        "defer_cleanup([Path(sys.argv[1]), root / 'venv', root / '.scripts-state'], marker)\n"
+        f"if {restore_marker}: marker.write_text('reinstalled')\n"
         f"sys.exit({status})\n"
     )
     result = subprocess.run(
@@ -56,9 +63,15 @@ def test_deferred_self_deletion_preserves_status(installed_host, status):
     output = result.stdout + result.stderr
     assert result.returncode == status, output
     assert "batch file cannot be found" not in output.lower()
-    wait_cleanup(output)
-    assert not wrapper.exists()
-    assert not (root / "venv").exists()
+    log = wait_cleanup(output)
+    assert wrapper.exists() == restore_marker
+    assert (root / "venv").exists() == restore_marker
+    assert state.exists() == restore_marker
+    if restore_marker:
+        assert "Cleanup skipped: installation marker exists" in log
+        assert (root / ".scripts-install.json").read_text() == "reinstalled"
+        assert (state / "sentinel").read_text() == "keep"
+        assert host.venv_python(root).exists()
 
 
 @pytest.mark.parametrize("managed_wrapper", [False, True])

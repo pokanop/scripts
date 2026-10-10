@@ -19,7 +19,7 @@ def synchronous_cleanup(monkeypatch):
     # Unit tests inspect effects in-process; native wrapper tests exercise the
     # real process-handle handoff and wait for the detached worker to finish.
     from pokanop_manager import windows_cleanup
-    def remove(paths):
+    def remove(paths, marker):
         for path in paths:
             if path.is_file():
                 path.unlink()

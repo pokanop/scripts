@@ -822,6 +822,8 @@ Newest entries on top, within each tool.
   process handle. This covers existing legacy and managed wrappers without
   changing their bytes. Interactive cmd users must close that shell to finish
   cleanup; the uninstall prints a log path and manual fallback commands.
+  Cleanup is skipped if an installation marker exists when the shell exits,
+  preserving a reinstall or an installation whose uninstall did not finish.
 - Exercise exit-status preservation and full uninstall through both legacy and
   managed `cmd.exe` launchers in the platform matrix, including venv removal.
 

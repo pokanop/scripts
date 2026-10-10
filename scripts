@@ -820,7 +820,7 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
         if not remaining:
             if os.name == "nt":
                 from pokanop_manager.windows_cleanup import defer_cleanup
-                defer_cleanup([wrapper_dest(bin_dir, "scripts")])
+                defer_cleanup([wrapper_dest(bin_dir, "scripts")], marker_path(install_dir))
             else:
                 remove_wrappers(bin_dir, [], include_scripts=True)
             if not args.keep_path:
@@ -882,7 +882,7 @@ def cmd_uninstall(args: argparse.Namespace) -> None:
             cleanup.append(install_dir / ".scripts-state")
         if remove_install_dir:
             cleanup.append(install_dir)
-        defer_cleanup(cleanup)
+        defer_cleanup(cleanup, marker_path(install_dir))
     remove_wrappers(bin_dir, targets, include_scripts=not deferred)
     if not args.keep_path:
         remove_path_from_shell(bin_dir)

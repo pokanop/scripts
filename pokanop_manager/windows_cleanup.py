@@ -27,6 +27,12 @@ result = kernel.WaitForSingleObject(handle, 0xffffffff)
 kernel.CloseHandle(handle)
 if result != 0:
     raise OSError("cleanup could not wait for invoking process")
+# An interactive shell may outlive a reinstall, or uninstall may have failed
+# before deleting its marker. Never remove artifacts owned by that install.
+if os.path.lexists(sys.argv[3]):
+    print("Cleanup skipped: installation marker exists", flush=True)
+    print("Cleanup finished", flush=True)
+    sys.exit(0)
 for raw in json.loads(sys.argv[2]):
     path = pathlib.Path(raw)
     for attempt in range(50):
@@ -104,7 +110,7 @@ def _wait_handle():
     return kernel, handle
 
 
-def defer_cleanup(paths: list[Path]) -> None:
+def defer_cleanup(paths: list[Path], marker: Path) -> None:
     """Schedule exact uninstall targets; report durable diagnostics to the user."""
     python = Path(sys._base_executable).resolve()
     targets = [path.absolute() for path in paths]
@@ -118,7 +124,7 @@ def defer_cleanup(paths: list[Path]) -> None:
         with os.fdopen(fd, "wb") as output:
             subprocess.Popen(
                 [str(python), "-I", "-c", _WORKER, str(handle),
-                 json.dumps([str(path) for path in targets])],
+                 json.dumps([str(path) for path in targets]), str(marker.absolute())],
                 stdin=subprocess.DEVNULL, stdout=output, stderr=output,
                 startupinfo=startup, close_fds=True, cwd=tempfile.gettempdir(),
                 creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
