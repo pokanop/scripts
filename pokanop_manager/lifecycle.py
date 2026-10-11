@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import locale
 import os
 import shlex
 import sys
@@ -57,6 +58,23 @@ def wrapper(root: Path, name: str) -> bytes:
         return cmd_launcher(python, root / ".scripts-state/launch" / (name + ".py"), utf8=True).encode()
     args = " ".join(shlex.quote(s) for s in (python, "-I", dispatcher, str(root), name))
     return f'#!/bin/sh\nexec {args} "$@"\n'.encode()
+
+
+def legacy_wrapper_bytes(content: str) -> list[bytes]:
+    """Recognize exact legacy output, including Windows text-mode translation."""
+    allowed = [content.encode()]
+    if os.name == "nt":
+        # V1 used the default text encoding and translated already-CRLF text.
+        for encoding in ("utf-8", locale.getencoding()):
+            for text in (content, content.replace("\n", "\r\n")):
+                try:
+                    candidate = text.encode(encoding)
+                except UnicodeEncodeError:
+                    # A UTF-8-mode install may use paths the ANSI page cannot encode.
+                    continue
+                if candidate not in allowed:
+                    allowed.append(candidate)
+    return allowed
 
 
 def destination(bin_dir: Path, name: str) -> Path:
@@ -122,7 +140,7 @@ def install(root: Path, bin_dir: Path, names: list[str], *, legacy_wrapper,
             path = destination(bin_dir, name)
             allowed = [wrapper(root, name)]
             if name in old["tools"]:
-                allowed.append(legacy_wrapper(name).encode())
+                allowed.extend(legacy_wrapper_bytes(legacy_wrapper(name)))
             if path.is_symlink() or (path.exists() and path.read_bytes() not in allowed):
                 raise ValueError(f"refusing foreign or edited wrapper: {path}")
         windows_loaders = {}
@@ -169,7 +187,7 @@ def install(root: Path, bin_dir: Path, names: list[str], *, legacy_wrapper,
                 path = destination(bin_dir, name)
                 allowed = [wrapper(root, name)]
                 if name in old["tools"]:
-                    allowed.append(legacy_wrapper(name).encode())
+                    allowed.extend(legacy_wrapper_bytes(legacy_wrapper(name)))
                 if path.is_symlink() or (path.exists() and path.read_bytes() not in allowed):
                     raise ValueError(f"wrapper changed while staging: {path}")
                 backups[path] = path.read_bytes() if path.exists() else None
@@ -235,7 +253,7 @@ def uninstall(root: Path, bin_dir: Path, names: list[str], *, legacy_wrapper=Non
             dest = destination(bin_dir, name)
             allowed = [wrapper(root, name)]
             if legacy_wrapper and name in old["tools"] and name not in old.get("runners", {}):
-                allowed.append(legacy_wrapper(name).encode())
+                allowed.extend(legacy_wrapper_bytes(legacy_wrapper(name)))
             if dest.is_symlink() or (dest.exists() and dest.read_bytes() not in allowed):
                 raise ValueError(f"refusing foreign wrapper: {dest}")
         value = {**old, "tools": sorted(set(old["tools"]) - set(names)),

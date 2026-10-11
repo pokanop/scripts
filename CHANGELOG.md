@@ -816,6 +816,12 @@ Newest entries on top, within each tool.
 
 ## scripts
 
+### 1.3.2 — 2026-10-11
+- Accept exact historical Windows CRCRLF legacy wrappers in UTF-8 or the locale
+  encoding during migration and per-tool uninstall, without accepting edited
+  wrappers. Disable newline translation for new legacy wrappers while preserving
+  the historical default encoding. (POK-649)
+
 ### 1.3.1 — 2026-10-10
 - Defer Windows host-wrapper and environment deletion until the invoking
   command shell exits, using a detached base-Python helper and an inherited
