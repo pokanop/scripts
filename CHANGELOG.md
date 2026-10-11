@@ -816,6 +816,17 @@ Newest entries on top, within each tool.
 
 ## scripts
 
+### 1.3.1 — 2026-10-10
+- Defer Windows host-wrapper and environment deletion until the invoking
+  command shell exits, using a detached base-Python helper and an inherited
+  process handle. This covers existing legacy and managed wrappers without
+  changing their bytes. Interactive cmd users must close that shell to finish
+  cleanup; the uninstall prints a log path and manual fallback commands.
+  Cleanup is skipped if an installation marker exists when the shell exits,
+  preserving a reinstall or an installation whose uninstall did not finish.
+- Exercise exit-status preservation and full uninstall through both legacy and
+  managed `cmd.exe` launchers in the platform matrix, including venv removal.
+
 ### 1.3.0 — 2026-10-09
 - Consume verified ScriptKit 1.5.0; discover tools from one validated Pokanop catalog.
 - Install selected tools into independently locked manager generations; stage complete migration batches before one atomic routing commit.
