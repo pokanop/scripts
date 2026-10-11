@@ -8,13 +8,6 @@ Newest entries on top, within each tool.
 
 ---
 
-## scripts
-
-### 1.3.1 — 2026-10-10
-- Accept exact historical Windows CRCRLF legacy wrappers during migration and
-  per-tool uninstall, without accepting edited wrappers. Write new legacy wrappers
-  as exact UTF-8 bytes to avoid text-mode newline translation. (POK-649)
-
 ## scriptkit
 
 ### 1.3.0 — 2026-07-16
@@ -822,6 +815,12 @@ Newest entries on top, within each tool.
 ---
 
 ## scripts
+
+### 1.3.2 — 2026-10-11
+- Accept exact historical Windows CRCRLF legacy wrappers in UTF-8 or the locale
+  encoding during migration and per-tool uninstall, without accepting edited
+  wrappers. Disable newline translation for new legacy wrappers while preserving
+  the historical default encoding. (POK-649)
 
 ### 1.3.1 — 2026-10-10
 - Defer Windows host-wrapper and environment deletion until the invoking

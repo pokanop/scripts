@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import locale
 import os
 import shlex
 import sys
@@ -63,8 +64,16 @@ def legacy_wrapper_bytes(content: str) -> list[bytes]:
     """Recognize exact legacy output, including Windows text-mode translation."""
     allowed = [content.encode()]
     if os.name == "nt":
-        # V1 wrote already-CRLF text through write_text's newline translation.
-        allowed.append(content.replace("\r\n", "\r\r\n").encode())
+        # V1 used the default text encoding and translated already-CRLF text.
+        for encoding in ("utf-8", locale.getencoding()):
+            for text in (content, content.replace("\n", "\r\n")):
+                try:
+                    candidate = text.encode(encoding)
+                except UnicodeEncodeError:
+                    # A UTF-8-mode install may use paths the ANSI page cannot encode.
+                    continue
+                if candidate not in allowed:
+                    allowed.append(candidate)
     return allowed
 
 
