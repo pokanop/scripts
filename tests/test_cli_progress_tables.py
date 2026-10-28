@@ -1,13 +1,13 @@
-"""Tests for scriptkit.cli, scriptkit.progress, scriptkit.tables."""
+"""Tests for scripteer.cli, scripteer.progress, scripteer.tables."""
 
 import argparse
 
 import pytest
 
-import scriptkit.cli as cli
-import scriptkit.progress as progress
-import scriptkit.tables as tables
-from scriptkit.cli import CliError
+import scripteer.cli as cli
+import scripteer.progress as progress
+import scripteer.tables as tables
+from scripteer.cli import CliError
 
 
 # --- cli -------------------------------------------------------------------
@@ -72,7 +72,7 @@ def test_dispatch_returns_handler_code():
 
 # --- progress --------------------------------------------------------------
 def test_bar_endpoints():
-    import scriptkit.style as style
+    import scripteer.style as style
 
     style.set_color(False)
     assert style.strip_ansi(progress.bar(0)).startswith("[")
@@ -101,7 +101,7 @@ def test_track_bytes_renders_transfer_details(monkeypatch):
     import io
 
     from rich.console import Console
-    import scriptkit.style as style
+    import scripteer.style as style
 
     output = io.StringIO()
     monkeypatch.setattr(

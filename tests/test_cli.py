@@ -1,10 +1,10 @@
-"""Tests for scriptkit.cli — parse_args defaults, dispatch, run_cli."""
+"""Tests for scripteer.cli — parse_args defaults, dispatch, run_cli."""
 
 import argparse
 
 import pytest
 
-import scriptkit as sk
+import scripteer as sk
 
 
 def _parser():

@@ -1,4 +1,4 @@
-# 📚 medcat — Media Stack Ingest Tool · v2.4.0
+# 📚 medcat — Media Stack Ingest Tool · v2.4.1
 
 **Ingest media files into your media stack with metadata enrichment.**
 
@@ -69,7 +69,7 @@ medcat search https://youtube.com/watch?v=... --type music
 ```
 
 Downloads show live progress when the source supports it. Direct HTTP and
-Internet Archive transfers display bytes, speed, and ETA through `scriptkit`;
+Internet Archive transfers display bytes, speed, and ETA through `scripteer`;
 `wget`, `yt-dlp`, and `ia` retain their native progress displays.
 
 ### URL Routing Table
@@ -330,7 +330,7 @@ No IPs, URLs, API keys, or hostnames are hardcoded. Everything is user-configure
 
 ## Related tools
 
-Built on **[scriptkit](scriptkit.md)** — the shared CLI library (color, messages, progress, tables, config, subprocess). Building or editing a tool? See **[AGENTS.md](../AGENTS.md)**.
+Built on **[scripteer](scripteer.md)** — the shared CLI library (color, messages, progress, tables, config, subprocess). Building or editing a tool? See **[AGENTS.md](../AGENTS.md)**.
 
 Part of the [scripts](../README.md) toolkit — [keyferry](keyferry.md) · [voxtract](voxtract.md) · [netsy](netsy.md) · [pluck](pluck.md) · [aikit](aikit.md)
 

@@ -7,9 +7,9 @@ import subprocess
 import sys
 import tempfile
 
-from scriptkit.contracts import ToolSpec, resource_text
-from scriptkit.generator import apply, preview
-from scriptkit.generator.scaffolds import tool
+from scripteer.contracts import ToolSpec, resource_text
+from scripteer.generator import apply, preview
+from scripteer.generator.scaffolds import tool
 
 ROOT = Path(__file__).resolve().parents[1]
 

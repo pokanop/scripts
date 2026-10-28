@@ -79,6 +79,10 @@ Newest entries on top, within each tool.
 
 ## aikit
 
+### 2.1.1 — 2026-10-28
+
+- Import the published Scripteer 2.0.0 runtime.
+
 ### 2.1.0 — 2026-09-10
 - **New `aikit uninstall --dry-run`** — prints each agent's resolved uninstall
   command (with a vendor-config/data note) without executing anything or
@@ -675,6 +679,10 @@ Newest entries on top, within each tool.
 
 ## keyferry
 
+### 1.1.2 — 2026-10-28
+
+- Import the published Scripteer 2.0.0 runtime.
+
 ### 1.1.1 — 2026-06-27
 - Doctor, errors, and docs now recommend the **native Bitwarden CLI binary**
   (GitHub releases, Homebrew, Chocolatey, snap) instead of `npm i -g @bitwarden/cli`.
@@ -697,6 +705,10 @@ Newest entries on top, within each tool.
 ---
 
 ## medcat
+
+### 2.4.1 — 2026-10-28
+
+- Import the published Scripteer 2.0.0 runtime.
 
 ### 2.4.0 — 2026-07-16
 - `grab` now shows live download progress across its transfer paths. Direct HTTP
@@ -734,6 +746,10 @@ Newest entries on top, within each tool.
 
 ## netsy
 
+### 1.3.2 — 2026-10-28
+
+- Import the published Scripteer 2.0.0 runtime.
+
 ### 1.3.1 — 2026-06-29
 - Fix a blank trailing column that appeared after **Vendor** in single-pass scans
   (and any table without the `Seen` stability column). `print_table` always passed
@@ -754,6 +770,10 @@ Newest entries on top, within each tool.
 ---
 
 ## pluck
+
+### 1.1.2 — 2026-10-28
+
+- Import the published Scripteer 2.0.0 runtime.
 
 ### 1.1.1 — 2026-07-03
 - Fixed a name collision that broke **every** file operation: the command
@@ -796,6 +816,10 @@ Newest entries on top, within each tool.
 
 ## voxtract
 
+### 3.2.1 — 2026-10-28
+
+- Import the published Scripteer 2.0.0 runtime.
+
 ### 3.2.0 — 2026-06-26
 - **Added a `doctor` command** (previously none) on the shared `sk.doctor` renderer:
   audio tools (ffmpeg/ffprobe) and Python packages (yt-dlp/requests required;
@@ -815,6 +839,14 @@ Newest entries on top, within each tool.
 ---
 
 ## scripts
+
+### 1.3.3 — 2026-10-28
+
+- Consumer distribution 1.3.0 installs `scripteer==2.0.0` from PyPI, replacing
+  deleted release pins; migrate manager imports and generated entrypoints.
+- Document pre-rename harness, standalone state and generated-project migration.
+- Preserve historical runtime cleanup and rollback tests; old names below are
+  historical changelog entries, not supported dependency pins.
 
 ### 1.3.2 — 2026-10-11
 - Accept exact historical Windows CRCRLF legacy wrappers in UTF-8 or the locale

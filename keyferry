@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-keyferry — 1Password ⇄ Bitwarden/Vaultwarden credential ferry  v1.1.1
+keyferry — 1Password ⇄ Bitwarden/Vaultwarden credential ferry  v1.1.2
 Intelligently migrate and sync passwords between 1Password and Bitwarden/Vaultwarden,
 with vault→collection mapping, content-aware deduplication, and timestamp-aware delta syncing.
 
@@ -58,9 +58,9 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from rich.table import Table
 from rich.text import Text
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
-import scriptkit as sk
+import scripteer as sk
 
 # Share the toolkit's console for consistent styling across tools.
 console = sk.rich_console
@@ -149,7 +149,7 @@ print_step = sk.step
 
 
 # ANSI styling for the raw-mode interactive picker (Rich interferes with raw
-# input). Constants come from scriptkit.style; _ansi mirrors sk.styled.
+# input). Constants come from scripteer.style; _ansi mirrors sk.styled.
 _ansi = sk.styled
 
 

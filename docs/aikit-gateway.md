@@ -377,7 +377,7 @@ All paths honor the `AIKIT_CONFIG` override (consistent with the rest of aikit).
 
 ## Related tools
 
-Part of **[aikit](aikit.md)**. The reversible env block is built on **[scriptkit](scriptkit.md)**'s
+Part of **[aikit](aikit.md)**. The reversible env block is built on **[scripteer](scripteer.md)**'s
 `ManagedBlock`. Building or editing a tool? See **[AGENTS.md](../AGENTS.md)**.
 
 ---

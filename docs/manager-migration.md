@@ -1,6 +1,6 @@
 # Isolated tools and legacy migration
 
-The `scripts` host consumes ScriptKit 1.5.0's typed contracts, bounded archive
+The `scripts` host consumes Scripteer 2.0.0's typed contracts, bounded archive
 policy and transactional installer. Discovery reads `pokanop_manager/catalog.json`
 without importing any tool. Installing the harness alone installs no media stack.
 
@@ -24,13 +24,24 @@ paths, preserved environments/tools and activation/failure semantics. Dependenci
 are unresolved at this read-only step; it does not pretend to know the final
 transitive versions without performing resolution.
 
+## Moving from the pre-rename stack
+
+First repair the harness and migrate tools using the steps in
+[runtime migration](runtime-migration.md). Collection install roots, `.scripts-state`
+and `.scripts-install.json` retain their names: these belong to this adapter, not
+the framework. Existing immutable tool generations retain their old interpreter
+until explicitly reinstalled. Collection rollback verifies their tool inventories;
+it is not standalone `scripteer self-rollback`. Standalone manager receipts require
+`module: scripteer` and cannot roll back across the rename. Do not rewrite historical
+receipts, locks or generation files to pretend they were built by the new framework.
+
 ## Resolve, freeze, stage, commit
 
 1. Under the collection's kernel-held lock, check selected wrapper ownership and
    snapshot the old marker. Existing edited/foreign wrappers fail before downloads.
 2. For each selected tool, snapshot its Python source into a deterministic legacy
    bundle. Pip (`--isolated`, explicit `https://pypi.org/simple`) resolves/builds
-   **only its requirements** and the exact hash-pinned framework wheel. This is
+   **only its requirements** and the exact PyPI framework version. This is
    trusted executable package preparation, including sdist build hooks when needed;
    neither a venv nor a wheel is a sandbox. Do not register untrusted projects.
 3. Freeze the complete wheel set into local content-addressed files. The canonical
@@ -39,7 +50,7 @@ transitive versions without performing resolution.
    snapshot of the actual selected host/interpreter resolution, not a purported
    universal cross-platform lock. Updates create new snapshots, never rewrite old
    ones. Keep the transaction's catalog and digest-addressed files for audit/replay.
-4. ScriptKit's installer revalidates strict contracts, copies artifacts in chunks,
+4. Scripteer's installer revalidates strict contracts, copies artifacts in chunks,
    checks hashes/CRC/archives/lock identity, creates an isolated venv with offline
    `--no-deps` wheel installation, checks dependencies and smokes the entrypoint.
    Each tool is activated only in a **private staging bin**, invisible to users.
@@ -50,7 +61,7 @@ transitive versions without performing resolution.
 
 Pip is the dependency resolver, and the external manager owns environments and
 receipts. The collection does not implement a second package resolver or vendor
-ScriptKit. The small local `Snapshot` adapter authorizes exactly its pinned catalog
+Scripteer. The small local `Snapshot` adapter authorizes exactly its pinned catalog
 and exposes the framework's streaming installation-source interface.
 
 ### Torch policy and index choice
@@ -110,7 +121,9 @@ Follow [AGENTS.md](../AGENTS.md): generate an offline repository-layout project,
 register its directory with `scripts register PATH`, then explicitly install it.
 The local overlay `.scripts-catalog.json` cannot replace built-in names. The bundle
 contains generated `src/**/*.py`, not unrelated project files. Requirements resolve
-against the collection's exact framework constraint, even before PyPI publication.
+against the collection's exact published framework constraint. Pre-rename projects
+must be regenerated into a fresh directory; copy user-owned files and update imports,
+then register the replacement. Old ownership manifests are not recognized.
 After uninstall, `scripts unregister NAME` removes only that catalog entry; the
 project directory and other tool installs are untouched.
 

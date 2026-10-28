@@ -162,10 +162,10 @@ Install, update, authenticate, and manage 38 AI coding agent CLIs from one tool 
 
 ---
 
-## Shared library: [scriptkit](docs/scriptkit.md)
+## Shared library: [scripteer](docs/scripteer.md)
 
-The runtime and manager come from the external `pokanop-scriptkit` 1.5.0 wheel, pinned
-by release URL and SHA-256; this repo no longer owns a `scriptkit/` package.
+The runtime and manager come from `scripteer==2.0.0` on PyPI;
+this repo owns no `scripteer/` package.
 See [migration, repair and rollback](docs/runtime-migration.md) before upgrading
 an environment that installed the old `pokanop-scripts` wheel.
 
@@ -175,13 +175,13 @@ venv. Preview an existing install with `scripts migrate --dry-run`, apply with
 [isolated manager guide](docs/manager-migration.md) for locks, generated-tool
 registration, per-tool retention and full toolkit removal.
 
-Every tool is built on **[`scriptkit`](docs/scriptkit.md)** — one tested home for
+Every tool is built on **[`scripteer`](docs/scripteer.md)** — one tested home for
 color, icons, semantic messages, prompts, progress bars, tables, three-tier config,
 subprocess handling, and CLI dispatch. Change the house style once; every tool
 updates. It degrades gracefully without `rich`, so it's safe even in the installer.
 
 ```python
-import scriptkit as sk
+import scripteer as sk
 sk.success("done"); sk.error("nope")          # ✅ stdout / ❌ stderr
 for x in sk.track(items, "Working"): ...       # spinner + bar + M/N + elapsed
 cfg = sk.Config(path, defaults={...}, env_prefix="MYTOOL").load()
@@ -195,7 +195,7 @@ sys.exit(sk.run_cli(main))                      # CliError → 1, Ctrl-C → 130
 | Principle | What it means |
 |-----------|---------------|
 | **Self-contained** | One script, one job — no framework sprawl |
-| **Shared scaffolding** | UX/structure comes from [`scriptkit`](docs/scriptkit.md), not copy-paste |
+| **Shared scaffolding** | UX/structure comes from [`scripteer`](docs/scripteer.md), not copy-paste |
 | **No hidden deps** | Everything beyond the runtime is listed above |
 | **Clean repo** | Config and cache live in `~/.<tool>/`, never in the repo |
 | **Tested** | `venv/bin/python -m pytest` — unit + characterization + template smoke |
@@ -204,15 +204,15 @@ sys.exit(sk.run_cli(main))                      # CliError → 1, Ctrl-C → 130
 
 ## Adding a new tool
 
-1. `cp templates/tool_template.py mytool` — a working CLI on `scriptkit`.
+1. `cp templates/tool_template.py mytool` — a working CLI on `scripteer`.
 2. Rename `toolname`/`TOOLNAME`, add your subcommands, keep `--help`.
 3. Register it in the `scripts` installer (`TOOLS` + `TOOL_NAMES`) and add
    `requirements/mytool.txt`.
 4. Add a card above and link to `docs/<tool>.md`.
-5. Reuse `scriptkit` for all output/config/subprocess — don't re-roll helpers.
+5. Reuse `scripteer` for all output/config/subprocess — don't re-roll helpers.
 
 > **Contributing or using an AI agent?** Read **[AGENTS.md](AGENTS.md)** — the full
-> guide to the runtime model, `scriptkit`, conventions, [versioning](AGENTS.md#versioning--changelog),
+> guide to the runtime model, `scripteer`, conventions, [versioning](AGENTS.md#versioning--changelog),
 > testing, and step-by-step recipes for building a new tool or editing an existing one.
 > (`CLAUDE.md` is a symlink to it.) Each tool is versioned independently; changes are
 > recorded in **[CHANGELOG.md](CHANGELOG.md)**.

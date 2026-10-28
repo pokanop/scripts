@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-medcat — Media Stack Ingest Tool  v2.4.0
+medcat — Media Stack Ingest Tool  v2.4.1
 Ingest media files into your media stack with metadata enrichment.
 
 Supported types: books (EPUB/PDF), comics (CBZ/CBR), audiobooks (M4B/MP3),
@@ -95,9 +95,9 @@ from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
 
-__version__ = "2.4.0"
+__version__ = "2.4.1"
 
-import scriptkit as sk
+import scripteer as sk
 
 # Share the toolkit's console for consistent styling across tools.
 console = sk.rich_console

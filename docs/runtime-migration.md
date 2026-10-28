@@ -1,58 +1,68 @@
 # External runtime dependency and repair
 
-`pokanop/scripts` consumes **pokanop-scriptkit 1.5.0**; it owns no `scriptkit/`
-package. The supported interval `>=1.5.0,<1.6` is enforced by both package metadata
-and `requirements/base.txt`. `requirements/runtime-constraints.txt` selects the
-exact verified wheel, not PyPI discovery or a mutable branch.
+`pokanop/scripts` consumes **scripteer==2.0.0 from PyPI**. Package metadata,
+`requirements/base.txt` and `requirements/runtime-constraints.txt` agree on this
+exact version. No framework package is vendored. The pre-rename GitHub releases
+were deleted; do not use old asset URLs or mechanically rename their hashes.
 
-- [Release v1.5.0](https://github.com/pokanop/scriptkit/releases/tag/v1.5.0)
-- Source/tag commit: `96714be2479b4b4b1b6207a4d8db66c3aa07ceea`
-- Wheel: `pokanop_scriptkit-1.5.0-py3-none-any.whl`
-- SHA-256: `89307e39af78f0c92d7002e60b30cf10e5015c35aaa5bc67b57b547822bdc75b`
-- URL: `https://github.com/pokanop/scriptkit/releases/download/v1.5.0/pokanop_scriptkit-1.5.0-py3-none-any.whl`
+## Upgrade a collection install
+
+Update this checkout, then use the same install and bin directories as before:
 
 ```sh
-gh release download v1.5.0 --repo pokanop/scriptkit
-gh attestation verify pokanop_scriptkit-1.5.0-py3-none-any.whl \
-  --repo pokanop/scriptkit \
-  --signer-workflow pokanop/scriptkit/.github/workflows/release.yml \
-  --source-digest 96714be2479b4b4b1b6207a4d8db66c3aa07ceea \
-  --signer-digest 96714be2479b4b4b1b6207a4d8db66c3aa07ceea \
-  --source-ref refs/tags/v1.5.0 --deny-self-hosted-runners
+python scripts install --dir /path/to/scripts --bin-dir /path/to/bin --no-pull --no-path
+python scripts migrate --dir /path/to/scripts --bin-dir /path/to/bin --dry-run
+python scripts migrate --dir /path/to/scripts --bin-dir /path/to/bin
 ```
 
-The original runtime extraction used runtime-only 1.3.0; that artifact cannot
-provide manager/scaffold services. 1.5.0 additionally supplies the bounded policy
-needed for Torch-class wheels. This interim GitHub release is not final branding
-or public PyPI launch approval.
+The first command repairs the shared harness; the last stages selected tools with
+Scripteer in new isolated environments. Pass explicit tool names for a partial
+migration. Old environments, routing snapshots and tool configuration are retained.
+See [manager migration](manager-migration.md) for rollback boundaries.
 
-## Bare-Python and old wheel ownership
+The installer guards its runtime import. Mutating operations bootstrap missing
+manager services in `.scripts-harness/` and reinvoke the host. Help, discovery and
+migration dry-run need only stdlib. Harness repair removes an old overlapping
+`pokanop-scripts` wheel owner before installing the new framework, then force
+reinstalls only the pinned runtime without gratuitous base-dependency upgrades.
+Only known orphaned `scriptkit/__pycache__/*.pyc` files are pruned; unknown files
+and sources are retained. That historical name is intentional cleanup logic,
+not a dependency or import alias. Interrupted repair is rerunnable.
 
-The installer guards its runtime import. If the manager API is absent or broken,
-mutating CLI operations bootstrap the exact dependency in `.scripts-harness/` and
-reinvoke the host there, without importing the broken runtime first. Discovery,
-help and migration dry-run need only stdlib and the collection's catalog adapter.
+Legacy uninstall remains offline. Full uninstall also removes the harness, but
+never user configuration. Existing pre-rename external packages need not be
+uninstalled from shared environments used by other applications.
 
-Harness-only repair (`scripts install --no-pull`) maintains the legacy `venv/`
-host. It probes old `pokanop-scripts` distribution ownership in that target venv,
-uninstalls an old overlapping runtime owner **before** reinstalling framework
-files, then force-reinstalls only the exact runtime without gratuitously upgrading
-other base requirements. Interrupted repair is rerunnable. Only known orphaned
-`scriptkit/__pycache__/*.pyc` files are pruned; unknown files/sources are retained.
-Tool configuration and existing wrappers are preserved if dependency repair fails.
-Repair failures return a controlled `scripts:` error. Legacy (non-v2) uninstall
-never bootstraps the manager or accesses the network, even with a missing/old
-runtime. Full uninstall also removes any harness left by an earlier repair.
+## Standalone framework state is a separate migration
 
-Selected-tool installation, update and explicit v1 migration now use isolated
-immutable generations. See [manager migration](manager-migration.md) for the atomic
-multi-tool handoff, failure recovery, per-tool/full uninstall and rollback.
+Scripteer deliberately has no compatibility aliases. Its root precedence is
+`--root`, `SCRIPTEER_ROOT`, then `~/.scripteer`; interpreter selection uses
+`SCRIPTEER_PYTHON`. Old environment variables and default directories are ignored.
+Adopt an old root explicitly with `--root /path/to/old-root`, or move it yourself.
+Re-bootstrap that root with the independently verified **new** standalone
+bootstrap. Keep old installations side by side if needed; do not edit receipts.
+Standalone manager receipts must contain `module: scripteer`: dispatch and
+self-rollback reject module-less/pre-rename receipts. Rollback across that boundary
+requires your retained old bootstrap and artifacts, not the deleted releases.
 
-## Rehearsals
+New wire identifiers are `.scripteer-lock`, `.scripteer-generator`,
+`# >>> scripteer:...` regions and `urn:scripteer:contracts:*:1` schema IDs.
+Re-apply managed regions instead of renaming ownership metadata. Optional keyring
+credentials use service `scripteer.ai` and account `openai`; manually save credentials
+under the new service if desired. No secrets or state are copied automatically.
+
+Pre-rename generated projects must be regenerated with `python -m scripteer
+new-tool` in a fresh directory. Copy user-owned handlers, initializers, README,
+configuration examples, tests and CI, and reconcile handwritten imports/settings.
+Do not rename old ownership manifests or overwrite user edits. Register the new
+project directory and reinstall it in the collection. See the framework's
+[migration guide](https://github.com/pokanop/scripteer/blob/main/docs/scripteer-launch.md).
+
+## Verification
 
 `python tests/rehearse_runtime_migration.py` builds the real old distribution from
-pinned commit `458104a52bafe619a259ed2b83ecd7a3b29c82c1`, rehearses fresh install,
-bare-Python recovery, selective install/update, old wheel/editable ownership,
-source-cache cleanup and rollback in disposable environments. CI runs it on
-Linux/macOS/Windows and Python 3.11/3.14, alongside external-import and installed
-wrapper tests. No runtime directory is vendored in this consumer.
+pinned commit `458104a52bafe619a259ed2b83ecd7a3b29c82c1` and rehearses clean PyPI
+installation, repair, selective install/update, wheel/editable ownership cleanup,
+used-clone bytecode cleanup and an explicit old-source rollback in disposable
+environments. `tests/rehearse_generated_tool.py` exercises current scaffolds.
+CI runs these on Linux/macOS/Windows and Python 3.11/3.14.

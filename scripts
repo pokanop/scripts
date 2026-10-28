@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts — Toolkit installer & lifecycle manager  v1.3.2
+scripts — Toolkit installer & lifecycle manager  v1.3.3
 Install, update, and diagnose the pokanop/scripts CLI toolkit.
 
 Usage:
@@ -30,14 +30,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 
-# scriptkit is an externally installed runtime. This installer must survive even a
+# scripteer is an externally installed runtime. This installer must survive even a
 # broken/absent library — so the import is guarded and everything degrades to
 # plain stdlib behavior when it is unavailable.
 try:
-    import scriptkit as _sk
-    # Upgraded clones can retain ignored scriptkit/__pycache__, which imports
+    import scripteer as _sk
+    # Incomplete runtime installs can leave only bytecode, which imports
     # as an empty namespace package when no installed runtime is available.
     if getattr(_sk, "__file__", None) is None:
         _sk = None
@@ -489,7 +489,7 @@ def managed_install(root: Path, bin_dir: Path, names: list[str]) -> None:
     if not dest.exists():
         import shlex
         if os.name == "nt":
-            from scriptkit.bootstrap import cmd_launcher
+            from scripteer.bootstrap import cmd_launcher
             # The repo host (unlike isolated generation runners) needs its own
             # sibling adapter package. Retain the framework's UTF-8/codepage and
             # exit-code handling, but use ordinary script-directory imports.
@@ -522,7 +522,7 @@ def cmd_rollback(args: argparse.Namespace) -> None:
 
 
 def cmd_unregister(args: argparse.Namespace) -> None:
-    from scriptkit.manager import storage
+    from scripteer.manager import storage
     from pokanop_manager.catalog import read_json
     root = resolve_install_dir(args.dir)
     path = root / ".scripts-catalog.json"
@@ -538,8 +538,8 @@ def cmd_unregister(args: argparse.Namespace) -> None:
 
 
 def cmd_register(args: argparse.Namespace) -> None:
-    from scriptkit.contracts import ToolSpec
-    from scriptkit.manager import storage
+    from scripteer.contracts import ToolSpec
+    from scripteer.manager import storage
     from pokanop_manager.catalog import read_json
     root = resolve_install_dir(args.dir)
     project = Path(args.project).resolve()
@@ -657,7 +657,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if _sk is not None:
         return _doctor_rich(install_dir, bin_dir, marker)
 
-    # Bootstrap fallback (scriptkit unavailable): plain, dependency-free report.
+    # Bootstrap fallback (scripteer unavailable): plain, dependency-free report.
     print(f"scripts doctor  v{__version__}")
     print()
     print(f"Install dir:  {install_dir} {'✅' if install_dir.is_dir() else '❌'}")
@@ -702,7 +702,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def _doctor_rich(install_dir: Path, bin_dir: Path, marker: Optional[dict]) -> int:
-    """The shared, sectioned doctor report (scriptkit available)."""
+    """The shared, sectioned doctor report (scripteer available)."""
     vpy = venv_python(install_dir)
     in_path = str(bin_dir) in os.environ.get("PATH", "").split(os.pathsep)
 
@@ -938,7 +938,7 @@ _EPILOG = (
 def build_parser() -> argparse.ArgumentParser:
     if _sk is not None:
         parser = _sk.make_parser("scripts", __version__, TAGLINE, icon=ICON, epilog=_EPILOG)
-    else:  # bootstrap fallback when scriptkit is unavailable
+    else:  # bootstrap fallback when scripteer is unavailable
         parser = argparse.ArgumentParser(
             prog="scripts",
             description=f"scripts v{__version__} — {TAGLINE}",
@@ -1005,13 +1005,13 @@ def ensure_manager(args) -> int | None:
         if not marker or marker.get("version") != 2:
             return None  # Legacy removal is stdlib-only, including when offline.
     try:
-        from scriptkit.contracts.artifacts import ArtifactPolicy
-        if _sk is not None and _sk.__version__ == "1.5.0":
+        from scripteer.contracts.artifacts import ArtifactPolicy
+        if _sk is not None and _sk.__version__ == "2.0.0":
             return None
     except ImportError:
         pass
     if os.environ.get("SCRIPTS_MANAGER_REEXEC"):
-        raise ValueError("Manager repair failed; expected ScriptKit 1.5.0")
+        raise ValueError("Manager repair failed; expected Scripteer 2.0.0")
     root = resolve_install_dir(args.dir)
     host = root / ".scripts-harness"
     py = host / ("Scripts/python.exe" if os.name == "nt" else "bin/python")

@@ -1,6 +1,6 @@
-"""Tests for scriptkit.text — human-friendly formatting."""
+"""Tests for scripteer.text — human-friendly formatting."""
 
-import scriptkit.text as text
+import scripteer.text as text
 
 
 def test_human_size_binary():

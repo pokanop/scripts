@@ -1,10 +1,10 @@
-"""Tests for scriptkit.config — merge, nested access, three-tier loading."""
+"""Tests for scripteer.config — merge, nested access, three-tier loading."""
 
 import json
 import sys
 
-import scriptkit.config as config
-from scriptkit.config import Config
+import scripteer.config as config
+from scripteer.config import Config
 
 
 def test_deep_merge_nested():

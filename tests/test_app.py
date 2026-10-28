@@ -1,6 +1,6 @@
-"""Tests for scriptkit.app — banner, examples block, parser factory."""
+"""Tests for scripteer.app — banner, examples block, parser factory."""
 
-import scriptkit.app as app
+import scripteer.app as app
 
 
 def test_banner_plain(no_color):
@@ -12,7 +12,7 @@ def test_banner_no_icon_no_tagline(no_color):
 
 
 def test_banner_colorized():
-    import scriptkit.style as style
+    import scripteer.style as style
 
     style.set_color(True)
     out = app.banner("t", "1.0.0", "tag")

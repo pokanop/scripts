@@ -1,11 +1,11 @@
-"""Tests for scriptkit.blocks — the reversible managed-block primitive."""
+"""Tests for scripteer.blocks — the reversible managed-block primitive."""
 
 from __future__ import annotations
 
 import pytest
 
-import scriptkit as sk
-from scriptkit.blocks import (
+import scripteer as sk
+from scripteer.blocks import (
     find_block,
     has_block,
     remove_block,

@@ -1,2 +1,2 @@
-# Verified compatibility release; see docs/runtime-migration.md.
-pokanop-scriptkit @ https://github.com/pokanop/scriptkit/releases/download/v1.5.0/pokanop_scriptkit-1.5.0-py3-none-any.whl#sha256=89307e39af78f0c92d7002e60b30cf10e5015c35aaa5bc67b57b547822bdc75b
+# Published framework release; see docs/runtime-migration.md.
+scripteer==2.0.0

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-pluck — Config Key-Path Tool  v1.1.1
+pluck — Config Key-Path Tool  v1.1.2
 Copy, merge, read, set, and diff values at dot-separated paths across
 YAML, JSON, TOML, and .env files — one CLI, format-agnostic operations.
 
@@ -57,12 +57,12 @@ try:
 except ImportError:
     tomli_w = None  # type: ignore[assignment]
 
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 ICON = "🪶"
 TAGLINE = "copy, merge, and edit config key paths (yaml · json · toml · env)"
 
-import scriptkit as sk
+import scripteer as sk
 
 # Share the toolkit's consoles so styling stays consistent across tools.
 console = sk.rich_console

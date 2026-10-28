@@ -106,7 +106,7 @@ def test_failure_rolls_back_without_deleting_state(installation, phase, failure)
 def test_partial_batch_never_activates(installation):
     root, bin_dir = installation
     setup_root(root)
-    from scriptkit.manager import Installer
+    from scripteer.manager import Installer
     class FailSecond(Installer):
         def install(self, plan, **kwargs):
             if plan.installation.release.tool.name == "netsy":

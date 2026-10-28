@@ -33,7 +33,7 @@ install(Path(sys.argv[1]), Path(sys.argv[2]), ['pluck'], legacy_wrapper=lambda _
 
 
 def test_interrupt_after_marker_replace_keeps_committed_dispatcher(installation, monkeypatch):
-    from scriptkit.manager import storage
+    from scripteer.manager import storage
     root, bin_dir = installation
     setup_root(root)
     (root / life.MARKER).write_text(json.dumps({"version": 1, "tools": ["pluck"]}))

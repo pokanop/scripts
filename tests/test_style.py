@@ -1,6 +1,6 @@
-"""Tests for scriptkit.style — color resolution, styling, icons."""
+"""Tests for scripteer.style — color resolution, styling, icons."""
 
-import scriptkit.style as style
+import scripteer.style as style
 
 
 def test_use_color_override():
