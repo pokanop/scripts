@@ -1,12 +1,12 @@
-"""Tests for scriptkit.doctor — the shared diagnostic report."""
+"""Tests for scripteer.doctor — the shared diagnostic report."""
 
 import sys
 
-import scriptkit as sk
+import scripteer as sk
 
 # ``sk.doctor`` is the function; the submodule (with its OK/WARN/FAIL constants)
 # is reached via sys.modules since the package attribute is shadowed by design.
-doctor = sys.modules["scriptkit.doctor"]
+doctor = sys.modules["scripteer.doctor"]
 
 
 def test_check_factories_set_state():

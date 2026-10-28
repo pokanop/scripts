@@ -1,6 +1,6 @@
 """Characterization tests for the CLI tools.
 
-These pin observable behavior (pure helpers + parser/--help) so the scriptkit
+These pin observable behavior (pure helpers + parser/--help) so the scripteer
 refactor is provably non-breaking: every assertion here passes before and
 after the tools are rewired onto the shared library.
 """

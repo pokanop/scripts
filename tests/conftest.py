@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for the scriptkit + tools test suite."""
+"""Shared pytest fixtures for the scripteer + tools test suite."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 @pytest.fixture(autouse=True)
 def _reset_color(monkeypatch):
     """Isolate color state: no NO_COLOR/FORCE_COLOR, auto-detection restored."""
-    import scriptkit.style as style
+    import scripteer.style as style
 
     monkeypatch.delenv("NO_COLOR", raising=False)
     monkeypatch.delenv("FORCE_COLOR", raising=False)
@@ -27,7 +27,7 @@ def _reset_color(monkeypatch):
 @pytest.fixture
 def no_color(monkeypatch):
     """Force color off for deterministic, plain-text assertions."""
-    import scriptkit.style as style
+    import scripteer.style as style
 
     style.set_color(False)
     return style

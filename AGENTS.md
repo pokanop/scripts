@@ -2,17 +2,17 @@
 
 ## Boundaries
 
-This repository is a **consumer** of external `pokanop-scriptkit`, not a second
-framework or package manager. Never vendor a `scriptkit/` package. Runtime,
+This repository is a **consumer** of external `scripteer`, not a second
+framework or package manager. Never vendor a `scripteer/` package. Runtime,
 registry, archive validation, wheel-lock verification, environment creation and
-per-tool receipts belong in the external framework. The exact release URL and
-SHA-256 live in `requirements/runtime-constraints.txt`; the supported range is
-`>=1.5.0,<1.6`. Update both with independent release evidence.
+per-tool receipts belong in the external framework. Pin `scripteer==2.0.0` from
+PyPI consistently in package metadata, base requirements and
+`requirements/runtime-constraints.txt`. Update with independent release evidence.
 
 `pokanop_manager/` contains only this collection's catalog, a pip wheel-preparation
 adapter, and coordination of the legacy marker/public-wrapper transition. Do not
 copy framework resolvers or installers into it. Pip resolves/builds wheels;
-ScriptKit installs the complete verified lock offline.
+Scripteer installs the complete verified lock offline.
 
 ## Layout and lifecycle
 
@@ -27,7 +27,7 @@ ScriptKit installs the complete verified lock offline.
   Missing framework services can be bootstrapped in `.scripts-harness/` without
   mutating the old shared environment.
 - `.scripts-state/transactions/` retains immutable tool bundles, wheel locks,
-  private ScriptKit generations, receipts and previous routing snapshots.
+  private Scripteer generations, receipts and previous routing snapshots.
 - `.scripts-install.json` is the single atomic routing commit for a migration
   batch. Stage and smoke **all** selected tools before switching this marker.
 - Public wrappers handle both v1 and v2 routing. Never overwrite foreign/edited
@@ -46,10 +46,10 @@ trust, lock preparation, platform limits and interruption semantics.
 
    ```sh
    mkdir /path/to/new-project
-   python -m scriptkit new-tool /path/to/new-project --spec /path/to/tool.json --layout repository --apply
+   python -m scripteer new-tool /path/to/new-project --spec /path/to/tool.json --layout repository --apply
    ```
 
-   Consult `python -m scriptkit new-tool --help` for the installed release's CLI.
+   Consult `python -m scripteer new-tool --help` for the installed release's CLI.
    This generates an extension-less `bin/<name>` launcher, importable `src/`
    modules, tests, docs, requirements and a tool spec. Implement user-owned
    `_handlers.py`; preserve generated ownership markers and manifests.
@@ -61,8 +61,7 @@ trust, lock preparation, platform limits and interruption semantics.
    ```
 
    Framework requirements in the generated project are pinned to its generating
-   version. The collection constrains that version to its verified GitHub wheel,
-   so public PyPI availability is not needed.
+   version. The collection constrains that version to the published PyPI release.
 4. Verify `mytool --help`, `mytool doctor`, and a real implemented command.
    Unimplemented scaffold handlers must fail clearly; bare invocation must not
    mutate state. Add tests for pure functions and installed wrappers.
@@ -80,7 +79,7 @@ example for existing single-file tools, not the recommended new-project generato
 
 ## Editing existing tools
 
-- Import `scriptkit as sk` normally; no ancestor-search or sys.path runtime hacks.
+- Import `scripteer as sk` normally; no ancestor-search or sys.path runtime hacks.
 - Reuse `sk.Config`, output/style, tables, progress and subprocess helpers.
   Don't create another Rich Console or hand-code ANSI. Honor NO_COLOR/FORCE_COLOR.
 - Keep heavyweight imports lazy so help/discovery do not load Torch or other tools.

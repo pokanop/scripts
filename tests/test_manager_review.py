@@ -77,7 +77,7 @@ def test_locked_uninstall_data_prints_cleanup(installation, tool_loader, monkeyp
 
 
 def test_reserved_registration_does_not_publish(installation, tool_loader):
-    from scriptkit.contracts import resource_text
+    from scripteer.contracts import resource_text
     root, _ = installation
     host = tool_loader("scripts")
     project = root / "project"

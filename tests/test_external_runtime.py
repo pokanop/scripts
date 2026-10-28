@@ -13,23 +13,30 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_external_ownership_and_pin():
-    import scriptkit
+    import scripteer
 
-    assert not (ROOT / "scriptkit" / "__init__.py").exists()
-    assert not Path(scriptkit.__file__).resolve().is_relative_to(ROOT / "scriptkit")
-    assert version("pokanop-scriptkit") == "1.5.0"
+    assert not (ROOT / "scripteer" / "__init__.py").exists()
+    assert not Path(scripteer.__file__).resolve().is_relative_to(ROOT / "scripteer")
+    assert version("scripteer") == "2.0.0"
     metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
     requirements = [Requirement(r) for r in metadata["project"]["dependencies"]]
-    runtime = [r for r in requirements if r.name == "pokanop-scriptkit"]
-    pin = next(r.url for r in runtime if r.url)
-    assert pin in (ROOT / "requirements/runtime-constraints.txt").read_text()
-    bounds = next(r.specifier for r in runtime if not r.url)
-    assert "1.5.0" in bounds and "1.6.0" not in bounds and "1.4.9" not in bounds
-    assert "pokanop-scriptkit>=1.5.0,<1.6" in (ROOT / "requirements/base.txt").read_text()
-    assert "#sha256=" in pin and "/main/" not in pin
+    runtime = [r for r in requirements if r.name == "scripteer"]
+    assert len(runtime) == 1 and runtime[0].url is None
+    assert str(runtime[0]) == "scripteer==2.0.0"
+    for path in ("runtime-constraints.txt", "base.txt"):
+        assert str(runtime[0]) in (ROOT / "requirements" / path).read_text()
     assert metadata["tool"]["setuptools"]["packages"] == ["pokanop_manager"]
-    files = distribution("pokanop-scriptkit").files
-    assert any(str(f) == "scriptkit/__init__.py" for f in files)
+    files = distribution("scripteer").files
+    assert any(str(f) == "scripteer/__init__.py" for f in files)
+
+
+def test_published_manager_does_not_rebootstrap(tool_loader, monkeypatch, tmp_path):
+    host = tool_loader("scripts")
+    def unexpected(*args, **kwargs):
+        pytest.fail("published runtime should not trigger harness repair")
+    monkeypatch.setattr(host.subprocess, "run", unexpected)
+    args = SimpleNamespace(command="install", dry_run=False, dir=str(tmp_path))
+    assert host.ensure_manager(args) is None
 
 
 @pytest.mark.parametrize("tool", [
@@ -51,7 +58,7 @@ def test_legacy_uninstalled_before_forced_runtime_repair(tool_loader, monkeypatc
     host = tool_loader("scripts")
     req = tmp_path / "requirements"
     req.mkdir()
-    (req / "base.txt").write_text("pokanop-scriptkit>=1.3.0,<1.4\n")
+    (req / "base.txt").write_text("scripteer==2.0.0\n")
     calls = []
     monkeypatch.setattr(host, "ensure_venv", lambda _: None)
     system = host.platform.system()

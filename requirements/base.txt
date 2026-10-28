@@ -1,4 +1,4 @@
 -c runtime-constraints.txt
-pokanop-scriptkit>=1.5.0,<1.6
+scripteer==2.0.0
 rich>=13.9.4,<14
 requests

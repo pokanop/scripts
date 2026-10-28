@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-voxtract — Voice Extract Tool  v3.2.0
+voxtract — Voice Extract Tool  v3.2.1
 Extract and isolate speech from video and audio across multiple sources.
 
 Sources: YouTube, Spotify, Jellyfin, Plex, podcasts (RSS), HTTP URLs, local files/directories.
@@ -64,7 +64,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
-__version__ = "3.2.0"
+__version__ = "3.2.1"
 
 # Brand identity — used for --help, --version, and runtime banners.
 ICON = "🌊"
@@ -105,11 +105,11 @@ LOUDNESS_RANGE = float(os.environ.get("VOXTRACT_LRA", "11"))         # Loudness 
 LOUDNESS_PEAK = float(os.environ.get("VOXTRACT_PEAK", "-1.5"))       # True peak cap (dBTP)
 
 # ---------------------------------------------------------------------------
-# UI / Styling  (backed by the shared scriptkit library)
+# UI / Styling  (backed by the shared scripteer library)
 # ---------------------------------------------------------------------------
 
-import scriptkit as sk
-from scriptkit.style import (
+import scripteer as sk
+from scripteer.style import (
     BOLD as _BOLD, DIM as _DIM, RED as _RED, GREEN as _GREEN,
     YELLOW as _YELLOW, CYAN as _CYAN,
 )

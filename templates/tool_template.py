@@ -11,7 +11,7 @@ This is the canonical scaffold for a new pokanop/scripts tool. To create one:
 
 Everything visual or structural (color, icons, messages, tables, progress,
 config, subprocess, prompts, the doctor report, the run/dispatch lifecycle, and
-error handling) comes from the shared `scriptkit` library so the tool matches
+error handling) comes from the shared `scripteer` library so the tool matches
 the rest of the toolkit for free.
 """
 
@@ -23,12 +23,12 @@ import sys
 from pathlib import Path
 
 # Installed external runtime; no source-tree or working-directory bootstrap.
-import scriptkit as sk
+import scripteer as sk
 
 __version__ = "0.1.0"
 
 # Brand identity — one house style for --help, --version, and runtime banners.
-# Pick a distinct emoji; keep the tagline short. See docs/scriptkit.md.
+# Pick a distinct emoji; keep the tagline short. See docs/scripteer.md.
 ICON = "🧰"
 TAGLINE = "one-line description"
 

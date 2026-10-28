@@ -1,6 +1,6 @@
 """Multi-tool migration boundary: stage privately, then publish one routing marker.
 
-ScriptKit manages each tool's environments, receipts, validation and smoke tests.
+Scripteer manages each tool's environments, receipts, validation and smoke tests.
 This adapter only coordinates the legacy public-wrapper/marker handoff. No old
 venv or user configuration is modified or removed.
 """
@@ -54,7 +54,7 @@ def wrapper(root: Path, name: str) -> bytes:
         for part in (python, dispatcher, str(root), name):
             if any(c in part for c in '%!"\r\n'):
                 raise ValueError("unsafe Windows launcher path")
-        from scriptkit.bootstrap import cmd_launcher
+        from scripteer.bootstrap import cmd_launcher
         return cmd_launcher(python, root / ".scripts-state/launch" / (name + ".py"), utf8=True).encode()
     args = " ".join(shlex.quote(s) for s in (python, "-I", dispatcher, str(root), name))
     return f'#!/bin/sh\nexec {args} "$@"\n'.encode()
@@ -122,7 +122,7 @@ def preview(root: Path, bin_dir: Path, names: list[str]) -> dict:
 
 def install(root: Path, bin_dir: Path, names: list[str], *, legacy_wrapper,
             prepare_tool=None, installer_type=None, checkpoint=lambda phase: None) -> dict:
-    from scriptkit.manager import Installer, storage
+    from scripteer.manager import Installer, storage
     from .locks import POLICY, prepare
     prepare_tool = prepare_tool or prepare
     installer_type = installer_type or Installer
@@ -223,7 +223,7 @@ def install(root: Path, bin_dir: Path, names: list[str], *, legacy_wrapper,
 
 
 def rollback(root: Path, bin_dir: Path) -> None:
-    from scriptkit.manager import Installer, storage
+    from scripteer.manager import Installer, storage
     check_paths(root, bin_dir)
     with storage.locked(root / ".scripts-state"):
         current = marker(root)
@@ -245,7 +245,7 @@ def rollback(root: Path, bin_dir: Path) -> None:
 
 
 def uninstall(root: Path, bin_dir: Path, names: list[str], *, legacy_wrapper=None) -> None:
-    from scriptkit.manager import storage
+    from scripteer.manager import storage
     check_paths(root, bin_dir)
     with storage.locked(root / ".scripts-state"):
         old = marker(root)

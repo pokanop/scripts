@@ -56,7 +56,7 @@ def rehearse_used_clone(work: Path, env: dict[str, str]) -> None:
             run("bash", clone / "install.sh", "--in-place", "--bin-dir", bindir,
                 "--no-path", cwd=work, env={**env, "SCRIPTS_PYTHON": str(bare_py)})
         assert not (clone / "scriptkit").exists(), "orphaned bytecode was not pruned"
-        run(python(clone / "venv"), "-I", "-c", "import scriptkit; assert scriptkit.__file__", cwd=work, env=env)
+        run(python(clone / "venv"), "-I", "-c", "import scripteer; assert scripteer.__file__", cwd=work, env=env)
 
 
 def main() -> None:
@@ -77,7 +77,7 @@ def main() -> None:
         for source in (old, ROOT):
             run(sys.executable, "-m", "pip", "wheel", "--no-deps", "-w", wheels, source, cwd=work, env=env)
         legacy_wheel = next(wheels.glob("pokanop_scripts-1.0.0-*.whl"))
-        new_wheel = next(wheels.glob("pokanop_scripts-1.2.0-*.whl"))
+        new_wheel = next(wheels.glob("pokanop_scripts-1.3.0-*.whl"))
         with zipfile.ZipFile(new_wheel) as zipped:
             assert not any(n.startswith("scriptkit/") for n in zipped.namelist())
 
@@ -113,7 +113,7 @@ def main() -> None:
                        "--bin-dir", str(bindir), "--no-path"]
         failed = subprocess.run(command, cwd=work, env=bootstrap_env, capture_output=True, text=True)
         assert failed.returncode != 0, "bootstrap swallowed installer failure"
-        run(py, "-I", "-c", "import scriptkit; assert scriptkit.__version__ == '1.5.0'", cwd=work, env=env)
+        run(py, "-I", "-c", "import scripteer; assert scripteer.__version__ == '2.0.0'", cwd=work, env=env)
         # A non-upgrade install must preserve already-satisfied base versions.
         run(py, "-m", "pip", "install", "requests==2.31.0", "urllib3==2.0.7", cwd=work, env=env)
         run(sys.executable, "-S", install / "scripts", "install", *common, cwd=work, env=env)
@@ -129,10 +129,8 @@ def main() -> None:
         run(py, "-m", "pip", "install", new_wheel, cwd=work, env=env)
         run(py, "-m", "pip", "check", cwd=work, env=env)
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
-        pin = next(r for r in metadata["project"]["dependencies"] if " @ " in r)
-        bad_hash = pin.split("#sha256=")[0] + "#sha256=" + "0" * 64
-        for requirements, expected in [([bad_hash], "HASHES"),
-                                       ([pin, "pokanop-scriptkit>=1.6,<2"], "ResolutionImpossible")]:
+        pin = next(r for r in metadata["project"]["dependencies"] if r.startswith("scripteer=="))
+        for requirements, expected in [([pin, "scripteer>=3"], "ResolutionImpossible")]:
             rejected = subprocess.run([str(py), "-m", "pip", "install", "--dry-run",
                                        "--ignore-installed", "--no-deps", *requirements],
                                       cwd=work, env=env, capture_output=True, text=True)
@@ -145,10 +143,10 @@ def main() -> None:
         run(sys.executable, "-S", install / "scripts", "install", *common, cwd=work, env=env)
         run(py, "-I", "-c", "from importlib.metadata import distributions; "
             "assert 'pokanop-scripts' not in [d.metadata['Name'] for d in distributions()]; "
-            "import scriptkit; assert scriptkit.__version__ == '1.5.0'", cwd=work, env=env)
+            "import scripteer; assert scripteer.__version__ == '2.0.0'", cwd=work, env=env)
 
-        # Interruption after uninstall: the runtime metadata survives, its files do
-        # not. A second bare-Python repair must not trust that stale metadata.
+        # Interruption after uninstall: repair remains rerunnable even after the
+        # legacy owner is gone. The renamed runtime has independent ownership.
         run(py, "-m", "pip", "install", "--no-deps", legacy_wheel, cwd=work, env=env)
         run(py, "-m", "pip", "uninstall", "-y", "pokanop-scripts", cwd=work, env=env)
         run(sys.executable, "-S", install / "scripts", "install", *common, cwd=work, env=env)
@@ -159,11 +157,11 @@ def main() -> None:
         # Old editable ownership uses a finder instead of listing runtime files.
         run(py, "-m", "pip", "install", "--no-deps", "-e", old, cwd=work, env=env)
         run(sys.executable, "-S", install / "scripts", "install", *common, cwd=work, env=env)
-        run(py, "-I", "-c", "import scriptkit; from pathlib import Path; "
-            f"assert not Path(scriptkit.__file__).is_relative_to({str(old)!r})", cwd=work, env=env)
+        run(py, "-I", "-c", "import scripteer; from pathlib import Path; "
+            f"assert not Path(scripteer.__file__).is_relative_to({str(old)!r})", cwd=work, env=env)
 
         # Roll back BOTH ownership and source without changing install/bin paths.
-        run(py, "-m", "pip", "uninstall", "-y", "pokanop-scriptkit", "pokanop-scripts", cwd=work, env=env)
+        run(py, "-m", "pip", "uninstall", "-y", "scripteer", "pokanop-scripts", cwd=work, env=env)
         shutil.copytree(old, install, dirs_exist_ok=True)
         run(py, "-m", "pip", "install", "--no-deps", legacy_wheel, cwd=work, env=env)
         run(py, "-I", "-c", "import scriptkit; from importlib.metadata import version; "

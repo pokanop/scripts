@@ -1,10 +1,10 @@
-"""Tests for scriptkit.console — message routing, prompts, formatting."""
+"""Tests for scripteer.console — message routing, prompts, formatting."""
 
 import builtins
 
 import pytest
 
-import scriptkit.console as console
+import scripteer.console as console
 
 
 def test_success_to_stdout(no_color, capsys):
@@ -30,7 +30,7 @@ def test_warning_and_info(no_color, capsys):
 
 
 def test_success_renders_rich_markup(capsys):
-    import scriptkit.style as style
+    import scripteer.style as style
 
     style.set_color(True)
     console.success("done [dim](1.2.3)[/dim]")
@@ -41,7 +41,7 @@ def test_success_renders_rich_markup(capsys):
 
 
 def test_info_renders_rich_markup(capsys):
-    import scriptkit.style as style
+    import scripteer.style as style
 
     style.set_color(True)
     console.info("run [bold]aikit update[/bold]")
@@ -86,7 +86,7 @@ def test_header(no_color, capsys):
 
 
 def test_color_codes_present_when_enabled(capsys):
-    import scriptkit.style as style
+    import scripteer.style as style
 
     style.set_color(True)
     console.success("x")

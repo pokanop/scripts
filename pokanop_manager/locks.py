@@ -1,4 +1,4 @@
-"""Pip is the resolver/builder; ScriptKit owns lock validation and installation.
+"""Pip is the resolver/builder; Scripteer owns lock validation and installation.
 
 Resolution is an explicit preparation step. Every resulting wheel and legacy
 bundle is frozen in a content-addressed snapshot before any environment is staged.
@@ -16,10 +16,10 @@ import zipfile
 from email.parser import BytesParser
 from pathlib import Path
 
-from scriptkit.contracts import (Artifact, CatalogRelease, CommandSpec, DependencyLock,
+from scripteer.contracts import (Artifact, CatalogRelease, CommandSpec, DependencyLock,
                                 LockedPackage, Platform, PythonRequirement, ToolRelease, ToolSpec)
-from scriptkit.contracts.catalog import InstallPlan, Registry, ResolvedPlan
-from scriptkit.contracts.artifacts import ArtifactPolicy
+from scripteer.contracts.catalog import InstallPlan, Registry, ResolvedPlan
+from scripteer.contracts.artifacts import ArtifactPolicy
 
 POLICY = ArtifactPolicy(max_archive_bytes=2 * 1024**3, max_expanded_bytes=8 * 1024**3,
                         max_entries=100000, command_timeout=3600,
@@ -60,7 +60,7 @@ def bundle(root: Path, name: str, item: dict) -> tuple[ToolSpec, bytes]:
             "sys.stdout.reconfigure(encoding='utf-8')\n"
             "sys.stderr.reconfigure(encoding='utf-8')\n"
             f"from {module} import main as tool_main\n"
-            "from scriptkit import run_cli\n"
+            "from scripteer import run_cli\n"
             "def main():\n    return run_cli(tool_main)\n").encode()}
     if spec.name != name:
         raise ValueError("registered name differs from tool spec")

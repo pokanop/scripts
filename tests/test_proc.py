@@ -1,12 +1,12 @@
-"""Tests for scriptkit.proc — subprocess wrapper with graceful failures."""
+"""Tests for scripteer.proc — subprocess wrapper with graceful failures."""
 
 import subprocess
 import sys
 
 import pytest
 
-import scriptkit.proc as proc
-from scriptkit.cli import CliError
+import scripteer.proc as proc
+from scripteer.cli import CliError
 
 
 def test_run_success():
